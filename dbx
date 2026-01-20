@@ -1,0 +1,782 @@
+#!/usr/bin/env bash
+#
+# dbx - Database backup and restore utility
+# Uses Docker containers for pg_dump/mysqldump (no local install needed)
+# Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
+#
+# Usage:
+#   dbx backup <host> <database>
+#   dbx restore <host>/<database>/latest [--name <name>]
+#   dbx restore <backup-file> [--name <name>]
+#   dbx list [host] [database]
+#   dbx clean [--keep N]
+#   dbx config edit|show|init
+#   dbx vault set|get|list|delete <host>
+#   dbx tunnel <host> [--keep]
+#   dbx query <host> [database]
+#
+
+set -euo pipefail
+
+# ============================================================================
+# Source library modules
+# ============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$SCRIPT_DIR/lib"
+
+source "$LIB_DIR/core.sh"
+source "$LIB_DIR/tunnel.sh"
+source "$LIB_DIR/postgres.sh"
+source "$LIB_DIR/mysql.sh"
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+cmd_backup() {
+  local host=""
+  local database=""
+  local verbose=false
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -v|--verbose)
+        verbose=true
+        shift
+        ;;
+      -*)
+        die "Unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$host" ]]; then
+          host="$1"
+        elif [[ -z "$database" ]]; then
+          database="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -z "$host" ]] && die "Usage: db backup [-v] <host> <database>"
+  [[ -z "$database" ]] && die "Usage: db backup [-v] <host> <database>"
+
+  require_config
+  require_jq
+  require_docker
+
+  local host_config
+  host_config=$(get_host_config "$host")
+  [[ -z "$host_config" ]] && die "Host '$host' not found in config"
+
+  # Create SSH tunnel if configured
+  if has_ssh_tunnel "$host"; then
+    create_ssh_tunnel "$host"
+  fi
+
+  local db_type
+  db_type=$(get_db_type "$host")
+
+  # Create backup directory
+  local backup_dir="$DATA_DIR/$host/$database"
+  mkdir -p "$backup_dir"
+
+  # Generate filename
+  local ts
+  ts=$(timestamp)
+  local backup_file="$backup_dir/${database}_${ts}.sql.zst"
+  local meta_file="$backup_dir/${database}_${ts}.meta.json"
+
+  local start_time
+  start_time=$(date +%s)
+
+  case "$db_type" in
+    postgres|postgresql)
+      pg_backup "$host" "$database" "$backup_file" "$verbose"
+      ;;
+    mysql|mariadb)
+      mysql_backup "$host" "$database" "$backup_file" "$verbose"
+      ;;
+    *)
+      die "Unknown database type: $db_type"
+      ;;
+  esac
+
+  local end_time duration file_size
+  end_time=$(date +%s)
+  duration=$((end_time - start_time))
+  file_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file")
+
+  # Write metadata
+  local excluded_json
+  excluded_json=$(get_excluded_tables "$host" "$database" | jq -R -s 'split("\n") | map(select(. != ""))')
+
+  cat > "$meta_file" <<EOF
+{
+  "database": "$database",
+  "host": "$host",
+  "type": "$db_type",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "filename": "$(basename "$backup_file")",
+  "size_bytes": $file_size,
+  "size_human": "$(human_size "$file_size")",
+  "duration_seconds": $duration,
+  "excluded_tables": $excluded_json
+}
+EOF
+
+  echo ""
+  log_success "Backup saved to: $backup_file"
+  log_info "Size: $(human_size "$file_size") | Duration: ${duration}s"
+}
+
+cmd_restore() {
+  local source="${1:-}"
+  local target_name=""
+
+  shift || true
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name|-n)
+        target_name="$2"
+        shift 2
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  require_config
+  require_jq
+  require_docker
+
+  local backup_file=""
+  local host=""
+  local database=""
+
+  # Fuzzy selection if no source provided or just a host
+  if [[ -z "$source" ]] || { [[ -n "$source" ]] && [[ ! -f "$source" ]] && [[ "$source" != */* ]]; }; then
+    if ! command -v fzf &>/dev/null; then
+      die "Usage: db restore <host>/<database>/latest [--name <name>]\n       Install fzf for interactive selection"
+    fi
+
+    # Build search path
+    local search_dir="$DATA_DIR"
+    [[ -n "$source" ]] && search_dir="$DATA_DIR/$source"
+
+    if [[ ! -d "$search_dir" ]]; then
+      die "No backups found in: $search_dir"
+    fi
+
+    # Find all backup files
+    local backups
+    backups=$(find "$search_dir" -type f \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" \) 2>/dev/null | sort -r)
+
+    if [[ -z "$backups" ]]; then
+      die "No backup files found in: $search_dir"
+    fi
+
+    # Format for fzf: show relative path, size, date
+    local formatted
+    formatted=$(echo "$backups" | while read -r f; do
+      local rel_path="${f#$DATA_DIR/}"
+      local size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+      local date=$(ls -l "$f" 2>/dev/null | awk '{print $6, $7, $8}')
+      printf "%-60s %8s  %s\n" "$rel_path" "$size" "$date"
+    done)
+
+    # Run fzf
+    local selected
+    selected=$(echo "$formatted" | fzf \
+      --header="Select backup to restore (ESC to cancel)" \
+      --prompt="Restore> " \
+      --height=80% \
+      --layout=reverse \
+      --preview="echo 'File: {1}'; echo ''; zstd -dcq '$DATA_DIR/{1}' 2>/dev/null | head -30 || gzip -dc '$DATA_DIR/{1}' 2>/dev/null | head -30 || head -30 '$DATA_DIR/{1}'" \
+      --preview-window=right:50%:wrap \
+      | awk '{print $1}')
+
+    if [[ -z "$selected" ]]; then
+      log_info "Selection cancelled"
+      return 0
+    fi
+
+    backup_file="$DATA_DIR/$selected"
+    # Extract host/database from path
+    host=$(echo "$selected" | cut -d'/' -f1)
+    database=$(echo "$selected" | cut -d'/' -f2)
+  # Parse source - could be path like "production/myapp/latest" or actual file
+  elif [[ -f "$source" ]]; then
+    backup_file="$source"
+    # Try to extract host/database from path
+    if [[ "$source" == "$DATA_DIR"/* ]]; then
+      local rel_path="${source#$DATA_DIR/}"
+      host=$(echo "$rel_path" | cut -d'/' -f1)
+      database=$(echo "$rel_path" | cut -d'/' -f2)
+    fi
+  elif [[ "$source" == */* ]]; then
+    # Parse as host/database/selector
+    host=$(echo "$source" | cut -d'/' -f1)
+    database=$(echo "$source" | cut -d'/' -f2)
+    local selector=$(echo "$source" | cut -d'/' -f3)
+    selector="${selector:-latest}"
+
+    local backup_dir="$DATA_DIR/$host/$database"
+    [[ ! -d "$backup_dir" ]] && die "No backups found for $host/$database"
+
+    if [[ "$selector" == "latest" ]]; then
+      backup_file=$(ls -t "$backup_dir"/*.sql.zst 2>/dev/null | head -1)
+    else
+      backup_file="$backup_dir/$selector"
+    fi
+
+    [[ ! -f "$backup_file" ]] && die "Backup not found: $backup_file"
+  else
+    die "Invalid source: $source"
+  fi
+
+  [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
+
+  # Determine target database name
+  if [[ -z "$target_name" ]]; then
+    local base_name="${database:-$(basename "$backup_file" .sql.zst)}"
+    base_name="${base_name%%_[0-9]*}"  # Remove timestamp suffix
+    local date_suffix
+    date_suffix=$(date +"%Y%m%d")
+
+    # Find next available version
+    local version=1
+    while true; do
+      target_name="${base_name}_v${version}_${date_suffix}"
+      # Check if database exists (try both postgres and mysql)
+      if docker exec "$POSTGRES_CONTAINER" psql -U postgres -lqt 2>/dev/null | grep -qw "$target_name"; then
+        ((version++))
+      elif docker exec "$MYSQL_CONTAINER" mysql -u root -e "SHOW DATABASES" 2>/dev/null | grep -qw "$target_name"; then
+        ((version++))
+      else
+        break
+      fi
+    done
+  fi
+
+  # Determine database type from metadata or config
+  local db_type=""
+  local meta_file="${backup_file%.sql.zst}.meta.json"
+  if [[ -f "$meta_file" ]]; then
+    db_type=$(jq -r '.type' "$meta_file")
+  elif [[ -n "$host" ]]; then
+    db_type=$(get_db_type "$host")
+  else
+    # Try to detect from file content
+    if decompress "$backup_file" | head -c 100 | grep -q "PostgreSQL"; then
+      db_type="postgres"
+    else
+      db_type="mysql"
+    fi
+  fi
+
+  log_info "Restoring: $(basename "$backup_file")"
+  log_info "Target database: $target_name"
+
+  case "$db_type" in
+    postgres|postgresql)
+      pg_restore_backup "$backup_file" "$target_name" 4
+      ;;
+    mysql|mariadb)
+      mysql_restore_backup "$backup_file" "$target_name"
+      ;;
+    *)
+      die "Unknown database type: $db_type"
+      ;;
+  esac
+
+  echo ""
+  log_success "Database restored as: $target_name"
+}
+
+cmd_list() {
+  local host="${1:-}"
+  local database="${2:-}"
+
+  require_jq
+
+  if [[ -n "$host" && -n "$database" ]]; then
+    # List backups for specific host/database
+    local backup_dir="$DATA_DIR/$host/$database"
+    if [[ ! -d "$backup_dir" ]]; then
+      log_warn "No backups found for $host/$database"
+      return
+    fi
+
+    echo -e "${BOLD}Backups for $host/$database:${NC}"
+    echo ""
+    printf "%-40s %10s %12s\n" "FILENAME" "SIZE" "DATE"
+    printf "%-40s %10s %12s\n" "--------" "----" "----"
+
+    for meta in "$backup_dir"/*.meta.json; do
+      [[ ! -f "$meta" ]] && continue
+      local filename size_human timestamp
+      filename=$(jq -r '.filename' "$meta")
+      size_human=$(jq -r '.size_human' "$meta")
+      timestamp=$(jq -r '.timestamp' "$meta" | cut -d'T' -f1)
+      printf "%-40s %10s %12s\n" "$filename" "$size_human" "$timestamp"
+    done
+  elif [[ -n "$host" ]]; then
+    # List databases for host
+    local host_dir="$DATA_DIR/$host"
+    if [[ ! -d "$host_dir" ]]; then
+      log_warn "No backups found for host: $host"
+      return
+    fi
+
+    echo -e "${BOLD}Databases with backups on $host:${NC}"
+    for db_dir in "$host_dir"/*/; do
+      [[ -d "$db_dir" ]] && echo "  $(basename "$db_dir")"
+    done
+  else
+    # List all hosts
+    if [[ ! -d "$DATA_DIR" ]]; then
+      log_warn "No backups found"
+      return
+    fi
+
+    echo -e "${BOLD}Available backup hosts:${NC}"
+    for host_dir in "$DATA_DIR"/*/; do
+      if [[ -d "$host_dir" ]]; then
+        local h=$(basename "$host_dir")
+        local count=$(find "$host_dir" -name "*.sql.zst" 2>/dev/null | wc -l | tr -d ' ')
+        echo "  $h ($count backups)"
+      fi
+    done
+  fi
+}
+
+cmd_clean() {
+  local keep=10
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --keep|-k)
+        keep="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  log_step "Cleaning old backups (keeping $keep per database)"
+
+  local total_removed=0
+  local total_freed=0
+
+  for host_dir in "$DATA_DIR"/*/; do
+    [[ ! -d "$host_dir" ]] && continue
+    for db_dir in "$host_dir"/*/; do
+      [[ ! -d "$db_dir" ]] && continue
+
+      local backups=()
+      while IFS= read -r f; do
+        [[ -n "$f" ]] && backups+=("$f")
+      done < <(ls -t "$db_dir"/*.sql.zst 2>/dev/null)
+
+      if [[ ${#backups[@]} -gt $keep ]]; then
+        local to_remove=("${backups[@]:$keep}")
+        for backup in "${to_remove[@]}"; do
+          local size
+          size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
+          total_freed=$((total_freed + size))
+          rm -f "$backup" "${backup%.sql.zst}.meta.json"
+          ((total_removed++))
+          log_info "Removed: $(basename "$backup")"
+        done
+      fi
+    done
+  done
+
+  if [[ $total_removed -gt 0 ]]; then
+    log_success "Removed $total_removed backups, freed $(human_size $total_freed)"
+  else
+    log_info "No old backups to remove"
+  fi
+}
+
+cmd_vault() {
+  local action="${1:-}"
+  local host="${2:-}"
+
+  case "$action" in
+    set)
+      [[ -z "$host" ]] && die "Usage: dbx vault set <host>"
+
+      require_config
+      require_jq
+
+      # Get host info from config
+      local db_host db_port db_user db_type
+      db_type=$(get_config_value ".hosts[\"$host\"].type")
+      db_host=$(get_config_value ".hosts[\"$host\"].host")
+      db_port=$(get_config_value ".hosts[\"$host\"].port")
+      db_user=$(get_config_value ".hosts[\"$host\"].user")
+
+      [[ -z "$db_type" ]] && die "Host '$host' not found in config. Run: dbx config edit"
+
+      echo -e "${BOLD}Setting credentials for: $host${NC}"
+      echo "  Type: $db_type"
+      echo "  Host: $db_host:$db_port"
+      echo "  User: $db_user"
+      echo ""
+
+      # Prompt for password
+      echo -n "Password: "
+      read -rs password
+      echo ""
+
+      if [[ -z "$password" ]]; then
+        die "Password cannot be empty"
+      fi
+
+      # Store in keychain
+      keychain_set "$host" "$password"
+      log_success "Credentials stored in macOS Keychain for: $host"
+      log_info "Password will be retrieved automatically during backup"
+      ;;
+
+    get)
+      [[ -z "$host" ]] && die "Usage: dbx vault get <host>"
+      local pass
+      pass=$(keychain_get "$host" 2>/dev/null || true)
+      if [[ -n "$pass" ]]; then
+        echo "$pass"
+      else
+        die "No credentials found for: $host"
+      fi
+      ;;
+
+    delete|rm)
+      [[ -z "$host" ]] && die "Usage: dbx vault delete <host>"
+      if keychain_delete "$host"; then
+        log_success "Credentials removed for: $host"
+      else
+        log_warn "No credentials found for: $host"
+      fi
+      ;;
+
+    list|ls)
+      echo -e "${BOLD}Stored credentials:${NC}"
+      local hosts
+      hosts=$(keychain_list)
+      if [[ -n "$hosts" ]]; then
+        echo "$hosts" | while read -r h; do
+          echo "  $h"
+        done
+      else
+        echo "  (none)"
+      fi
+      ;;
+
+    *)
+      die "Usage: dbx vault <set|get|delete|list> [host]"
+      ;;
+  esac
+}
+
+cmd_config() {
+  local action="${1:-show}"
+
+  case "$action" in
+    init)
+      mkdir -p "$CONFIG_DIR"
+      if [[ -f "$CONFIG_FILE" ]]; then
+        log_warn "Config already exists: $CONFIG_FILE"
+        return
+      fi
+
+      cat > "$CONFIG_FILE" <<'EOF'
+{
+  "hosts": {
+    "prd-mysql": {
+      "type": "mysql",
+      "user": "backup_user",
+      "definer_handling": "strip",
+      "ssh_tunnel": {
+        "jump_host": "prd-mysql",
+        "target_host": "localhost",
+        "target_port": 3306
+      },
+      "databases": {
+        "app_production": {
+          "exclude_data": ["sessions", "cache", "jobs", "failed_jobs"]
+        }
+      }
+    },
+    "prd-rds": {
+      "type": "mysql",
+      "user": "backup_user",
+      "definer_handling": "strip",
+      "ssh_tunnel": {
+        "jump_host": "prd-swarm-00",
+        "target_host": "your-db.cluster-xxx.us-east-1.rds.amazonaws.com",
+        "target_port": 3306
+      },
+      "databases": {
+        "production": {
+          "exclude_data": ["audit_logs", "sessions"]
+        }
+      }
+    },
+    "local-postgres": {
+      "type": "postgres",
+      "host": "localhost",
+      "port": 5432,
+      "user": "postgres",
+      "databases": {
+        "myapp_dev": {}
+      }
+    }
+  },
+  "defaults": {
+    "compression": "zstd",
+    "compression_level": 3,
+    "parallel_jobs": 4,
+    "keep_backups": 10,
+    "definer_handling": "strip"
+  }
+}
+EOF
+      log_success "Config created: $CONFIG_FILE"
+      log_info "Edit it with: dbx config edit"
+      log_info "Store passwords with: dbx vault set <host>"
+      ;;
+
+    edit)
+      require_config
+      "${EDITOR:-vim}" "$CONFIG_FILE"
+      ;;
+
+    show)
+      require_config
+      require_jq
+      jq '.' "$CONFIG_FILE"
+      ;;
+
+    *)
+      die "Unknown config action: $action (use: init, edit, show)"
+      ;;
+  esac
+}
+
+cmd_analyze() {
+  local host="${1:-}"
+  local database="${2:-}"
+
+  [[ -z "$host" ]] && die "Usage: db analyze <host> <database>"
+  [[ -z "$database" ]] && die "Usage: db analyze <host> <database>"
+
+  require_config
+  require_jq
+  require_docker
+
+  local host_config
+  host_config=$(get_host_config "$host")
+  [[ -z "$host_config" ]] && die "Host '$host' not found in config"
+
+  # Create SSH tunnel if configured
+  if has_ssh_tunnel "$host"; then
+    create_ssh_tunnel "$host"
+  fi
+
+  local db_type
+  db_type=$(get_db_type "$host")
+
+  case "$db_type" in
+    mysql|mariadb)
+      analyze_mysql "$host" "$database"
+      ;;
+    postgres|postgresql)
+      analyze_postgres "$host" "$database"
+      ;;
+    *)
+      die "Unknown database type: $db_type"
+      ;;
+  esac
+}
+
+cmd_query() {
+  local host="${1:-}"
+  local database="${2:-}"
+
+  [[ -z "$host" ]] && die "Usage: db query <host> [database]"
+
+  require_config
+  require_jq
+  require_docker
+
+  local host_config
+  host_config=$(get_host_config "$host")
+  [[ -z "$host_config" ]] && die "Host '$host' not found in config"
+
+  # Create SSH tunnel if configured
+  if has_ssh_tunnel "$host"; then
+    create_ssh_tunnel "$host"
+  fi
+
+  local db_type db_host db_port db_user db_pass
+  db_type=$(get_db_type "$host")
+  db_host=$(get_effective_host "$host")
+  db_port=$(get_effective_port "$host")
+  db_user=$(get_config_value ".hosts[\"$host\"].user")
+  db_pass=$(get_password "$host")
+
+  log_step "Connecting to $host ($db_type)"
+  log_info "Host: $db_host:$db_port, User: $db_user"
+  [[ -n "$database" ]] && log_info "Database: $database"
+
+  case "$db_type" in
+    postgres|postgresql)
+      require_container "$POSTGRES_CONTAINER"
+      local db_arg=""
+      [[ -n "$database" ]] && db_arg="-d $database"
+      docker exec -it -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" $db_arg
+      ;;
+    mysql|mariadb)
+      require_container "$MYSQL_CONTAINER"
+      local db_arg=""
+      [[ -n "$database" ]] && db_arg="$database"
+      docker exec -it "$MYSQL_CONTAINER" \
+        mysql -h "$db_host" -P "$db_port" -u "$db_user" -p"$db_pass" $db_arg
+      ;;
+    *)
+      die "Unknown database type: $db_type"
+      ;;
+  esac
+}
+
+cmd_help() {
+  cat <<EOF
+${BOLD}dbx${NC} - Database backup and restore utility
+
+${BOLD}USAGE:${NC}
+  dbx <command> [options]
+
+${BOLD}COMMANDS:${NC}
+  backup [-v] <host> <database>  Backup a remote database (-v for verbose)
+  restore <source> [--name N]  Restore a backup to local container
+  query <host> [database]      Open interactive shell to remote database
+  analyze <host> <database>    Interactive table analysis & exclusion picker
+  list [host] [database]       List available backups
+  clean [--keep N]             Remove old backups (default: keep 10)
+  vault set|get|delete|list    Manage credentials (macOS Keychain)
+  config init|edit|show        Manage configuration
+
+${BOLD}EXAMPLES:${NC}
+  # Setup
+  dbx config init              # Create config template
+  dbx config edit              # Add your hosts (AWS, RDS, etc.)
+  dbx vault set prd-mysql      # Store password in Keychain
+
+  # Backup from AWS (auto SSH tunnel)
+  dbx backup prd-mysql app_production
+  dbx backup prd-rds production
+
+  # Restore to local container
+  dbx restore prd-mysql/app_production/latest
+  dbx restore prd-rds/production/latest --name prod_copy
+
+  # Interactive query session (auto SSH tunnel)
+  dbx query prd-mysql                   # Connect to host
+  dbx query prd-mysql app_production    # Connect to specific database
+
+  # Manage
+  dbx list                     # Show all hosts
+  dbx list prd-mysql           # Show databases for host
+  dbx clean --keep 5           # Keep only 5 latest per database
+
+${BOLD}CONFIG STRUCTURE:${NC}
+  {
+    "hosts": {
+      "prd-mysql": {
+        "type": "mysql",
+        "user": "backup_user",
+        "definer_handling": "strip",    // strip|current_user|keep
+        "ssh_tunnel": {
+          "jump_host": "prd-mysql",     // SSH config name
+          "target_host": "localhost",   // DB host from jump perspective
+          "target_port": 3306
+        },
+        "databases": {
+          "app_production": {
+            "exclude_data": ["sessions", "cache", "jobs"]
+          }
+        }
+      }
+    }
+  }
+
+${BOLD}FEATURES:${NC}
+  - SSH tunnels: Auto-creates tunnel for remote DBs, cleans up on exit
+  - DEFINER strip: Views/triggers work locally (no permission errors)
+  - Exclude tables: Dump schema but skip data for large/sensitive tables
+  - Keychain: Secure credential storage (macOS Keychain)
+
+${BOLD}STORAGE:${NC}
+  Backups:  ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst
+  Config:   ~/.config/dbx/config.json
+  Secrets:  macOS Keychain (service: dbx)
+
+${BOLD}REQUIREMENTS:${NC}
+  - docker (for pg_dump/mysqldump containers)
+  - jq, zstd, ssh
+EOF
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    backup)
+      cmd_backup "$@"
+      ;;
+    restore)
+      cmd_restore "$@"
+      ;;
+    analyze|stats)
+      cmd_analyze "$@"
+      ;;
+    query|q|shell)
+      cmd_query "$@"
+      ;;
+    list|ls)
+      cmd_list "$@"
+      ;;
+    clean|prune)
+      cmd_clean "$@"
+      ;;
+    vault)
+      cmd_vault "$@"
+      ;;
+    config|cfg)
+      cmd_config "$@"
+      ;;
+    help|--help|-h)
+      cmd_help
+      ;;
+    *)
+      die "Unknown command: $cmd (run 'dbx help' for usage)"
+      ;;
+  esac
+}
+
+main "$@"
