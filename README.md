@@ -77,9 +77,36 @@ Config lives at `~/.config/dbx/config.json`:
 }
 ```
 
+## How Restore Works
+
+Restores go to **local Docker containers** that dbx manages automatically:
+
+```bash
+# Restore creates a new database in a local container
+dbx restore production/myapp/latest
+
+# Restored as: myapp_v1_20240115 (auto-named to avoid conflicts)
+# Connect: psql -h localhost -p 5432 -U postgres myapp_v1_20240115
+```
+
+**Containers are auto-created** if they don't exist:
+- `postgres-dbx` - PostgreSQL 15 (port 5432)
+- `mysql-dbx` - MySQL 8.0 (port 3306)
+
+No setup required - just run `dbx restore` and it handles everything.
+
+### Custom container names
+
+Override with environment variables:
+```bash
+export DBX_POSTGRES_CONTAINER=my-postgres
+export DBX_MYSQL_CONTAINER=my-mysql
+```
+
 ## Features
 
 - **SSH Tunnels**: Auto-creates tunnel for remote DBs, cleans up on exit
+- **Auto Containers**: Creates local Docker DB containers on demand
 - **DEFINER Strip**: MySQL views/triggers work locally (no permission errors)
 - **Table Exclusions**: Dump schema but skip data for large/sensitive tables
 - **Compression**: zstd compression for fast, small backups

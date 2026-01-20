@@ -501,28 +501,28 @@ cmd_config() {
       cat > "$CONFIG_FILE" <<'EOF'
 {
   "hosts": {
-    "prd-mysql": {
+    "example-mysql": {
       "type": "mysql",
       "user": "backup_user",
       "definer_handling": "strip",
       "ssh_tunnel": {
-        "jump_host": "prd-mysql",
-        "target_host": "localhost",
+        "jump_host": "bastion-server",
+        "target_host": "mysql.internal",
         "target_port": 3306
       },
       "databases": {
-        "app_production": {
-          "exclude_data": ["sessions", "cache", "jobs", "failed_jobs"]
+        "myapp": {
+          "exclude_data": ["sessions", "cache", "jobs"]
         }
       }
     },
-    "prd-rds": {
+    "example-rds": {
       "type": "mysql",
-      "user": "backup_user",
+      "user": "admin",
       "definer_handling": "strip",
       "ssh_tunnel": {
-        "jump_host": "prd-swarm-00",
-        "target_host": "your-db.cluster-xxx.us-east-1.rds.amazonaws.com",
+        "jump_host": "bastion",
+        "target_host": "mydb.xxxx.us-east-1.rds.amazonaws.com",
         "target_port": 3306
       },
       "databases": {
@@ -531,13 +531,13 @@ cmd_config() {
         }
       }
     },
-    "local-postgres": {
+    "local": {
       "type": "postgres",
       "host": "localhost",
       "port": 5432,
       "user": "postgres",
       "databases": {
-        "myapp_dev": {}
+        "devdb": {}
       }
     }
   },
@@ -679,41 +679,40 @@ ${BOLD}COMMANDS:${NC}
 ${BOLD}EXAMPLES:${NC}
   # Setup
   dbx config init              # Create config template
-  dbx config edit              # Add your hosts (AWS, RDS, etc.)
-  dbx vault set prd-mysql      # Store password in Keychain
+  dbx config edit              # Add your hosts
+  dbx vault set production     # Store password securely
 
-  # Backup from AWS (auto SSH tunnel)
-  dbx backup prd-mysql app_production
-  dbx backup prd-rds production
+  # Backup (auto SSH tunnel if configured)
+  dbx backup production myapp
+  dbx backup staging myapp
 
   # Restore to local container
-  dbx restore prd-mysql/app_production/latest
-  dbx restore prd-rds/production/latest --name prod_copy
+  dbx restore production/myapp/latest
+  dbx restore staging/myapp/latest --name myapp_copy
 
-  # Interactive query session (auto SSH tunnel)
-  dbx query prd-mysql                   # Connect to host
-  dbx query prd-mysql app_production    # Connect to specific database
+  # Interactive query session
+  dbx query production                  # Connect to host
+  dbx query production myapp            # Connect to specific database
 
   # Manage
   dbx list                     # Show all hosts
-  dbx list prd-mysql           # Show databases for host
+  dbx list production          # Show databases for host
   dbx clean --keep 5           # Keep only 5 latest per database
 
 ${BOLD}CONFIG STRUCTURE:${NC}
   {
     "hosts": {
-      "prd-mysql": {
+      "production": {
         "type": "mysql",
         "user": "backup_user",
-        "definer_handling": "strip",    // strip|current_user|keep
         "ssh_tunnel": {
-          "jump_host": "prd-mysql",     // SSH config name
-          "target_host": "localhost",   // DB host from jump perspective
+          "jump_host": "bastion",        // SSH config host
+          "target_host": "db.internal",  // DB from bastion
           "target_port": 3306
         },
         "databases": {
-          "app_production": {
-            "exclude_data": ["sessions", "cache", "jobs"]
+          "myapp": {
+            "exclude_data": ["sessions", "cache"]
           }
         }
       }
