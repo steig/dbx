@@ -16,7 +16,9 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: '.'
-          severity: warning
+          severity: error
+          additional_files: 'dbx'
+          check_together: 'yes'
 
   test-install:
     name: Test Install
