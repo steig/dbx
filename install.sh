@@ -73,7 +73,10 @@ main() {
     sed -i "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"$LIB_DIR\"|" "$INSTALL_DIR/dbx"
   fi
 
-  success "Installed to $INSTALL_DIR/dbx"
+  # Extract and show version
+  local version
+  version=$(grep '^VERSION=' "$INSTALL_DIR/dbx" | cut -d'"' -f2)
+  success "Installed dbx $version to $INSTALL_DIR/dbx"
 
   # Check if install dir is in PATH
   if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
