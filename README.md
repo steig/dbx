@@ -4,20 +4,11 @@ Database backup and restore utility. Uses Docker for pg_dump/mysqldump (no local
 
 ## Install
 
-### Homebrew (macOS)
-
-```bash
-brew install steig/tap/dbx
-```
-
-### Script
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash
 ```
 
-### Manual
-
+Or clone manually:
 ```bash
 git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
