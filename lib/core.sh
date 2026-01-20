@@ -92,27 +92,31 @@ require_container() {
   # Doesn't exist - create it
   log_info "Creating container: $container"
   case "$container" in
-    postgres-shared)
-      docker run -d --name postgres-shared \
-        -e POSTGRES_PASSWORD="${DB_PG_PASSWORD:-devpassword}" \
-        postgres:15-alpine >/dev/null
+    postgres-dbx)
+      docker run -d --name postgres-dbx \
+        -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
+        -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
+        -e LANG=C.UTF-8 \
+        -p 5432:5432 \
+        postgres:17-alpine >/dev/null
       # Wait for postgres to be ready
       log_info "Waiting for PostgreSQL to initialize..."
       for i in {1..30}; do
-        if docker exec postgres-shared pg_isready -U postgres >/dev/null 2>&1; then
+        if docker exec postgres-dbx pg_isready -U postgres >/dev/null 2>&1; then
           break
         fi
         sleep 1
       done
       ;;
-    mysql-shared)
-      docker run -d --name mysql-shared \
-        -e MYSQL_ROOT_PASSWORD="${DB_MYSQL_PASSWORD:-devpassword}" \
+    mysql-dbx)
+      docker run -d --name mysql-dbx \
+        -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
+        -p 3306:3306 \
         mysql:8.0 >/dev/null
       # Wait for mysql to be ready
       log_info "Waiting for MySQL to initialize..."
       for i in {1..60}; do
-        if docker exec mysql-shared mysqladmin ping -h localhost -u root -p"${DB_MYSQL_PASSWORD:-devpassword}" >/dev/null 2>&1; then
+        if docker exec mysql-dbx mysqladmin ping -h localhost -u root -p"${DBX_MYSQL_PASSWORD:-devpassword}" >/dev/null 2>&1; then
           break
         fi
         sleep 1

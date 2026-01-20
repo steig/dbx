@@ -90,7 +90,7 @@ dbx restore production/myapp/latest
 ```
 
 **Containers are auto-created** if they don't exist:
-- `postgres-dbx` - PostgreSQL 15 (port 5432)
+- `postgres-dbx` - PostgreSQL 17 with UTF-8 (port 5432)
 - `mysql-dbx` - MySQL 8.0 (port 3306)
 
 No setup required - just run `dbx restore` and it handles everything.
