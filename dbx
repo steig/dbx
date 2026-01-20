@@ -60,12 +60,20 @@ cmd_backup() {
     esac
   done
 
-  [[ -z "$host" ]] && die "Usage: db backup [-v] <host> <database>"
-  [[ -z "$database" ]] && die "Usage: db backup [-v] <host> <database>"
+  [[ -z "$host" ]] && die "Usage: dbx backup [-v] <host> <database>"
+  [[ -z "$database" ]] && die "Usage: dbx backup [-v] <host> <database>"
 
   require_config
   require_jq
   require_docker
+
+  # Check encryption requirements
+  local encrypt=false
+  if is_encryption_enabled; then
+    require_gpg
+    encrypt=true
+    log_info "Encryption enabled"
+  fi
 
   local host_config
   host_config=$(get_host_config "$host")
@@ -104,6 +112,14 @@ cmd_backup() {
       ;;
   esac
 
+  # Encrypt if enabled
+  if [[ "$encrypt" == "true" ]]; then
+    log_info "Encrypting backup..."
+    encrypt_stream < "$backup_file" > "${backup_file}.gpg"
+    rm -f "$backup_file"
+    backup_file="${backup_file}.gpg"
+  fi
+
   local end_time duration file_size
   end_time=$(date +%s)
   duration=$((end_time - start_time))
@@ -123,6 +139,7 @@ cmd_backup() {
   "size_bytes": $file_size,
   "size_human": "$(human_size "$file_size")",
   "duration_seconds": $duration,
+  "encrypted": $encrypt,
   "excluded_tables": $excluded_json
 }
 EOF
@@ -130,6 +147,7 @@ EOF
   echo ""
   log_success "Backup saved to: $backup_file"
   log_info "Size: $(human_size "$file_size") | Duration: ${duration}s"
+  [[ "$encrypt" == "true" ]] && log_info "Encrypted: AES-256"
 }
 
 cmd_restore() {
@@ -173,9 +191,9 @@ cmd_restore() {
       die "No backups found in: $search_dir"
     fi
 
-    # Find all backup files
+    # Find all backup files (including encrypted)
     local backups
-    backups=$(find "$search_dir" -type f \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" \) 2>/dev/null | sort -r)
+    backups=$(find "$search_dir" -type f \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" -o -name "*.sql.zst.gpg" -o -name "*.sql.gz.gpg" \) 2>/dev/null | sort -r)
 
     if [[ -z "$backups" ]]; then
       die "No backup files found in: $search_dir"
@@ -230,12 +248,13 @@ cmd_restore() {
     [[ ! -d "$backup_dir" ]] && die "No backups found for $host/$database"
 
     if [[ "$selector" == "latest" ]]; then
-      backup_file=$(ls -t "$backup_dir"/*.sql.zst 2>/dev/null | head -1)
+      # Find latest backup (encrypted or not)
+      backup_file=$(ls -t "$backup_dir"/*.sql.zst.gpg "$backup_dir"/*.sql.zst 2>/dev/null | head -1)
     else
       backup_file="$backup_dir/$selector"
     fi
 
-    [[ ! -f "$backup_file" ]] && die "Backup not found: $backup_file"
+    [[ -z "$backup_file" || ! -f "$backup_file" ]] && die "Backup not found: $backup_file"
   else
     die "Invalid source: $source"
   fi
@@ -244,7 +263,8 @@ cmd_restore() {
 
   # Determine target database name
   if [[ -z "$target_name" ]]; then
-    local base_name="${database:-$(basename "$backup_file" .sql.zst)}"
+    local base_name="${database:-$(basename "$backup_file" .sql.zst.gpg)}"
+    base_name="${base_name%.sql.zst}"  # Handle non-encrypted
     base_name="${base_name%%_[0-9]*}"  # Remove timestamp suffix
     local date_suffix
     date_suffix=$(date +"%Y%m%d")
@@ -474,15 +494,59 @@ cmd_vault() {
       hosts=$(keychain_list)
       if [[ -n "$hosts" ]]; then
         echo "$hosts" | while read -r h; do
+          [[ "$h" == "_dbx_encryption_key" ]] && continue
           echo "  $h"
         done
       else
         echo "  (none)"
       fi
+      # Check encryption key
+      if get_encryption_key &>/dev/null; then
+        echo ""
+        echo -e "${BOLD}Encryption:${NC}"
+        echo "  Key is set"
+      fi
+      ;;
+
+    set-encryption-key)
+      echo -e "${BOLD}Setting encryption key for backups${NC}"
+      echo ""
+      echo "This passphrase will be used to encrypt all backups."
+      echo "Store it safely - you cannot recover backups without it!"
+      echo ""
+
+      echo -n "Encryption passphrase: "
+      read -rs passphrase
+      echo ""
+
+      if [[ -z "$passphrase" ]]; then
+        die "Passphrase cannot be empty"
+      fi
+
+      echo -n "Confirm passphrase: "
+      read -rs passphrase_confirm
+      echo ""
+
+      if [[ "$passphrase" != "$passphrase_confirm" ]]; then
+        die "Passphrases do not match"
+      fi
+
+      set_encryption_key "$passphrase"
+      log_success "Encryption key stored"
+      log_info "Enable encryption in config: dbx config edit"
+      log_info "Set \"encryption\": true in defaults section"
+      ;;
+
+    delete-encryption-key)
+      if delete_encryption_key; then
+        log_success "Encryption key removed"
+      else
+        log_warn "No encryption key found"
+      fi
       ;;
 
     *)
-      die "Usage: dbx vault <set|get|delete|list> [host]"
+      die "Usage: dbx vault <set|get|delete|list|set-encryption-key|delete-encryption-key> [host]"
       ;;
   esac
 }
@@ -546,7 +610,8 @@ cmd_config() {
     "compression_level": 3,
     "parallel_jobs": 4,
     "keep_backups": 10,
-    "definer_handling": "strip"
+    "definer_handling": "strip",
+    "encryption": false
   }
 }
 EOF
@@ -673,7 +738,8 @@ ${BOLD}COMMANDS:${NC}
   analyze <host> <database>    Interactive table analysis & exclusion picker
   list [host] [database]       List available backups
   clean [--keep N]             Remove old backups (default: keep 10)
-  vault set|get|delete|list    Manage credentials (macOS Keychain)
+  vault set|get|delete|list    Manage host credentials
+  vault set-encryption-key     Set backup encryption passphrase
   config init|edit|show        Manage configuration
 
 ${BOLD}EXAMPLES:${NC}
@@ -681,6 +747,10 @@ ${BOLD}EXAMPLES:${NC}
   dbx config init              # Create config template
   dbx config edit              # Add your hosts
   dbx vault set production     # Store password securely
+
+  # Enable encryption (optional)
+  dbx vault set-encryption-key # Set encryption passphrase
+  # Then set "encryption": true in config
 
   # Backup (auto SSH tunnel if configured)
   dbx backup production myapp
@@ -721,18 +791,20 @@ ${BOLD}CONFIG STRUCTURE:${NC}
 
 ${BOLD}FEATURES:${NC}
   - SSH tunnels: Auto-creates tunnel for remote DBs, cleans up on exit
-  - DEFINER strip: Views/triggers work locally (no permission errors)
+  - Encryption: AES-256 encryption at rest (optional, via GPG)
+  - DEFINER strip: MySQL views/triggers work locally
   - Exclude tables: Dump schema but skip data for large/sensitive tables
-  - Keychain: Secure credential storage (macOS Keychain)
+  - Credential storage: macOS Keychain or Linux secret-tool
 
 ${BOLD}STORAGE:${NC}
-  Backups:  ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst
+  Backups:  ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.gpg]
   Config:   ~/.config/dbx/config.json
-  Secrets:  macOS Keychain (service: dbx)
+  Secrets:  macOS Keychain or Linux secret-tool (service: dbx)
 
 ${BOLD}REQUIREMENTS:${NC}
   - docker (for pg_dump/mysqldump containers)
   - jq, zstd, ssh
+  - gpg (optional, for encryption)
 EOF
 }
 

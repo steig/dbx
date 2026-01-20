@@ -242,6 +242,59 @@ get_password() {
 }
 
 # ============================================================================
+# Encryption Functions
+# ============================================================================
+
+ENCRYPTION_KEY_ACCOUNT="_dbx_encryption_key"
+
+get_encryption_key() {
+  keychain_get "$ENCRYPTION_KEY_ACCOUNT" 2>/dev/null
+}
+
+set_encryption_key() {
+  local key="$1"
+  keychain_set "$ENCRYPTION_KEY_ACCOUNT" "$key"
+}
+
+delete_encryption_key() {
+  keychain_delete "$ENCRYPTION_KEY_ACCOUNT"
+}
+
+is_encryption_enabled() {
+  local enabled
+  enabled=$(get_config_value ".defaults.encryption")
+  [[ "$enabled" == "true" ]]
+}
+
+require_gpg() {
+  command -v gpg &>/dev/null || die "gpg is required for encryption but not installed"
+}
+
+# Encrypt stdin to stdout using GPG symmetric encryption
+encrypt_stream() {
+  local passphrase
+  passphrase=$(get_encryption_key)
+  [[ -z "$passphrase" ]] && die "No encryption key set. Run: dbx vault set-encryption-key"
+
+  gpg --batch --yes --passphrase "$passphrase" --symmetric --cipher-algo AES256 -
+}
+
+# Decrypt stdin to stdout
+decrypt_stream() {
+  local passphrase
+  passphrase=$(get_encryption_key)
+  [[ -z "$passphrase" ]] && die "No encryption key set. Run: dbx vault set-encryption-key"
+
+  gpg --batch --yes --passphrase "$passphrase" --decrypt -
+}
+
+# Check if file is GPG encrypted
+is_encrypted() {
+  local file="$1"
+  [[ "$file" == *.gpg ]]
+}
+
+# ============================================================================
 # Utility Functions
 # ============================================================================
 
@@ -281,10 +334,26 @@ strip_definer() {
   esac
 }
 
-# Decompress based on file extension (.gz, .zst, or plain)
+# Decompress based on file extension (.gz, .zst, .gpg, or plain)
+# Handles encrypted files by decrypting first, then decompressing
 decompress() {
   local file="$1"
   case "$file" in
+    *.sql.zst.gpg)
+      # Encrypted + compressed
+      require_gpg
+      decrypt_stream < "$file" | zstd -d
+      ;;
+    *.sql.gz.gpg)
+      # Encrypted + gzip compressed
+      require_gpg
+      decrypt_stream < "$file" | gunzip
+      ;;
+    *.sql.gpg)
+      # Encrypted only
+      require_gpg
+      decrypt_stream < "$file"
+      ;;
     *.zst)
       zstd -d < "$file"
       ;;

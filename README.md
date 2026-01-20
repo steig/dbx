@@ -103,9 +103,27 @@ export DBX_POSTGRES_CONTAINER=my-postgres
 export DBX_MYSQL_CONTAINER=my-mysql
 ```
 
+## Encryption
+
+Enable encryption at rest for all backups:
+
+```bash
+# Set encryption passphrase (stored in Keychain/secret-tool)
+dbx vault set-encryption-key
+
+# Enable in config
+dbx config edit
+# Set "encryption": true in defaults section
+```
+
+Backups are encrypted with AES-256 via GPG. The passphrase is stored securely in your system keychain.
+
+**Important**: Store your passphrase safely - you cannot recover backups without it!
+
 ## Features
 
 - **SSH Tunnels**: Auto-creates tunnel for remote DBs, cleans up on exit
+- **Encryption**: AES-256 encryption at rest (optional, via GPG)
 - **Auto Containers**: Creates local Docker DB containers on demand
 - **DEFINER Strip**: MySQL views/triggers work locally (no permission errors)
 - **Table Exclusions**: Dump schema but skip data for large/sensitive tables
