@@ -4,6 +4,8 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
+VERSION="0.2.0"
+#
 # Usage:
 #   dbx backup <host> <database>
 #   dbx restore <host>/<database>/latest [--name <name>]
@@ -1096,6 +1098,9 @@ main() {
       ;;
     help|--help|-h)
       cmd_help
+      ;;
+    version|--version|-V)
+      echo "dbx $VERSION"
       ;;
     *)
       die "Unknown command: $cmd (run 'dbx help' for usage)"
