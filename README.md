@@ -29,8 +29,12 @@ export PATH="$PWD/dbx:$PATH"
 dbx config init
 dbx config edit
 
-# Store credentials securely (macOS Keychain)
+# Store credentials securely
 dbx vault set production
+
+# Enable encryption (recommended)
+dbx vault set-encryption-key
+# Then set "encryption": true in config
 
 # Backup
 dbx backup production myapp
