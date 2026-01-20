@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.4.1"
+VERSION="0.4.2"
 #
 # Usage:
 #   dbx backup <host> <database>
@@ -814,87 +814,72 @@ tui_dashboard() {
   tui_header
 
   # Hosts section
-  local hosts_content=""
   local hosts
-  hosts=$(list_hosts 2>/dev/null)
+  hosts=$(list_hosts 2>/dev/null || true)
 
   if [[ -z "$hosts" ]]; then
-    hosts_content="No hosts configured. Run: dbx config edit"
+    echo "No hosts configured. Run: dbx config edit" | gum style \
+      --border rounded --border-foreground 39 --padding "1 2" --width 60
   else
-    hosts_content=$(printf "%-18s %-10s %-10s %s\n" "HOST" "TYPE" "DATABASES" "BACKUPS")
-    hosts_content+=$'\n'"$(printf '%.0s─' {1..55})"
-    while IFS= read -r host; do
-      local htype dbs_count backup_count
-      htype=$(get_db_type "$host" 2>/dev/null)
-      dbs_count=$(list_databases_for_host "$host" 2>/dev/null | wc -l | tr -d ' ')
-      backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
-      hosts_content+=$'\n'"$(printf "%-18s %-10s %-10s %s" "$host" "${htype:-?}" "${dbs_count:-0} dbs" "${backup_count:-0} files")"
-    done <<< "$hosts"
+    {
+      printf "%-18s %-10s %-10s %s\n" "HOST" "TYPE" "DATABASES" "BACKUPS"
+      echo "───────────────────────────────────────────────────────"
+      while IFS= read -r host; do
+        local htype dbs_count backup_count
+        htype=$(get_db_type "$host" 2>/dev/null || echo "?")
+        dbs_count=$(list_databases_for_host "$host" 2>/dev/null | wc -l | tr -d ' ')
+        backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
+        printf "%-18s %-10s %-10s %s\n" "$host" "$htype" "${dbs_count:-0} dbs" "${backup_count:-0} files"
+      done <<< "$hosts"
+    } | gum style --border rounded --border-foreground 39 --padding "1 2" --width 60
   fi
 
-  echo "$hosts_content" | gum style \
-    --border rounded \
-    --border-foreground 39 \
-    --padding "1 2" \
-    --margin "0 0 1 0" \
-    --width 65
+  echo ""
 
   # Recent backups section
-  local backups_content=""
   if [[ -d "$DATA_DIR" ]]; then
-    local recent
-    recent=$(find "$DATA_DIR" -name "*.sql.zst*" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -5)
-    if [[ -n "$recent" ]]; then
-      backups_content=$(printf "%-40s %8s  %s\n" "BACKUP" "SIZE" "DATE")
-      backups_content+=$'\n'"$(printf '%.0s─' {1..55})"
-      while IFS= read -r f; do
-        [[ -z "$f" ]] && continue
-        local rel size bdate encrypted=""
-        rel="${f#$DATA_DIR/}"
-        size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
-        bdate=$(ls -l "$f" 2>/dev/null | awk '{print $6, $7}')
-        [[ "$f" == *.gpg ]] && encrypted=" 🔒"
-        backups_content+=$'\n'"$(printf "%-40s %8s  %s%s" "${rel:0:40}" "$size" "$bdate" "$encrypted")"
-      done <<< "$recent"
+    local backup_files
+    backup_files=$(find "$DATA_DIR" -name "*.sql.zst*" -type f 2>/dev/null | head -5)
+    if [[ -n "$backup_files" ]]; then
+      {
+        printf "%-38s %8s\n" "RECENT BACKUPS" "SIZE"
+        echo "───────────────────────────────────────────────────────"
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          local rel size lock=""
+          rel="${f#$DATA_DIR/}"
+          size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+          [[ "$f" == *.gpg ]] && lock=" 🔒"
+          printf "%-38s %8s%s\n" "${rel:0:38}" "$size" "$lock"
+        done <<< "$backup_files"
+      } | gum style --border rounded --border-foreground 220 --padding "1 2" --width 60
     else
-      backups_content="No backups yet"
+      echo "No backups yet" | gum style --border rounded --border-foreground 220 --padding "1 2" --width 60
     fi
   else
-    backups_content="No backups yet"
+    echo "No backups yet" | gum style --border rounded --border-foreground 220 --padding "1 2" --width 60
   fi
 
-  echo "$backups_content" | gum style \
-    --border rounded \
-    --border-foreground 220 \
-    --padding "1 2" \
-    --margin "0 0 1 0" \
-    --width 65
+  echo ""
 
   # Storage info
   local storage_info="Backups: $DATA_DIR"
   if [[ -d "$DATA_DIR" ]]; then
     local total_size total_count
-    total_size=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
+    total_size=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1 || echo "0B")
     total_count=$(find "$DATA_DIR" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
-    storage_info+="  │  Total: ${total_count} backups (${total_size:-0B})"
+    storage_info="Total: ${total_count:-0} backups (${total_size})"
   fi
   if is_encryption_enabled 2>/dev/null; then
-    storage_info+="  │  🔒 Encryption ON"
+    storage_info+="  🔒 Encrypted"
   fi
+  gum style --faint "  $storage_info"
 
-  gum style --faint --italic "  $storage_info"
-
-  # Check for updates (runs async on first call)
+  # Check for updates
   if check_for_updates; then
     echo ""
-    gum style \
-      --border rounded \
-      --border-foreground 208 \
-      --foreground 208 \
-      --bold \
-      --padding "0 2" \
-      --width 65 \
-      "⚡ Update available: $VERSION → $LATEST_VERSION  (select Update)"
+    echo "⚡ Update: $VERSION → $LATEST_VERSION (select Update)" | gum style \
+      --border rounded --border-foreground 208 --foreground 208 --bold --padding "0 2" --width 60
   fi
   echo ""
 }
