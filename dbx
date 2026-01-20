@@ -404,15 +404,18 @@ cmd_clean() {
       local backups=()
       while IFS= read -r f; do
         [[ -n "$f" ]] && backups+=("$f")
-      done < <(ls -t "$db_dir"/*.sql.zst 2>/dev/null)
+      done < <(ls -t "$db_dir"/*.sql.zst.gpg "$db_dir"/*.sql.zst 2>/dev/null)
 
       if [[ ${#backups[@]} -gt $keep ]]; then
         local to_remove=("${backups[@]:$keep}")
         for backup in "${to_remove[@]}"; do
-          local size
+          local size meta_file
           size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
           total_freed=$((total_freed + size))
-          rm -f "$backup" "${backup%.sql.zst}.meta.json"
+          # Handle both encrypted and non-encrypted meta files
+          meta_file="${backup%.gpg}"
+          meta_file="${meta_file%.sql.zst}.meta.json"
+          rm -f "$backup" "$meta_file"
           ((total_removed++))
           log_info "Removed: $(basename "$backup")"
         done
@@ -706,22 +709,268 @@ cmd_query() {
   case "$db_type" in
     postgres|postgresql)
       require_container "$POSTGRES_CONTAINER"
-      local db_arg=""
-      [[ -n "$database" ]] && db_arg="-d $database"
-      docker exec -it -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-        psql -h "$db_host" -p "$db_port" -U "$db_user" $db_arg
+      if [[ -n "$database" ]]; then
+        docker exec -it -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+          psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database"
+      else
+        docker exec -it -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+          psql -h "$db_host" -p "$db_port" -U "$db_user"
+      fi
       ;;
     mysql|mariadb)
       require_container "$MYSQL_CONTAINER"
-      local db_arg=""
-      [[ -n "$database" ]] && db_arg="$database"
-      docker exec -it "$MYSQL_CONTAINER" \
-        mysql -h "$db_host" -P "$db_port" -u "$db_user" -p"$db_pass" $db_arg
+      if [[ -n "$database" ]]; then
+        docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+          mysql -h "$db_host" -P "$db_port" -u "$db_user" "$database"
+      else
+        docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+          mysql -h "$db_host" -P "$db_port" -u "$db_user"
+      fi
       ;;
     *)
       die "Unknown database type: $db_type"
       ;;
   esac
+}
+
+# ============================================================================
+# TUI Mode (requires gum)
+# ============================================================================
+
+require_gum() {
+  command -v gum &>/dev/null || die "gum is required for TUI mode. Install: brew install gum (or go install github.com/charmbracelet/gum@latest)"
+}
+
+list_hosts() {
+  require_config
+  require_jq
+  jq -r '.hosts | keys[]' "$CONFIG_FILE"
+}
+
+list_databases_for_host() {
+  local host="$1"
+  require_jq
+  jq -r ".hosts[\"$host\"].databases | keys[]" "$CONFIG_FILE" 2>/dev/null
+}
+
+cmd_tui() {
+  require_gum
+  require_config
+
+  while true; do
+    local action
+    action=$(gum choose --header "dbx - Database Tools" \
+      "Backup" \
+      "Restore" \
+      "Query" \
+      "Analyze" \
+      "List backups" \
+      "Clean old backups" \
+      "Vault (credentials)" \
+      "Config" \
+      "Quit")
+
+    case "$action" in
+      "Backup")
+        local hosts
+        hosts=$(list_hosts)
+        if [[ -z "$hosts" ]]; then
+          gum style --foreground 196 "No hosts configured. Run: dbx config edit"
+          continue
+        fi
+
+        local host
+        host=$(echo "$hosts" | gum choose --header "Select host")
+        [[ -z "$host" ]] && continue
+
+        local databases db
+        databases=$(list_databases_for_host "$host")
+        if [[ -n "$databases" ]]; then
+          db=$(echo "$databases" | gum choose --header "Select database (or type new)")
+        fi
+        if [[ -z "$db" ]]; then
+          db=$(gum input --placeholder "Database name")
+        fi
+        [[ -z "$db" ]] && continue
+
+        gum spin --spinner dot --title "Backing up $host/$db..." -- dbx backup "$host" "$db"
+        gum style --foreground 40 "Backup complete!"
+        sleep 1
+        ;;
+
+      "Restore")
+        if [[ ! -d "$DATA_DIR" ]]; then
+          gum style --foreground 196 "No backups found"
+          continue
+        fi
+
+        # Find all backups
+        local backups
+        backups=$(find "$DATA_DIR" -type f \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" \) 2>/dev/null | sort -r)
+        if [[ -z "$backups" ]]; then
+          gum style --foreground 196 "No backup files found"
+          continue
+        fi
+
+        # Format for display
+        local formatted
+        formatted=$(echo "$backups" | while read -r f; do
+          local rel="${f#$DATA_DIR/}"
+          local size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+          printf "%s (%s)" "$rel" "$size"
+        done)
+
+        local selected
+        selected=$(echo "$formatted" | gum choose --header "Select backup to restore")
+        [[ -z "$selected" ]] && continue
+
+        # Extract just the path (remove size)
+        selected=$(echo "$selected" | sed 's/ ([^)]*$//')
+
+        local target
+        target=$(gum input --placeholder "Target database name (leave empty for auto)")
+
+        if [[ -n "$target" ]]; then
+          gum spin --spinner dot --title "Restoring to $target..." -- dbx restore "$DATA_DIR/$selected" --name "$target"
+        else
+          gum spin --spinner dot --title "Restoring..." -- dbx restore "$DATA_DIR/$selected"
+        fi
+        gum style --foreground 40 "Restore complete!"
+        sleep 1
+        ;;
+
+      "Query")
+        local hosts
+        hosts=$(list_hosts)
+        if [[ -z "$hosts" ]]; then
+          gum style --foreground 196 "No hosts configured"
+          continue
+        fi
+
+        local host
+        host=$(echo "$hosts" | gum choose --header "Select host")
+        [[ -z "$host" ]] && continue
+
+        local db
+        db=$(gum input --placeholder "Database name (optional)")
+
+        echo ""
+        gum style --foreground 212 "Opening query session... (exit with \\q or Ctrl+D)"
+        sleep 1
+        if [[ -n "$db" ]]; then
+          dbx query "$host" "$db"
+        else
+          dbx query "$host"
+        fi
+        ;;
+
+      "Analyze")
+        local hosts
+        hosts=$(list_hosts)
+        if [[ -z "$hosts" ]]; then
+          gum style --foreground 196 "No hosts configured"
+          continue
+        fi
+
+        local host
+        host=$(echo "$hosts" | gum choose --header "Select host")
+        [[ -z "$host" ]] && continue
+
+        local db
+        db=$(gum input --placeholder "Database name")
+        [[ -z "$db" ]] && continue
+
+        dbx analyze "$host" "$db"
+        gum input --placeholder "Press Enter to continue..."
+        ;;
+
+      "List backups")
+        dbx list
+        echo ""
+        gum input --placeholder "Press Enter to continue..."
+        ;;
+
+      "Clean old backups")
+        local keep
+        keep=$(gum input --placeholder "Keep how many backups per database?" --value "10")
+        [[ -z "$keep" ]] && keep=10
+
+        if gum confirm "Remove old backups, keeping $keep per database?"; then
+          dbx clean --keep "$keep"
+          sleep 1
+        fi
+        ;;
+
+      "Vault (credentials)")
+        local vault_action
+        vault_action=$(gum choose --header "Vault" \
+          "List stored credentials" \
+          "Set host password" \
+          "Delete host password" \
+          "Set encryption key" \
+          "Back")
+
+        case "$vault_action" in
+          "List stored credentials")
+            dbx vault list
+            gum input --placeholder "Press Enter to continue..."
+            ;;
+          "Set host password")
+            local hosts
+            hosts=$(list_hosts)
+            if [[ -z "$hosts" ]]; then
+              gum style --foreground 196 "No hosts configured"
+            else
+              local host
+              host=$(echo "$hosts" | gum choose --header "Select host")
+              [[ -n "$host" ]] && dbx vault set "$host"
+            fi
+            ;;
+          "Delete host password")
+            local host
+            host=$(gum input --placeholder "Host name")
+            [[ -n "$host" ]] && dbx vault delete "$host"
+            ;;
+          "Set encryption key")
+            dbx vault set-encryption-key
+            ;;
+          "Back")
+            ;;
+        esac
+        ;;
+
+      "Config")
+        local config_action
+        config_action=$(gum choose --header "Configuration" \
+          "Show config" \
+          "Edit config" \
+          "Initialize config" \
+          "Back")
+
+        case "$config_action" in
+          "Show config")
+            dbx config show
+            gum input --placeholder "Press Enter to continue..."
+            ;;
+          "Edit config")
+            dbx config edit
+            ;;
+          "Initialize config")
+            dbx config init
+            sleep 1
+            ;;
+          "Back")
+            ;;
+        esac
+        ;;
+
+      "Quit"|"")
+        break
+        ;;
+    esac
+
+    echo ""
+  done
 }
 
 cmd_help() {
@@ -732,6 +981,7 @@ ${BOLD}USAGE:${NC}
   dbx <command> [options]
 
 ${BOLD}COMMANDS:${NC}
+  tui                          Interactive TUI mode (requires gum)
   backup [-v] <host> <database>  Backup a remote database (-v for verbose)
   restore <source> [--name N]  Restore a backup to local container
   query <host> [database]      Open interactive shell to remote database
@@ -840,6 +1090,9 @@ main() {
       ;;
     config|cfg)
       cmd_config "$@"
+      ;;
+    tui|menu)
+      cmd_tui
       ;;
     help|--help|-h)
       cmd_help

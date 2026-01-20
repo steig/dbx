@@ -116,7 +116,7 @@ require_container() {
       # Wait for mysql to be ready
       log_info "Waiting for MySQL to initialize..."
       for i in {1..60}; do
-        if docker exec mysql-dbx mysqladmin ping -h localhost -u root -p"${DBX_MYSQL_PASSWORD:-devpassword}" >/dev/null 2>&1; then
+        if docker exec -e MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" mysql-dbx mysqladmin ping -h localhost -u root >/dev/null 2>&1; then
           break
         fi
         sleep 1

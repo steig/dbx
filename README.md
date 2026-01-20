@@ -21,6 +21,7 @@ export PATH="$PWD/dbx:$PATH"
 - zstd
 - ssh (for remote databases)
 - libsecret-tools (Linux, for credential storage) or macOS Keychain
+- gum (optional, for TUI mode) - `brew install gum`
 
 ## Quick Start
 
@@ -47,6 +48,7 @@ dbx restore production/myapp/latest
 
 | Command | Description |
 |---------|-------------|
+| `dbx tui` | Interactive TUI mode (requires gum) |
 | `dbx backup <host> <database>` | Backup a remote database |
 | `dbx restore <source> [--name N]` | Restore to local container |
 | `dbx query <host> [database]` | Interactive SQL shell |
@@ -126,6 +128,7 @@ Backups are encrypted with AES-256 via GPG. The passphrase is stored securely in
 
 ## Features
 
+- **TUI Mode**: Interactive menu-driven interface with gum (`dbx tui`)
 - **SSH Tunnels**: Auto-creates tunnel for remote DBs, cleans up on exit
 - **Encryption**: AES-256 encryption at rest (optional, via GPG)
 - **Auto Containers**: Creates local Docker DB containers on demand
