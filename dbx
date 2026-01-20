@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.3.0"
+VERSION="0.4.0"
 #
 # Usage:
 #   dbx backup <host> <database>
@@ -743,6 +743,33 @@ require_gum() {
   command -v gum &>/dev/null || die "gum is required for TUI mode. Install: brew install gum (or go install github.com/charmbracelet/gum@latest)"
 }
 
+# Check for updates (cached for session)
+LATEST_VERSION=""
+check_for_updates() {
+  if [[ -z "$LATEST_VERSION" ]]; then
+    LATEST_VERSION=$(curl -fsSL --connect-timeout 2 "https://raw.githubusercontent.com/steig/dbx/main/dbx" 2>/dev/null | grep '^VERSION=' | cut -d'"' -f2 || echo "")
+  fi
+  if [[ -n "$LATEST_VERSION" && "$LATEST_VERSION" != "$VERSION" ]]; then
+    return 0  # Update available
+  fi
+  return 1  # No update
+}
+
+run_self_update() {
+  echo ""
+  gum style --foreground 39 --bold "  Updating dbx..."
+  echo ""
+  if curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash; then
+    echo ""
+    gum style --foreground 40 --bold "  ✓ Updated! Please restart dbx tui"
+    sleep 2
+    exit 0
+  else
+    gum style --foreground 196 --bold "  ✗ Update failed"
+    sleep 2
+  fi
+}
+
 list_hosts() {
   require_config
   require_jq
@@ -860,20 +887,42 @@ tui_dashboard() {
   fi
 
   gum style --faint --italic "  $storage_info"
+
+  # Check for updates (runs async on first call)
+  if check_for_updates; then
+    echo ""
+    gum style \
+      --border rounded \
+      --border-foreground 208 \
+      --foreground 208 \
+      --bold \
+      --padding "0 2" \
+      --width 70 \
+      "⚡ Update available: $VERSION → $LATEST_VERSION  (select 'Update' from menu)"
+  fi
   echo ""
 }
 
 tui_action_menu() {
-  gum choose --height 12 --cursor "▸ " --cursor-prefix "" --selected-prefix "▸ " --unselected-prefix "  " \
-    "⬆  Backup database" \
-    "⬇  Restore backup" \
-    "⌨  Query database" \
-    "📊 Analyze tables" \
-    "📋 List all backups" \
-    "🧹 Clean old backups" \
-    "🔑 Vault & credentials" \
-    "⚙  Configuration" \
-    "❌ Quit"
+  local options=(
+    "⬆  Backup database"
+    "⬇  Restore backup"
+    "⌨  Query database"
+    "📊 Analyze tables"
+    "📋 List all backups"
+    "🧹 Clean old backups"
+    "🔑 Vault & credentials"
+    "⚙  Configuration"
+  )
+
+  # Add update option if available
+  if check_for_updates; then
+    options+=("⚡ Update to $LATEST_VERSION")
+  fi
+
+  options+=("❌ Quit")
+
+  printf '%s\n' "${options[@]}" | gum choose --height 12 --cursor "▸ " --cursor-prefix "" --selected-prefix "▸ " --unselected-prefix "  "
 }
 
 tui_select_host() {
@@ -1088,23 +1137,171 @@ cmd_tui() {
         while true; do
           tui_header
           gum style --border rounded --border-foreground 208 --padding "1 2" --width 50 \
-            --bold --foreground 208 "CONFIGURATION"
+            --bold --foreground 208 "CONFIGURATION & MANAGEMENT"
 
           local config_action
           config_action=$(gum choose --cursor "▸ " \
+            "➕ Add host" \
+            "➖ Remove host" \
+            "📁 Add database to host" \
+            "🗑  Delete backups" \
+            "✏  Edit config (advanced)" \
             "👁  Show config" \
-            "✏  Edit config" \
             "🆕 Initialize config" \
             "← Back")
 
           case "$config_action" in
+            "➕ Add host")
+              echo ""
+              local new_host new_type new_user new_hostaddr new_port
+
+              new_host=$(gum input --header "Host alias (e.g., production):" --placeholder "production")
+              [[ -z "$new_host" ]] && continue
+
+              new_type=$(gum choose --header "Database type:" "postgres" "mysql")
+              [[ -z "$new_type" ]] && continue
+
+              new_user=$(gum input --header "Database user:" --placeholder "postgres")
+              [[ -z "$new_user" ]] && continue
+
+              new_hostaddr=$(gum input --header "Host address:" --placeholder "localhost or db.internal")
+              [[ -z "$new_hostaddr" ]] && continue
+
+              new_port=$(gum input --header "Port:" --value "$([[ "$new_type" == "postgres" ]] && echo "5432" || echo "3306")")
+
+              # Add to config using jq
+              local tmp_config
+              tmp_config=$(mktemp)
+              jq ".hosts[\"$new_host\"] = {type: \"$new_type\", host: \"$new_hostaddr\", port: $new_port, user: \"$new_user\", databases: {}}" "$CONFIG_FILE" > "$tmp_config" && mv "$tmp_config" "$CONFIG_FILE"
+
+              gum style --foreground 40 --bold "  ✓ Host '$new_host' added!"
+
+              if gum confirm "Set password for this host now?"; then
+                dbx vault set "$new_host"
+              fi
+              sleep 1
+              ;;
+
+            "➖ Remove host")
+              echo ""
+              local host
+              host=$(tui_select_host) || continue
+              [[ -z "$host" ]] && continue
+
+              if gum confirm --default=false "Remove host '$host' from config?"; then
+                local tmp_config
+                tmp_config=$(mktemp)
+                jq "del(.hosts[\"$host\"])" "$CONFIG_FILE" > "$tmp_config" && mv "$tmp_config" "$CONFIG_FILE"
+                gum style --foreground 40 --bold "  ✓ Host '$host' removed!"
+                sleep 1
+              fi
+              ;;
+
+            "📁 Add database to host")
+              echo ""
+              local host
+              host=$(tui_select_host) || continue
+              [[ -z "$host" ]] && continue
+
+              local new_db
+              new_db=$(gum input --header "Database name:" --placeholder "myapp")
+              [[ -z "$new_db" ]] && continue
+
+              local exclude_tables=""
+              if gum confirm "Add tables to exclude from data dump?"; then
+                exclude_tables=$(gum input --header "Tables to exclude (comma-separated):" --placeholder "sessions, cache, logs")
+              fi
+
+              # Add to config using jq
+              local tmp_config
+              tmp_config=$(mktemp)
+              if [[ -n "$exclude_tables" ]]; then
+                local exclude_json
+                exclude_json=$(echo "$exclude_tables" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | jq -R . | jq -s .)
+                jq ".hosts[\"$host\"].databases[\"$new_db\"] = {exclude_data: $exclude_json}" "$CONFIG_FILE" > "$tmp_config" && mv "$tmp_config" "$CONFIG_FILE"
+              else
+                jq ".hosts[\"$host\"].databases[\"$new_db\"] = {}" "$CONFIG_FILE" > "$tmp_config" && mv "$tmp_config" "$CONFIG_FILE"
+              fi
+
+              gum style --foreground 40 --bold "  ✓ Database '$new_db' added to '$host'!"
+              sleep 1
+              ;;
+
+            "🗑  Delete backups")
+              echo ""
+              if [[ ! -d "$DATA_DIR" ]]; then
+                gum style --foreground 196 "No backups found"
+                sleep 1
+                continue
+              fi
+
+              local delete_choice
+              delete_choice=$(gum choose --header "Delete backups:" \
+                "Select specific backup" \
+                "Delete all for a host" \
+                "Delete all for a database" \
+                "Cancel")
+
+              case "$delete_choice" in
+                "Select specific backup")
+                  local selected
+                  selected=$(tui_select_backup) || continue
+                  [[ -z "$selected" ]] && continue
+
+                  if gum confirm --default=false "Delete backup: $selected?"; then
+                    rm -f "$DATA_DIR/$selected"
+                    rm -f "$DATA_DIR/${selected%.sql.zst*}.meta.json"
+                    gum style --foreground 40 --bold "  ✓ Backup deleted!"
+                  fi
+                  ;;
+                "Delete all for a host")
+                  local host
+                  host=$(tui_select_host) || continue
+                  [[ -z "$host" ]] && continue
+
+                  local count
+                  count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
+
+                  if gum confirm --default=false "Delete ALL $count backups for '$host'?"; then
+                    rm -rf "$DATA_DIR/$host"
+                    gum style --foreground 40 --bold "  ✓ All backups for '$host' deleted!"
+                  fi
+                  ;;
+                "Delete all for a database")
+                  local host
+                  host=$(tui_select_host) || continue
+                  [[ -z "$host" ]] && continue
+
+                  local dbs
+                  dbs=$(ls -1 "$DATA_DIR/$host" 2>/dev/null)
+                  if [[ -z "$dbs" ]]; then
+                    gum style --foreground 196 "No backups for this host"
+                    continue
+                  fi
+
+                  local db
+                  db=$(echo "$dbs" | gum choose --header "Select database:")
+                  [[ -z "$db" ]] && continue
+
+                  local count
+                  count=$(find "$DATA_DIR/$host/$db" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
+
+                  if gum confirm --default=false "Delete ALL $count backups for '$host/$db'?"; then
+                    rm -rf "$DATA_DIR/$host/$db"
+                    gum style --foreground 40 --bold "  ✓ All backups for '$host/$db' deleted!"
+                  fi
+                  ;;
+              esac
+              sleep 1
+              ;;
+
             "👁  Show config")
               tui_header
               dbx config show
               echo ""
               gum input --placeholder "Press Enter to continue..."
               ;;
-            "✏  Edit config")
+            "✏  Edit config (advanced)")
               dbx config edit
               ;;
             "🆕 Initialize config")
@@ -1116,6 +1313,10 @@ cmd_tui() {
               ;;
           esac
         done
+        ;;
+
+      "⚡ Update"*)
+        run_self_update
         ;;
 
       "❌ Quit"|"")
