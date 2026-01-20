@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+
+  test-install:
+    name: Test Install
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq zstd
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jq zstd
+
+      - name: Test install script (local)
+        run: |
+          # Test local install (not curl)
+          mkdir -p ~/.local/bin ~/.local/lib/dbx
+          cp dbx ~/.local/bin/
+          cp lib/*.sh ~/.local/lib/dbx/
+          sed -i.bak 's|LIB_DIR="$SCRIPT_DIR/lib"|LIB_DIR="$HOME/.local/lib/dbx"|' ~/.local/bin/dbx || \
+            sed -i '' 's|LIB_DIR="$SCRIPT_DIR/lib"|LIB_DIR="$HOME/.local/lib/dbx"|' ~/.local/bin/dbx
+          chmod +x ~/.local/bin/dbx
+
+      - name: Verify dbx runs
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          dbx help
+
+      - name: Test config init
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          dbx config init
+          test -f ~/.config/dbx/config.json
+
+  test-syntax:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check bash syntax
+        run: |
+          bash -n dbx
+          for f in lib/*.sh; do
+            bash -n "$f"
+          done

@@ -4,11 +4,20 @@ Database backup and restore utility. Uses Docker for pg_dump/mysqldump (no local
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew install steig/tap/dbx
+```
+
+### Script
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash
 ```
 
-Or clone and add to PATH:
+### Manual
+
 ```bash
 git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
@@ -20,6 +29,7 @@ export PATH="$PWD/dbx:$PATH"
 - jq
 - zstd
 - ssh (for remote databases)
+- libsecret-tools (Linux, for credential storage) or macOS Keychain
 
 ## Quick Start
 
@@ -82,7 +92,7 @@ Config lives at `~/.config/dbx/config.json`:
 - **DEFINER Strip**: MySQL views/triggers work locally (no permission errors)
 - **Table Exclusions**: Dump schema but skip data for large/sensitive tables
 - **Compression**: zstd compression for fast, small backups
-- **Keychain**: Secure credential storage (macOS Keychain)
+- **Credential Storage**: macOS Keychain or Linux secret-tool (libsecret)
 
 ## Storage
 

@@ -29,6 +29,11 @@ check_deps() {
     fi
   done
 
+  # Check for credential storage
+  if [[ "$(uname)" == "Linux" ]] && ! command -v secret-tool &>/dev/null; then
+    missing+=("libsecret-tools")
+  fi
+
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo ""
     echo -e "${RED}Missing dependencies:${NC} ${missing[*]}"

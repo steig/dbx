@@ -155,29 +155,53 @@ get_definer_handling() {
 }
 
 # ============================================================================
-# Keychain/Vault Functions (macOS Keychain for secure credential storage)
+# Keychain/Vault Functions (macOS Keychain / Linux secret-tool)
 # ============================================================================
+
+# Detect platform
+is_macos() { [[ "$(uname)" == "Darwin" ]]; }
+is_linux() { [[ "$(uname)" == "Linux" ]]; }
 
 keychain_get() {
   local account="$1"
-  security find-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" -w 2>/dev/null
+  if is_macos; then
+    security find-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" -w 2>/dev/null
+  elif is_linux && command -v secret-tool &>/dev/null; then
+    secret-tool lookup service "$KEYCHAIN_SERVICE" account "$account" 2>/dev/null
+  else
+    return 1
+  fi
 }
 
 keychain_set() {
   local account="$1"
   local password="$2"
-  # -U updates if exists, -a is account, -s is service, -w is password
-  security add-generic-password -U -a "$account" -s "$KEYCHAIN_SERVICE" -w "$password"
+  if is_macos; then
+    # -U updates if exists, -a is account, -s is service, -w is password
+    security add-generic-password -U -a "$account" -s "$KEYCHAIN_SERVICE" -w "$password"
+  elif is_linux && command -v secret-tool &>/dev/null; then
+    echo -n "$password" | secret-tool store --label="$KEYCHAIN_SERVICE: $account" service "$KEYCHAIN_SERVICE" account "$account"
+  else
+    die "No credential storage available. Install libsecret-tools (Linux) or use macOS."
+  fi
 }
 
 keychain_delete() {
   local account="$1"
-  security delete-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" 2>/dev/null
+  if is_macos; then
+    security delete-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" 2>/dev/null
+  elif is_linux && command -v secret-tool &>/dev/null; then
+    secret-tool clear service "$KEYCHAIN_SERVICE" account "$account" 2>/dev/null
+  fi
 }
 
 keychain_list() {
-  # List all db-backup entries in keychain
-  security dump-keychain 2>/dev/null | grep -B5 "\"svce\"<blob>=\"$KEYCHAIN_SERVICE\"" | grep "\"acct\"" | sed 's/.*<blob>="\([^"]*\)".*/\1/' | sort -u
+  if is_macos; then
+    security dump-keychain 2>/dev/null | grep -B5 "\"svce\"<blob>=\"$KEYCHAIN_SERVICE\"" | grep "\"acct\"" | sed 's/.*<blob>="\([^"]*\)".*/\1/' | sort -u
+  elif is_linux && command -v secret-tool &>/dev/null; then
+    # secret-tool doesn't have a native list, search for our service in keyring
+    secret-tool search --all service "$KEYCHAIN_SERVICE" 2>/dev/null | grep "^attribute.account" | cut -d= -f2 | tr -d ' ' | sort -u
+  fi
 }
 
 get_password() {
