@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.2.0"
+VERSION="0.3.0"
 #
 # Usage:
 #   dbx backup <host> <database>
@@ -755,109 +755,244 @@ list_databases_for_host() {
   jq -r ".hosts[\"$host\"].databases | keys[]" "$CONFIG_FILE" 2>/dev/null
 }
 
+# Get backup stats for a host/database
+get_backup_stats() {
+  local host="$1"
+  local db="$2"
+  local dir="$DATA_DIR/$host/$db"
+  if [[ -d "$dir" ]]; then
+    local count size latest
+    count=$(find "$dir" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
+    size=$(du -sh "$dir" 2>/dev/null | cut -f1)
+    latest=$(ls -t "$dir"/*.sql.zst* 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/.*_\([0-9]*\)_.*/\1/' | head -c8)
+    echo "${count:-0}|${size:-0B}|${latest:-never}"
+  else
+    echo "0|0B|never"
+  fi
+}
+
+tui_header() {
+  clear
+  gum style \
+    --border double \
+    --border-foreground 99 \
+    --padding "0 2" \
+    --margin "0 0 1 0" \
+    --bold \
+    --foreground 99 \
+    "  dbx $VERSION  Database Backup & Restore"
+}
+
+tui_dashboard() {
+  tui_header
+
+  # Hosts section
+  local hosts_content=""
+  local hosts
+  hosts=$(list_hosts 2>/dev/null)
+
+  if [[ -z "$hosts" ]]; then
+    hosts_content="  No hosts configured. Run: dbx config edit"
+  else
+    hosts_content=$(printf "  %-20s %-10s %-12s %s\n" "HOST" "TYPE" "DATABASES" "BACKUPS")
+    hosts_content+=$'\n'"  $(printf '%.0s─' {1..60})"
+    while IFS= read -r host; do
+      local htype dbs_count backup_count
+      htype=$(get_db_type "$host" 2>/dev/null)
+      dbs_count=$(list_databases_for_host "$host" 2>/dev/null | wc -l | tr -d ' ')
+      backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
+      hosts_content+=$'\n'"$(printf "  %-20s %-10s %-12s %s" "$host" "${htype:-?}" "${dbs_count:-0} dbs" "${backup_count:-0} files")"
+    done <<< "$hosts"
+  fi
+
+  gum style \
+    --border rounded \
+    --border-foreground 39 \
+    --padding "1 2" \
+    --margin "0 0 1 0" \
+    --width 70 \
+    --bold --foreground 39 "CONFIGURED HOSTS" \
+    --foreground 255 "$hosts_content"
+
+  # Recent backups section
+  local backups_content=""
+  if [[ -d "$DATA_DIR" ]]; then
+    local recent
+    recent=$(find "$DATA_DIR" -name "*.sql.zst*" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -5)
+    if [[ -n "$recent" ]]; then
+      backups_content=$(printf "  %-45s %8s  %s\n" "BACKUP" "SIZE" "DATE")
+      backups_content+=$'\n'"  $(printf '%.0s─' {1..60})"
+      while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        local rel size date encrypted=""
+        rel="${f#$DATA_DIR/}"
+        size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+        date=$(ls -l "$f" 2>/dev/null | awk '{print $6, $7}')
+        [[ "$f" == *.gpg ]] && encrypted=" 🔒"
+        backups_content+=$'\n'"$(printf "  %-45s %8s  %s%s" "${rel:0:45}" "$size" "$date" "$encrypted")"
+      done <<< "$recent"
+    else
+      backups_content="  No backups yet"
+    fi
+  else
+    backups_content="  No backups yet"
+  fi
+
+  gum style \
+    --border rounded \
+    --border-foreground 220 \
+    --padding "1 2" \
+    --margin "0 0 1 0" \
+    --width 70 \
+    --bold --foreground 220 "RECENT BACKUPS" \
+    --foreground 255 "$backups_content"
+
+  # Storage info
+  local storage_info="Backups: $DATA_DIR"
+  if [[ -d "$DATA_DIR" ]]; then
+    local total_size total_count
+    total_size=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
+    total_count=$(find "$DATA_DIR" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
+    storage_info+="  │  Total: ${total_count} backups (${total_size:-0B})"
+  fi
+  if is_encryption_enabled 2>/dev/null; then
+    storage_info+="  │  🔒 Encryption ON"
+  fi
+
+  gum style --faint --italic "  $storage_info"
+  echo ""
+}
+
+tui_action_menu() {
+  gum choose --height 12 --cursor "▸ " --cursor-prefix "" --selected-prefix "▸ " --unselected-prefix "  " \
+    "⬆  Backup database" \
+    "⬇  Restore backup" \
+    "⌨  Query database" \
+    "📊 Analyze tables" \
+    "📋 List all backups" \
+    "🧹 Clean old backups" \
+    "🔑 Vault & credentials" \
+    "⚙  Configuration" \
+    "❌ Quit"
+}
+
+tui_select_host() {
+  local hosts
+  hosts=$(list_hosts)
+  if [[ -z "$hosts" ]]; then
+    gum style --foreground 196 --bold "  No hosts configured!"
+    sleep 1
+    return 1
+  fi
+
+  local host_options=""
+  while IFS= read -r host; do
+    local htype
+    htype=$(get_db_type "$host" 2>/dev/null)
+    host_options+="$host ($htype)"$'\n'
+  done <<< "$hosts"
+
+  local selected
+  selected=$(echo "$host_options" | gum choose --header "Select host:")
+  echo "$selected" | sed 's/ (.*//'
+}
+
+tui_select_backup() {
+  if [[ ! -d "$DATA_DIR" ]]; then
+    gum style --foreground 196 "No backups found"
+    return 1
+  fi
+
+  local backups
+  backups=$(find "$DATA_DIR" -type f \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" \) 2>/dev/null | xargs ls -t 2>/dev/null)
+  if [[ -z "$backups" ]]; then
+    gum style --foreground 196 "No backup files found"
+    return 1
+  fi
+
+  local formatted=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    local rel size date lock=""
+    rel="${f#$DATA_DIR/}"
+    size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+    date=$(ls -l "$f" 2>/dev/null | awk '{print $6, $7}')
+    [[ "$f" == *.gpg ]] && lock="🔒 "
+    formatted+="${lock}${rel} (${size}, ${date})"$'\n'
+  done <<< "$backups"
+
+  local selected
+  selected=$(echo "$formatted" | gum filter --height 15 --header "Select backup (type to filter):")
+  [[ -z "$selected" ]] && return 1
+
+  # Extract path (remove lock emoji, size, date)
+  echo "$selected" | sed 's/^🔒 //' | sed 's/ ([^)]*,[^)]*)$//'
+}
+
 cmd_tui() {
   require_gum
   require_config
+  require_jq
 
   while true; do
+    tui_dashboard
+
     local action
-    action=$(gum choose --header "dbx - Database Tools" \
-      "Backup" \
-      "Restore" \
-      "Query" \
-      "Analyze" \
-      "List backups" \
-      "Clean old backups" \
-      "Vault (credentials)" \
-      "Config" \
-      "Quit")
+    action=$(tui_action_menu)
 
     case "$action" in
-      "Backup")
-        local hosts
-        hosts=$(list_hosts)
-        if [[ -z "$hosts" ]]; then
-          gum style --foreground 196 "No hosts configured. Run: dbx config edit"
-          continue
-        fi
-
+      "⬆  Backup database")
+        echo ""
         local host
-        host=$(echo "$hosts" | gum choose --header "Select host")
+        host=$(tui_select_host) || continue
         [[ -z "$host" ]] && continue
 
         local databases db
         databases=$(list_databases_for_host "$host")
         if [[ -n "$databases" ]]; then
-          db=$(echo "$databases" | gum choose --header "Select database (or type new)")
+          db=$(echo "$databases" | gum choose --header "Select database:")
         fi
         if [[ -z "$db" ]]; then
-          db=$(gum input --placeholder "Database name")
+          db=$(gum input --placeholder "Enter database name" --header "Database:")
         fi
         [[ -z "$db" ]] && continue
 
+        echo ""
         gum spin --spinner dot --title "Backing up $host/$db..." -- dbx backup "$host" "$db"
-        gum style --foreground 40 "Backup complete!"
-        sleep 1
+        gum style --foreground 40 --bold "  ✓ Backup complete!"
+        sleep 2
         ;;
 
-      "Restore")
-        if [[ ! -d "$DATA_DIR" ]]; then
-          gum style --foreground 196 "No backups found"
-          continue
-        fi
-
-        # Find all backups
-        local backups
-        backups=$(find "$DATA_DIR" -type f \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" \) 2>/dev/null | sort -r)
-        if [[ -z "$backups" ]]; then
-          gum style --foreground 196 "No backup files found"
-          continue
-        fi
-
-        # Format for display
-        local formatted
-        formatted=$(echo "$backups" | while read -r f; do
-          local rel="${f#$DATA_DIR/}"
-          local size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
-          printf "%s (%s)" "$rel" "$size"
-        done)
-
+      "⬇  Restore backup")
+        echo ""
         local selected
-        selected=$(echo "$formatted" | gum choose --header "Select backup to restore")
+        selected=$(tui_select_backup) || continue
         [[ -z "$selected" ]] && continue
 
-        # Extract just the path (remove size)
-        selected=$(echo "$selected" | sed 's/ ([^)]*$//')
-
         local target
-        target=$(gum input --placeholder "Target database name (leave empty for auto)")
+        target=$(gum input --placeholder "Leave empty for auto-generated name" --header "Target database name:")
 
+        echo ""
         if [[ -n "$target" ]]; then
           gum spin --spinner dot --title "Restoring to $target..." -- dbx restore "$DATA_DIR/$selected" --name "$target"
         else
-          gum spin --spinner dot --title "Restoring..." -- dbx restore "$DATA_DIR/$selected"
+          gum spin --spinner dot --title "Restoring backup..." -- dbx restore "$DATA_DIR/$selected"
         fi
-        gum style --foreground 40 "Restore complete!"
-        sleep 1
+        gum style --foreground 40 --bold "  ✓ Restore complete!"
+        sleep 2
         ;;
 
-      "Query")
-        local hosts
-        hosts=$(list_hosts)
-        if [[ -z "$hosts" ]]; then
-          gum style --foreground 196 "No hosts configured"
-          continue
-        fi
-
+      "⌨  Query database")
+        echo ""
         local host
-        host=$(echo "$hosts" | gum choose --header "Select host")
+        host=$(tui_select_host) || continue
         [[ -z "$host" ]] && continue
 
         local db
-        db=$(gum input --placeholder "Database name (optional)")
+        db=$(gum input --placeholder "Leave empty for no database" --header "Database (optional):")
 
         echo ""
-        gum style --foreground 212 "Opening query session... (exit with \\q or Ctrl+D)"
+        gum style --foreground 212 --bold "  Opening SQL session... (\\q or Ctrl+D to exit)"
         sleep 1
         if [[ -n "$db" ]]; then
           dbx query "$host" "$db"
@@ -866,112 +1001,128 @@ cmd_tui() {
         fi
         ;;
 
-      "Analyze")
-        local hosts
-        hosts=$(list_hosts)
-        if [[ -z "$hosts" ]]; then
-          gum style --foreground 196 "No hosts configured"
-          continue
-        fi
-
+      "📊 Analyze tables")
+        echo ""
         local host
-        host=$(echo "$hosts" | gum choose --header "Select host")
+        host=$(tui_select_host) || continue
         [[ -z "$host" ]] && continue
 
         local db
-        db=$(gum input --placeholder "Database name")
+        db=$(gum input --placeholder "Database name" --header "Database:")
         [[ -z "$db" ]] && continue
 
         dbx analyze "$host" "$db"
+        echo ""
         gum input --placeholder "Press Enter to continue..."
         ;;
 
-      "List backups")
+      "📋 List all backups")
+        tui_header
+        echo ""
         dbx list
         echo ""
         gum input --placeholder "Press Enter to continue..."
         ;;
 
-      "Clean old backups")
+      "🧹 Clean old backups")
+        echo ""
         local keep
-        keep=$(gum input --placeholder "Keep how many backups per database?" --value "10")
+        keep=$(gum input --value "10" --header "Keep how many backups per database?")
         [[ -z "$keep" ]] && keep=10
 
         if gum confirm "Remove old backups, keeping $keep per database?"; then
+          echo ""
           dbx clean --keep "$keep"
-          sleep 1
+          sleep 2
         fi
         ;;
 
-      "Vault (credentials)")
-        local vault_action
-        vault_action=$(gum choose --header "Vault" \
-          "List stored credentials" \
-          "Set host password" \
-          "Delete host password" \
-          "Set encryption key" \
-          "Back")
+      "🔑 Vault & credentials")
+        while true; do
+          tui_header
+          gum style --border rounded --border-foreground 135 --padding "1 2" --width 50 \
+            --bold --foreground 135 "VAULT & CREDENTIALS"
 
-        case "$vault_action" in
-          "List stored credentials")
-            dbx vault list
-            gum input --placeholder "Press Enter to continue..."
-            ;;
-          "Set host password")
-            local hosts
-            hosts=$(list_hosts)
-            if [[ -z "$hosts" ]]; then
-              gum style --foreground 196 "No hosts configured"
-            else
+          local vault_action
+          vault_action=$(gum choose --cursor "▸ " \
+            "📋 List stored credentials" \
+            "➕ Set host password" \
+            "➖ Delete host password" \
+            "🔐 Set encryption key" \
+            "← Back")
+
+          case "$vault_action" in
+            "📋 List stored credentials")
+              echo ""
+              dbx vault list
+              echo ""
+              gum input --placeholder "Press Enter to continue..."
+              ;;
+            "➕ Set host password")
+              echo ""
               local host
-              host=$(echo "$hosts" | gum choose --header "Select host")
+              host=$(tui_select_host) || continue
               [[ -n "$host" ]] && dbx vault set "$host"
-            fi
-            ;;
-          "Delete host password")
-            local host
-            host=$(gum input --placeholder "Host name")
-            [[ -n "$host" ]] && dbx vault delete "$host"
-            ;;
-          "Set encryption key")
-            dbx vault set-encryption-key
-            ;;
-          "Back")
-            ;;
-        esac
+              sleep 1
+              ;;
+            "➖ Delete host password")
+              echo ""
+              local host
+              host=$(gum input --header "Host name to delete:")
+              [[ -n "$host" ]] && dbx vault delete "$host"
+              sleep 1
+              ;;
+            "🔐 Set encryption key")
+              echo ""
+              dbx vault set-encryption-key
+              sleep 1
+              ;;
+            "← Back"|"")
+              break
+              ;;
+          esac
+        done
         ;;
 
-      "Config")
-        local config_action
-        config_action=$(gum choose --header "Configuration" \
-          "Show config" \
-          "Edit config" \
-          "Initialize config" \
-          "Back")
+      "⚙  Configuration")
+        while true; do
+          tui_header
+          gum style --border rounded --border-foreground 208 --padding "1 2" --width 50 \
+            --bold --foreground 208 "CONFIGURATION"
 
-        case "$config_action" in
-          "Show config")
-            dbx config show
-            gum input --placeholder "Press Enter to continue..."
-            ;;
-          "Edit config")
-            dbx config edit
-            ;;
-          "Initialize config")
-            dbx config init
-            sleep 1
-            ;;
-          "Back")
-            ;;
-        esac
+          local config_action
+          config_action=$(gum choose --cursor "▸ " \
+            "👁  Show config" \
+            "✏  Edit config" \
+            "🆕 Initialize config" \
+            "← Back")
+
+          case "$config_action" in
+            "👁  Show config")
+              tui_header
+              dbx config show
+              echo ""
+              gum input --placeholder "Press Enter to continue..."
+              ;;
+            "✏  Edit config")
+              dbx config edit
+              ;;
+            "🆕 Initialize config")
+              dbx config init
+              sleep 2
+              ;;
+            "← Back"|"")
+              break
+              ;;
+          esac
+        done
         ;;
 
-      "Quit"|"")
+      "❌ Quit"|"")
+        clear
         break
         ;;
     esac
-
-    echo ""
   done
 }
 
