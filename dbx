@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.4.2"
+VERSION="0.5.0"
 #
 # Usage:
 #   dbx backup <host> <database>
@@ -29,8 +29,12 @@ LIB_DIR="$SCRIPT_DIR/lib"
 
 source "$LIB_DIR/core.sh"
 source "$LIB_DIR/tunnel.sh"
+source "$LIB_DIR/encrypt.sh"
 source "$LIB_DIR/postgres.sh"
 source "$LIB_DIR/mysql.sh"
+source "$LIB_DIR/notify.sh"
+source "$LIB_DIR/schedule.sh"
+source "$LIB_DIR/storage.sh"
 
 # ============================================================================
 # Commands
@@ -550,8 +554,17 @@ cmd_vault() {
       fi
       ;;
 
+    info)
+      vault_info
+      ;;
+
+    init-age|init-encryption)
+      require_gpg
+      init_age_encryption
+      ;;
+
     *)
-      die "Usage: dbx vault <set|get|delete|list|set-encryption-key|delete-encryption-key> [host]"
+      die "Usage: dbx vault <set|get|delete|list|info|set-encryption-key|init-age> [host]"
       ;;
   esac
 }
@@ -674,6 +687,154 @@ cmd_analyze() {
       ;;
     *)
       die "Unknown database type: $db_type"
+      ;;
+  esac
+}
+
+cmd_verify() {
+  local backup_file="${1:-}"
+
+  if [[ -z "$backup_file" ]]; then
+    # Interactive selection
+    if command -v fzf &>/dev/null && [[ -d "$DATA_DIR" ]]; then
+      local backups
+      backups=$(find "$DATA_DIR" -type f \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" -o -name "*.sql.zst.age" \) 2>/dev/null | sort -r)
+
+      if [[ -n "$backups" ]]; then
+        local formatted
+        formatted=$(echo "$backups" | while read -r f; do
+          local rel size
+          rel="${f#$DATA_DIR/}"
+          size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+          printf "%-60s %8s\n" "$rel" "$size"
+        done)
+
+        local selected
+        selected=$(echo "$formatted" | fzf --header="Select backup to verify:" --prompt="Verify> " | awk '{print $1}')
+        [[ -z "$selected" ]] && return 0
+        backup_file="$DATA_DIR/$selected"
+      fi
+    fi
+  fi
+
+  [[ -z "$backup_file" ]] && die "Usage: dbx verify <backup-file>"
+  [[ ! -f "$backup_file" ]] && die "File not found: $backup_file"
+
+  require_jq
+
+  verify_backup "$backup_file"
+}
+
+cmd_schedule() {
+  local action="${1:-list}"
+  shift || true
+
+  case "$action" in
+    add)
+      local host="${1:-}"
+      local database="${2:-}"
+      local schedule="${3:-daily}"
+
+      [[ -z "$host" ]] && die "Usage: dbx schedule add <host> <database> [schedule]"
+      [[ -z "$database" ]] && die "Usage: dbx schedule add <host> <database> [schedule]"
+
+      require_config
+      schedule_add "$host" "$database" "$schedule"
+      ;;
+
+    remove|rm|delete)
+      local host="${1:-}"
+      local database="${2:-}"
+
+      [[ -z "$host" ]] && die "Usage: dbx schedule remove <host> <database>"
+      [[ -z "$database" ]] && die "Usage: dbx schedule remove <host> <database>"
+
+      schedule_remove "$host" "$database"
+      ;;
+
+    run)
+      local host="${1:-}"
+      local database="${2:-}"
+
+      [[ -z "$host" ]] && die "Usage: dbx schedule run <host> <database>"
+      [[ -z "$database" ]] && die "Usage: dbx schedule run <host> <database>"
+
+      schedule_run "$host" "$database"
+      ;;
+
+    list|ls|"")
+      schedule_list
+      ;;
+
+    *)
+      die "Unknown schedule action: $action (use: add, remove, list, run)"
+      ;;
+  esac
+}
+
+cmd_storage() {
+  local action="${1:-info}"
+  shift || true
+
+  case "$action" in
+    upload)
+      local local_file="${1:-}"
+      local remote_path="${2:-}"
+
+      [[ -z "$local_file" ]] && die "Usage: dbx storage upload <local-file> [remote-path]"
+      [[ ! -f "$local_file" ]] && die "File not found: $local_file"
+
+      storage_upload "$local_file" "$remote_path"
+      ;;
+
+    download)
+      local remote_path="${1:-}"
+      local local_file="${2:-}"
+
+      [[ -z "$remote_path" ]] && die "Usage: dbx storage download <remote-path> [local-file]"
+
+      local result
+      result=$(storage_download "$remote_path" "$local_file")
+      log_info "Downloaded to: $result"
+      ;;
+
+    list|ls)
+      local path="${1:-}"
+      storage_list "$path"
+      ;;
+
+    delete|rm)
+      local remote_path="${1:-}"
+      [[ -z "$remote_path" ]] && die "Usage: dbx storage delete <remote-path>"
+      storage_delete "$remote_path"
+      ;;
+
+    sync)
+      local direction="${1:-upload}"
+      local host="${2:-}"
+      local database="${3:-}"
+
+      case "$direction" in
+        upload|up)
+          [[ -z "$host" ]] && die "Usage: dbx storage sync upload <host> [database]"
+          storage_sync_upload "$host" "$database"
+          ;;
+        download|down)
+          [[ -z "$host" ]] && die "Usage: dbx storage sync download <host> [database]"
+          storage_sync_download "$host" "$database"
+          ;;
+        *)
+          die "Usage: dbx storage sync <upload|download> <host> [database]"
+          ;;
+      esac
+      ;;
+
+    info|"")
+      storage_info
+      ;;
+
+    *)
+      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info)"
       ;;
   esac
 }
@@ -1319,12 +1480,22 @@ ${BOLD}COMMANDS:${NC}
   tui                          Interactive TUI mode (requires gum)
   backup [-v] <host> <database>  Backup a remote database (-v for verbose)
   restore <source> [--name N]  Restore a backup to local container
+  verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker
   list [host] [database]       List available backups
   clean [--keep N]             Remove old backups (default: keep 10)
+
+${BOLD}CREDENTIAL & ENCRYPTION:${NC}
   vault set|get|delete|list    Manage host credentials
-  vault set-encryption-key     Set backup encryption passphrase
+  vault info                   Show vault backend info
+  vault set-encryption-key     Set GPG encryption passphrase
+  vault init-age               Initialize age encryption
+
+${BOLD}SCHEDULING & STORAGE:${NC}
+  schedule add|remove|list     Manage scheduled backups (launchd/systemd)
+  storage upload|download|sync S3/MinIO cloud storage
+  storage info                 Show storage configuration
   config init|edit|show        Manage configuration
 
 ${BOLD}EXAMPLES:${NC}
@@ -1333,17 +1504,31 @@ ${BOLD}EXAMPLES:${NC}
   dbx config edit              # Add your hosts
   dbx vault set production     # Store password securely
 
-  # Enable encryption (optional)
-  dbx vault set-encryption-key # Set encryption passphrase
-  # Then set "encryption": true in config
+  # Enable encryption (optional - GPG or age)
+  dbx vault set-encryption-key # Set GPG encryption passphrase
+  dbx vault init-age           # Or use age encryption
+  # Then set "encryption_type": "gpg" or "age" in config
 
   # Backup (auto SSH tunnel if configured)
   dbx backup production myapp
   dbx backup staging myapp
 
+  # Verify backup integrity
+  dbx verify production/myapp/latest
+
   # Restore to local container
   dbx restore production/myapp/latest
   dbx restore staging/myapp/latest --name myapp_copy
+
+  # Schedule backups
+  dbx schedule add production myapp daily   # Run daily at 2am
+  dbx schedule add prod db weekly@0:3       # Sunday at 3am
+  dbx schedule list                         # Show scheduled jobs
+
+  # Cloud storage
+  dbx storage info                          # Show S3/MinIO config
+  dbx storage sync upload production        # Upload all backups for host
+  dbx storage list                          # List remote backups
 
   # Interactive query session
   dbx query production                  # Connect to host
@@ -1356,40 +1541,51 @@ ${BOLD}EXAMPLES:${NC}
 
 ${BOLD}CONFIG STRUCTURE:${NC}
   {
-    "hosts": {
-      "production": {
-        "type": "mysql",
-        "user": "backup_user",
-        "ssh_tunnel": {
-          "jump_host": "bastion",        // SSH config host
-          "target_host": "db.internal",  // DB from bastion
-          "target_port": 3306
-        },
-        "databases": {
-          "myapp": {
-            "exclude_data": ["sessions", "cache"]
-          }
-        }
+    "hosts": { ... },
+    "defaults": {
+      "encryption_type": "age",   // none, gpg, or age
+      "age_recipients": "~/.config/dbx/age-recipients.txt"
+    },
+    "vault": {
+      "backend": "auto"           // keychain, secret-tool, pass, gpg-file
+    },
+    "notifications": {
+      "enabled": true,
+      "on": "failure",            // failure, success, all
+      "backends": ["slack", "desktop"]
+    },
+    "storage": {
+      "type": "s3",
+      "s3": {
+        "bucket": "backups",
+        "endpoint": "http://minio:9000"
       }
     }
   }
 
 ${BOLD}FEATURES:${NC}
   - SSH tunnels: Auto-creates tunnel for remote DBs, cleans up on exit
-  - Encryption: AES-256 encryption at rest (optional, via GPG)
+  - Encryption: GPG or age encryption at rest
+  - Checksums: SHA256 verification for backup integrity
   - DEFINER strip: MySQL views/triggers work locally
   - Exclude tables: Dump schema but skip data for large/sensitive tables
-  - Credential storage: macOS Keychain or Linux secret-tool
+  - Credential storage: macOS Keychain, Linux secret-tool, pass, or GPG file
+  - Scheduled backups: launchd (macOS) or systemd timers (Linux)
+  - Cloud storage: S3/MinIO upload and sync
+  - Notifications: Slack, desktop, email on backup success/failure
+  - Audit logging: JSON audit trail at ~/.local/share/dbx/audit.log
 
 ${BOLD}STORAGE:${NC}
-  Backups:  ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.gpg]
+  Backups:  ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.age|.gpg]
   Config:   ~/.config/dbx/config.json
-  Secrets:  macOS Keychain or Linux secret-tool (service: dbx)
+  Audit:    ~/.local/share/dbx/audit.log
+  Secrets:  macOS Keychain, Linux secret-tool, pass, or ~/.config/dbx/vault.gpg
 
 ${BOLD}REQUIREMENTS:${NC}
   - docker (for pg_dump/mysqldump containers)
   - jq, zstd, ssh
-  - gpg (optional, for encryption)
+  - gpg or age (optional, for encryption)
+  - mc or aws CLI (optional, for S3 storage)
 EOF
 }
 
@@ -1408,6 +1604,9 @@ main() {
     restore)
       cmd_restore "$@"
       ;;
+    verify)
+      cmd_verify "$@"
+      ;;
     analyze|stats)
       cmd_analyze "$@"
       ;;
@@ -1425,6 +1624,12 @@ main() {
       ;;
     config|cfg)
       cmd_config "$@"
+      ;;
+    schedule|cron)
+      cmd_schedule "$@"
+      ;;
+    storage|s3)
+      cmd_storage "$@"
       ;;
     tui|menu)
       cmd_tui

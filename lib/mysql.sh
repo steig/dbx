@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# db-lib/mysql.sh - MySQL/MariaDB backup and restore functions
+# lib/mysql.sh - MySQL/MariaDB backup and restore functions
 #
-# Requires: core.sh, tunnel.sh to be sourced first
+# Requires: core.sh, tunnel.sh, encrypt.sh to be sourced first
 #
 
 # ============================================================================
@@ -15,6 +15,9 @@ mysql_backup() {
   local output_file="$3"
   local verbose="${4:-false}"
 
+  local start_time
+  start_time=$(date +%s)
+
   # Use effective host/port (handles SSH tunnels)
   local db_host db_port db_user db_pass definer_handling
   db_host=$(get_effective_host "$host")
@@ -23,56 +26,78 @@ mysql_backup() {
   db_pass=$(get_password "$host")
   definer_handling=$(get_definer_handling "$host")
 
+  # Warn about plaintext passwords
+  warn_plaintext_password "$host"
+
   # Get excluded tables
   local exclude_tables=()
   while IFS= read -r table; do
     [[ -n "$table" ]] && exclude_tables+=("$table")
   done < <(get_excluded_tables "$host" "$database")
 
+  # Check encryption settings
+  local enc_type enc_ext
+  enc_type=$(get_encryption_type)
+  enc_ext=$(get_encryption_extension)
+
+  # Adjust output filename if encryption is enabled
+  if [[ -n "$enc_ext" && "$output_file" != *"$enc_ext" ]]; then
+    output_file="${output_file}${enc_ext}"
+  fi
+
   log_step "Backing up MySQL: $database@$host"
   log_info "Connecting: $db_host:$db_port (user: $db_user)"
   log_info "DEFINER handling: $definer_handling"
+  [[ "$enc_type" != "none" ]] && log_info "Encryption: $enc_type"
   [[ ${#exclude_tables[@]} -gt 0 ]] && log_info "Excluding data: ${exclude_tables[*]}"
 
   require_container "$MYSQL_CONTAINER"
 
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Don't override tunnel cleanup trap
-  local cleanup_tmpdir="rm -rf $tmpdir"
+  chmod 700 "$tmpdir"
+  trap "rm -rf '$tmpdir'" RETURN
 
-  # Build common mysqldump options
-  local dump_opts=(
-    --host="$db_host"
-    --port="$db_port"
-    --user="$db_user"
-    --password="$db_pass"
-    --single-transaction
-    --set-gtid-purged=OFF
-    --skip-lock-tables
-  )
-  [[ "$verbose" == "true" ]] && dump_opts+=(--verbose)
+  # Create secure credential file using helper
+  local cred_file
+  cred_file=$(create_mysql_credential_file "$db_user" "$db_pass" "$db_host" "$db_port")
+
+  # Copy to tmpdir for cleanup tracking
+  mv "$cred_file" "$tmpdir/my.cnf"
+  cred_file="$tmpdir/my.cnf"
+
+  local err_file="$tmpdir/errors.log"
+  local verbose_flag=""
+  [[ "$verbose" == "true" ]] && verbose_flag="--verbose"
+
+  # Copy credential file to container for secure access
+  docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
+  docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
 
   # Pass 1: Schema for ALL tables (including excluded ones)
-  # Includes: routines (stored procs/functions), triggers, events, views
   log_info "Dumping schema (tables, views, routines, triggers)..."
-  local err_file="$tmpdir/errors.log"
   if ! docker exec "$MYSQL_CONTAINER" \
     mysqldump \
-      "${dump_opts[@]}" \
+      --defaults-extra-file=/tmp/my.cnf \
+      --single-transaction \
+      --set-gtid-purged=OFF \
+      --skip-lock-tables \
       --no-data \
       --routines \
       --triggers \
       --events \
+      $verbose_flag \
       "$database" 2>"$err_file" | strip_definer "$definer_handling" > "$tmpdir/schema.sql"; then
     cat "$err_file" >&2
-    eval "$cleanup_tmpdir"
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    audit_backup "$host" "$database" "failure"
     die "Schema dump failed"
   fi
 
   if [[ ! -s "$tmpdir/schema.sql" ]]; then
     cat "$err_file" >&2
-    eval "$cleanup_tmpdir"
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    audit_backup "$host" "$database" "failure"
     die "Schema dump produced empty output - check connection and permissions"
   fi
 
@@ -85,24 +110,68 @@ mysql_backup() {
 
   if ! docker exec "$MYSQL_CONTAINER" \
     mysqldump \
-      "${dump_opts[@]}" \
+      --defaults-extra-file=/tmp/my.cnf \
+      --single-transaction \
+      --set-gtid-purged=OFF \
+      --skip-lock-tables \
       --no-create-info \
       --skip-triggers \
+      $verbose_flag \
       "${ignore_opts[@]}" \
       "$database" 2>"$err_file" > "$tmpdir/data.sql"; then
     cat "$err_file" >&2
-    eval "$cleanup_tmpdir"
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    audit_backup "$host" "$database" "failure"
     die "Data dump failed"
   fi
 
-  # Combine and compress
-  log_info "Compressing..."
-  cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -3 > "$output_file"
+  # Clean up credential file in container
+  docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
 
-  # Cleanup temp files
-  eval "$cleanup_tmpdir"
+  # Combine, compress, and optionally encrypt
+  log_info "Compressing..."
+  if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
+    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -3 | encrypt_backup_stream > "$output_file"
+  else
+    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -3 > "$output_file"
+  fi
+  secure_file "$output_file"
+
+  # Calculate checksum and create metadata
+  local end_time duration file_size checksum
+  end_time=$(date +%s)
+  duration=$((end_time - start_time))
+  file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
+  checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
+
+  # Create metadata JSON
+  local meta_file="${output_file}.meta.json"
+  jq -n \
+    --arg host "$host" \
+    --arg database "$database" \
+    --arg db_type "mysql" \
+    --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg size "$file_size" \
+    --arg checksum "$checksum" \
+    --arg encryption "$enc_type" \
+    --arg dbx_version "${VERSION:-unknown}" \
+    '{
+      host: $host,
+      database: $database,
+      type: $db_type,
+      timestamp: $timestamp,
+      size: ($size | tonumber),
+      checksums: { sha256: $checksum },
+      encryption: $encryption,
+      dbx_version: $dbx_version
+    }' > "$meta_file"
+  secure_file "$meta_file"
+
+  # Audit log
+  audit_backup "$host" "$database" "success" "$output_file" "$file_size" "$duration"
 
   log_success "Backup complete: $output_file"
+  log_info "Checksum (SHA256): $checksum"
 }
 
 # ============================================================================
@@ -112,6 +181,9 @@ mysql_backup() {
 mysql_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
+
+  local start_time
+  start_time=$(date +%s)
 
   log_step "Restoring MySQL backup to: $target_db"
 
@@ -139,9 +211,14 @@ mysql_restore_backup() {
 
     log_info "Restoring to remote: $mysql_host:$mysql_port"
 
+    # Create secure credential file
+    local cred_file
+    cred_file=$(create_mysql_credential_file "root" "$mysql_pass" "$mysql_host" "$mysql_port")
+    trap "rm -f '$cred_file'" RETURN
+
     # Create database if it doesn't exist
     log_info "Creating database if not exists..."
-    mysql -h "$mysql_host" -P "$mysql_port" -u root -p"$mysql_pass" \
+    mysql --defaults-extra-file="$cred_file" \
       -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" 2>/dev/null
 
     log_info "Importing $human_size (compressed)..."
@@ -149,11 +226,11 @@ mysql_restore_backup() {
     # Restore with progress if pv is available
     if command -v pv &>/dev/null; then
       pv -N "Importing" "$backup_file" | decompress_stdin "${backup_file##*.}" | filter_sql | \
-        mysql -h "$mysql_host" -P "$mysql_port" -u root -p"$mysql_pass" "$target_db" 2>/dev/null
+        mysql --defaults-extra-file="$cred_file" "$target_db" 2>/dev/null
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
       decompress "$backup_file" | filter_sql | \
-        mysql -h "$mysql_host" -P "$mysql_port" -u root -p"$mysql_pass" "$target_db" 2>/dev/null
+        mysql --defaults-extra-file="$cred_file" "$target_db" 2>/dev/null
     fi
   else
     require_container "$MYSQL_CONTAINER"
@@ -161,26 +238,46 @@ mysql_restore_backup() {
     # Get root password from container env (if set)
     local root_pass
     root_pass=$(docker exec "$MYSQL_CONTAINER" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
-    local pass_arg=""
-    [[ -n "$root_pass" ]] && pass_arg="-p${root_pass}"
+
+    # Create secure credential file and copy to container
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    chmod 700 "$tmpdir"
+    trap "rm -rf '$tmpdir'" RETURN
+
+    local cred_file
+    cred_file=$(create_mysql_credential_file "root" "$root_pass")
+    mv "$cred_file" "$tmpdir/my.cnf"
+    cred_file="$tmpdir/my.cnf"
+    docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
 
     # Create database if it doesn't exist
     log_info "Creating database if not exists..."
     docker exec "$MYSQL_CONTAINER" \
-      mysql -u root $pass_arg -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" 2>/dev/null
+      mysql --defaults-extra-file=/tmp/my.cnf -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" 2>/dev/null
 
     log_info "Importing $human_size (compressed)..."
 
     # Restore with progress if pv is available
     if command -v pv &>/dev/null; then
       pv -N "Importing" "$backup_file" | decompress_stdin "${backup_file##*.}" | filter_sql | \
-        docker exec -i "$MYSQL_CONTAINER" mysql -u root $pass_arg "$target_db"
+        docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
       decompress "$backup_file" | filter_sql | docker exec -i "$MYSQL_CONTAINER" \
-        mysql -u root $pass_arg "$target_db"
+        mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
     fi
+
+    # Clean up credential file in container
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
   fi
+
+  # Calculate duration and audit
+  local end_time duration
+  end_time=$(date +%s)
+  duration=$((end_time - start_time))
+  audit_restore "$backup_file" "$target_db" "success" "$duration"
 
   log_success "Restore complete: $target_db"
 }
@@ -203,6 +300,19 @@ analyze_mysql() {
 
   log_step "Analyzing tables in $database@$host..."
 
+  # Create secure credential file
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  chmod 700 "$tmpdir"
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local cred_file
+  cred_file=$(create_mysql_credential_file "$db_user" "$db_pass" "$db_host" "$db_port")
+  mv "$cred_file" "$tmpdir/my.cnf"
+  cred_file="$tmpdir/my.cnf"
+  docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
+  docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
+
   # Get current exclusions
   local current_exclusions
   current_exclusions=$(jq -r ".hosts[\"$host\"].databases[\"$database\"].exclude_data // [] | .[]" "$CONFIG_FILE" 2>/dev/null | tr '\n' '|')
@@ -221,15 +331,14 @@ analyze_mysql() {
     ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC;
   "
 
-  local tmpfile
-  tmpfile=$(mktemp)
+  local tmpfile="$tmpdir/stats.txt"
 
   docker exec "$MYSQL_CONTAINER" \
-    mysql -h "$db_host" -P "$db_port" -u "$db_user" -p"$db_pass" \
+    mysql --defaults-extra-file=/tmp/my.cnf \
     -N -e "$stats_query" 2>/dev/null > "$tmpfile"
 
   if [[ ! -s "$tmpfile" ]]; then
-    rm -f "$tmpfile"
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
     die "Failed to get table stats. Check connection and permissions."
   fi
 
@@ -261,7 +370,7 @@ analyze_mysql() {
 
     echo ""
     log_info "Install fzf for interactive table selection"
-    rm -f "$tmpfile"
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
     return
   fi
 
@@ -271,8 +380,7 @@ analyze_mysql() {
   echo ""
 
   # Format for fzf with pre-selection of currently excluded tables
-  local formatted
-  formatted=$(mktemp)
+  local formatted="$tmpdir/formatted.txt"
 
   while IFS=$'\t' read -r tbl rows data_mb idx_mb total_mb ttype; do
     local marker=""
@@ -304,10 +412,9 @@ Common exclusions:
     --bind='ctrl-d:deselect-all' \
     | awk '{print $1}' | sed 's/^\*//' | grep -v '^$')
 
-  rm -f "$tmpfile" "$formatted"
-
   if [[ -z "$selected" ]]; then
     log_info "No changes made"
+    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
     return
   fi
 
@@ -315,16 +422,19 @@ Common exclusions:
   local exclude_json
   exclude_json=$(echo "$selected" | jq -R -s 'split("\n") | map(select(. != ""))')
 
-  # Calculate excluded size
+  # Calculate excluded size (using secure credential file already in container)
   local excluded_size=0
   while IFS= read -r tbl; do
     [[ -z "$tbl" ]] && continue
     local tbl_size
     tbl_size=$(docker exec "$MYSQL_CONTAINER" \
-      mysql -h "$db_host" -P "$db_port" -u "$db_user" -p"$db_pass" -N \
+      mysql --defaults-extra-file=/tmp/my.cnf -N \
       -e "SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$database' AND TABLE_NAME='$tbl'" 2>/dev/null)
     excluded_size=$(awk "BEGIN {print $excluded_size + ${tbl_size:-0}}")
   done <<< "$selected"
+
+  # Clean up credential file in container
+  docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
 
   echo ""
   echo -e "${BOLD}Selected for exclusion:${NC}"

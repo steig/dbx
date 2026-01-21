@@ -2,7 +2,7 @@
 #
 # db-lib/postgres.sh - PostgreSQL backup and restore functions
 #
-# Requires: core.sh, tunnel.sh to be sourced first
+# Requires: core.sh, tunnel.sh, encrypt.sh to be sourced first
 #
 
 # ============================================================================
@@ -15,12 +15,18 @@ pg_backup() {
   local output_file="$3"
   local verbose="${4:-false}"
 
+  local start_time
+  start_time=$(date +%s)
+
   # Use effective host/port (handles SSH tunnels)
   local db_host db_port db_user db_pass
   db_host=$(get_effective_host "$host")
   db_port=$(get_effective_port "$host")
   db_user=$(get_config_value ".hosts[\"$host\"].user")
   db_pass=$(get_password "$host")
+
+  # Warn about plaintext passwords
+  warn_plaintext_password "$host"
 
   local jobs
   jobs=$(get_parallel_jobs "$host" "$database")
@@ -31,17 +37,31 @@ pg_backup() {
     [[ -n "$table" ]] && exclude_opts+=(--exclude-table-data="$table")
   done < <(get_excluded_tables "$host" "$database")
 
+  # Check encryption settings
+  local enc_type enc_ext
+  enc_type=$(get_encryption_type)
+  enc_ext=$(get_encryption_extension)
+
+  # Adjust output filename if encryption is enabled
+  if [[ -n "$enc_ext" && "$output_file" != *"$enc_ext" ]]; then
+    output_file="${output_file}${enc_ext}"
+  fi
+
   log_step "Backing up PostgreSQL: $database@$host"
   log_info "Host: $db_host:$db_port, User: $db_user"
+  [[ "$enc_type" != "none" ]] && log_info "Encryption: $enc_type"
   [[ ${#exclude_opts[@]} -gt 0 ]] && log_info "Excluding data from: ${exclude_opts[*]}"
 
   require_container "$POSTGRES_CONTAINER"
 
   # Use pg_dump from container, connect to remote, pipe through zstd
   # Capture stderr to check for errors while still allowing verbose progress
-  local err_file
-  err_file=$(mktemp)
-  trap "rm -f '$err_file'" RETURN
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  chmod 700 "$tmpdir"
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local err_file="$tmpdir/errors.log"
 
   # Build pg_dump command options
   local pg_opts=(
@@ -54,12 +74,26 @@ pg_backup() {
   [[ "$verbose" == "true" ]] && pg_opts+=(--verbose)
   pg_opts+=("${exclude_opts[@]}")
 
-  # Run pg_dump, optionally with verbose output to stderr
-  if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-    pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -3 > "$output_file"; then
-    log_error "pg_dump failed"
-    rm -f "$output_file"  # Remove empty/partial file
-    return 1
+  # Run pg_dump with compression and optional encryption
+  log_info "Running pg_dump..."
+  if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
+    # With encryption
+    if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -3 | encrypt_backup_stream > "$output_file"; then
+      log_error "pg_dump failed"
+      rm -f "$output_file"
+      audit_backup "$host" "$database" "failure"
+      return 1
+    fi
+  else
+    # Without encryption
+    if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -3 > "$output_file"; then
+      log_error "pg_dump failed"
+      rm -f "$output_file"
+      audit_backup "$host" "$database" "failure"
+      return 1
+    fi
   fi
 
   # Check if output file was actually created and has content
@@ -67,10 +101,47 @@ pg_backup() {
     log_error "pg_dump produced no output. Errors:"
     cat "$err_file" >&2
     rm -f "$output_file"
+    audit_backup "$host" "$database" "failure"
     return 1
   fi
 
+  # Secure file permissions
+  secure_file "$output_file"
+
+  # Calculate checksum and create metadata file
+  local file_size checksum
+  file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
+  checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
+
+  # Create metadata JSON
+  local meta_file="${output_file}.meta.json"
+  jq -n \
+    --arg host "$host" \
+    --arg database "$database" \
+    --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg size "$file_size" \
+    --arg checksum "$checksum" \
+    --arg encryption "$enc_type" \
+    --arg dbx_version "${VERSION:-unknown}" \
+    '{
+      host: $host,
+      database: $database,
+      timestamp: $timestamp,
+      size: ($size | tonumber),
+      checksums: { sha256: $checksum },
+      encryption: $encryption,
+      dbx_version: $dbx_version
+    }' > "$meta_file"
+  secure_file "$meta_file"
+
+  # Calculate duration and audit
+  local end_time duration
+  end_time=$(date +%s)
+  duration=$((end_time - start_time))
+  audit_backup "$host" "$database" "success" "$output_file" "$file_size" "$duration"
+
   log_success "Backup complete: $output_file"
+  log_info "Checksum (SHA256): $checksum"
 }
 
 # ============================================================================
@@ -81,17 +152,28 @@ pg_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
 
+  local start_time
+  start_time=$(date +%s)
+
   log_step "Restoring PostgreSQL backup to: $target_db"
 
   # Decompress backup first (use DATA_DIR to avoid /tmp quota issues)
   local tmp_dir="$DATA_DIR/.tmp"
   mkdir -p "$tmp_dir"
+  chmod 700 "$tmp_dir"
   local tmpfile
   tmpfile=$(mktemp -p "$tmp_dir")
   trap "rm -f '$tmpfile'" RETURN
 
-  log_info "Decompressing backup..."
-  decompress "$backup_file" > "$tmpfile"
+  # Check if file is encrypted
+  if is_file_encrypted "$backup_file"; then
+    log_info "Decrypting and decompressing backup..."
+  else
+    log_info "Decompressing backup..."
+  fi
+
+  # Use the unified decompress function that handles encryption
+  decompress_backup "$backup_file" > "$tmpfile"
 
   local file_size
   file_size=$(ls -lh "$tmpfile" | awk '{print $5}')
@@ -144,7 +226,22 @@ pg_restore_backup() {
     docker exec "$POSTGRES_CONTAINER" rm -f /tmp/restore.dump
   fi
 
+  # Calculate duration and audit
+  local end_time duration
+  end_time=$(date +%s)
+  duration=$((end_time - start_time))
+  audit_restore "$backup_file" "$target_db" "success" "$duration"
+
   log_success "Restore complete: $target_db"
+}
+
+# ============================================================================
+# PostgreSQL Backup Verification
+# ============================================================================
+
+# Backward compatibility alias - use verify_backup from core.sh
+pg_verify_backup() {
+  verify_backup "$@"
 }
 
 # ============================================================================
