@@ -62,7 +62,7 @@ main() {
   curl -fsSL "https://raw.githubusercontent.com/$REPO/main/dbx" -o "$INSTALL_DIR/dbx"
   chmod +x "$INSTALL_DIR/dbx"
 
-  for lib in core.sh tunnel.sh postgres.sh mysql.sh; do
+  for lib in core.sh tunnel.sh encrypt.sh postgres.sh mysql.sh notify.sh schedule.sh storage.sh; do
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$lib" -o "$LIB_DIR/$lib"
   done
 
