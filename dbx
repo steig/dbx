@@ -14,7 +14,6 @@ VERSION="0.5.0"
 #   dbx clean [--keep N]
 #   dbx config edit|show|init
 #   dbx vault set|get|list|delete <host>
-#   dbx tunnel <host> [--keep]
 #   dbx query <host> [database]
 #
 
@@ -44,12 +43,17 @@ cmd_backup() {
   local host=""
   local database=""
   local verbose=false
+  local upload=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -v|--verbose)
         verbose=true
+        shift
+        ;;
+      --upload)
+        upload=true
         shift
         ;;
       -*)
@@ -73,14 +77,6 @@ cmd_backup() {
   require_jq
   require_docker
 
-  # Check encryption requirements
-  local encrypt=false
-  if is_encryption_enabled; then
-    require_gpg
-    encrypt=true
-    log_info "Encryption enabled"
-  fi
-
   local host_config
   host_config=$(get_host_config "$host")
   [[ -z "$host_config" ]] && die "Host '$host' not found in config"
@@ -101,10 +97,6 @@ cmd_backup() {
   local ts
   ts=$(timestamp)
   local backup_file="$backup_dir/${database}_${ts}.sql.zst"
-  local meta_file="$backup_dir/${database}_${ts}.meta.json"
-
-  local start_time
-  start_time=$(date +%s)
 
   case "$db_type" in
     postgres|postgresql)
@@ -118,42 +110,20 @@ cmd_backup() {
       ;;
   esac
 
-  # Encrypt if enabled
-  if [[ "$encrypt" == "true" ]]; then
-    log_info "Encrypting backup..."
-    encrypt_stream < "$backup_file" > "${backup_file}.gpg"
-    rm -f "$backup_file"
-    backup_file="${backup_file}.gpg"
-  fi
-
-  local end_time duration file_size
-  end_time=$(date +%s)
-  duration=$((end_time - start_time))
-  file_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file")
-
-  # Write metadata
-  local excluded_json
-  excluded_json=$(get_excluded_tables "$host" "$database" | jq -R -s 'split("\n") | map(select(. != ""))')
-
-  cat > "$meta_file" <<EOF
-{
-  "database": "$database",
-  "host": "$host",
-  "type": "$db_type",
-  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "filename": "$(basename "$backup_file")",
-  "size_bytes": $file_size,
-  "size_human": "$(human_size "$file_size")",
-  "duration_seconds": $duration,
-  "encrypted": $encrypt,
-  "excluded_tables": $excluded_json
-}
-EOF
-
   echo ""
-  log_success "Backup saved to: $backup_file"
-  log_info "Size: $(human_size "$file_size") | Duration: ${duration}s"
-  [[ "$encrypt" == "true" ]] && log_info "Encrypted: AES-256"
+  log_success "Backup complete: $host/$database"
+
+  # Upload to cloud storage if requested
+  if [[ "$upload" == "true" ]]; then
+    if is_storage_configured; then
+      local enc_ext
+      enc_ext=$(get_encryption_extension)
+      local actual_file="$backup_dir/${database}_${ts}.sql.zst${enc_ext}"
+      storage_upload "$actual_file" "$host/$database/$(basename "$actual_file")"
+    else
+      log_warn "Storage not configured. Skipping upload."
+    fi
+  fi
 }
 
 cmd_restore() {
@@ -186,7 +156,7 @@ cmd_restore() {
   # Fuzzy selection if no source provided or just a host
   if [[ -z "$source" ]] || { [[ -n "$source" ]] && [[ ! -f "$source" ]] && [[ "$source" != */* ]]; }; then
     if ! command -v fzf &>/dev/null; then
-      die "Usage: db restore <host>/<database>/latest [--name <name>]\n       Install fzf for interactive selection"
+      die "Usage: dbx restore <host>/<database>/latest [--name <name>]\n       Install fzf for interactive selection"
     fi
 
     # Build search path
@@ -199,7 +169,7 @@ cmd_restore() {
 
     # Find all backup files (including encrypted)
     local backups
-    backups=$(find "$search_dir" -type f \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" -o -name "*.sql.zst.gpg" -o -name "*.sql.gz.gpg" \) 2>/dev/null | sort -r)
+    backups=$(find "$search_dir" -type f \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" -o -name "*.sql.zst.gpg" -o -name "*.sql.gz.gpg" -o -name "*.sql.zst.age" -o -name "*.sql.gz.age" \) 2>/dev/null | sort -r)
 
     if [[ -z "$backups" ]]; then
       die "No backup files found in: $search_dir"
@@ -255,7 +225,7 @@ cmd_restore() {
 
     if [[ "$selector" == "latest" ]]; then
       # Find latest backup (encrypted or not)
-      backup_file=$(ls -t "$backup_dir"/*.sql.zst.gpg "$backup_dir"/*.sql.zst 2>/dev/null | head -1)
+      backup_file=$(ls -t "$backup_dir"/*.sql.zst.age "$backup_dir"/*.sql.zst.gpg "$backup_dir"/*.sql.zst 2>/dev/null | head -1)
     else
       backup_file="$backup_dir/$selector"
     fi
@@ -311,7 +281,7 @@ cmd_restore() {
 
   case "$db_type" in
     postgres|postgresql)
-      pg_restore_backup "$backup_file" "$target_name" 4
+      pg_restore_backup "$backup_file" "$target_name"
       ;;
     mysql|mariadb)
       mysql_restore_backup "$backup_file" "$target_name"
@@ -375,7 +345,7 @@ cmd_list() {
     for host_dir in "$DATA_DIR"/*/; do
       if [[ -d "$host_dir" ]]; then
         local h=$(basename "$host_dir")
-        local count=$(find "$host_dir" -name "*.sql.zst" 2>/dev/null | wc -l | tr -d ' ')
+        local count=$(find "$host_dir" \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" -o -name "*.sql.zst.age" \) 2>/dev/null | wc -l | tr -d ' ')
         echo "  $h ($count backups)"
       fi
     done
@@ -410,7 +380,7 @@ cmd_clean() {
       local backups=()
       while IFS= read -r f; do
         [[ -n "$f" ]] && backups+=("$f")
-      done < <(ls -t "$db_dir"/*.sql.zst.gpg "$db_dir"/*.sql.zst 2>/dev/null)
+      done < <(ls -t "$db_dir"/*.sql.zst.age "$db_dir"/*.sql.zst.gpg "$db_dir"/*.sql.zst 2>/dev/null)
 
       if [[ ${#backups[@]} -gt $keep ]]; then
         local to_remove=("${backups[@]:$keep}")
@@ -419,7 +389,8 @@ cmd_clean() {
           size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
           total_freed=$((total_freed + size))
           # Handle both encrypted and non-encrypted meta files
-          meta_file="${backup%.gpg}"
+          meta_file="${backup%.age}"
+          meta_file="${meta_file%.gpg}"
           meta_file="${meta_file%.sql.zst}.meta.json"
           rm -f "$backup" "$meta_file"
           ((total_removed++))
@@ -473,7 +444,8 @@ cmd_vault() {
 
       # Store in keychain
       keychain_set "$host" "$password"
-      log_success "Credentials stored in macOS Keychain for: $host"
+      audit_vault "set" "$host" "success"
+      log_success "Credentials stored for: $host"
       log_info "Password will be retrieved automatically during backup"
       ;;
 
@@ -492,6 +464,7 @@ cmd_vault() {
       [[ -z "$host" ]] && die "Usage: dbx vault delete <host>"
       if keychain_delete "$host"; then
         log_success "Credentials removed for: $host"
+        audit_vault "delete" "$host" "success"
       else
         log_warn "No credentials found for: $host"
       fi
@@ -541,6 +514,7 @@ cmd_vault() {
       fi
 
       set_encryption_key "$passphrase"
+      audit_vault "set" "encryption_key" "success"
       log_success "Encryption key stored"
       log_info "Enable encryption in config: dbx config edit"
       log_info "Set \"encryption\": true in defaults section"
@@ -559,7 +533,7 @@ cmd_vault() {
       ;;
 
     init-age|init-encryption)
-      require_gpg
+      require_age
       init_age_encryption
       ;;
 
@@ -659,8 +633,8 @@ cmd_analyze() {
   local host="${1:-}"
   local database="${2:-}"
 
-  [[ -z "$host" ]] && die "Usage: db analyze <host> <database>"
-  [[ -z "$database" ]] && die "Usage: db analyze <host> <database>"
+  [[ -z "$host" ]] && die "Usage: dbx analyze <host> <database>"
+  [[ -z "$database" ]] && die "Usage: dbx analyze <host> <database>"
 
   require_config
   require_jq
@@ -843,7 +817,7 @@ cmd_query() {
   local host="${1:-}"
   local database="${2:-}"
 
-  [[ -z "$host" ]] && die "Usage: db query <host> [database]"
+  [[ -z "$host" ]] && die "Usage: dbx query <host> [database]"
 
   require_config
   require_jq
@@ -943,22 +917,6 @@ list_databases_for_host() {
   jq -r ".hosts[\"$host\"].databases | keys[]" "$CONFIG_FILE" 2>/dev/null
 }
 
-# Get backup stats for a host/database
-get_backup_stats() {
-  local host="$1"
-  local db="$2"
-  local dir="$DATA_DIR/$host/$db"
-  if [[ -d "$dir" ]]; then
-    local count size latest
-    count=$(find "$dir" -name "*.sql.zst*" 2>/dev/null | wc -l | tr -d ' ')
-    size=$(du -sh "$dir" 2>/dev/null | cut -f1)
-    latest=$(ls -t "$dir"/*.sql.zst* 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/.*_\([0-9]*\)_.*/\1/' | head -c8)
-    echo "${count:-0}|${size:-0B}|${latest:-never}"
-  else
-    echo "0|0B|never"
-  fi
-}
-
 tui_header() {
   clear
   gum style \
@@ -1010,7 +968,7 @@ tui_dashboard() {
           local rel size lock=""
           rel="${f#$DATA_DIR/}"
           size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
-          [[ "$f" == *.gpg ]] && lock=" 🔒"
+          [[ "$f" == *.gpg || "$f" == *.age ]] && lock=" 🔒"
           printf "%-38s %8s%s\n" "${rel:0:38}" "$size" "$lock"
         done <<< "$backup_files"
       } | gum style --border rounded --border-foreground 220 --padding "1 2" --width 60
@@ -1095,7 +1053,7 @@ tui_select_backup() {
   fi
 
   local backups
-  backups=$(find "$DATA_DIR" -type f \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" \) 2>/dev/null | xargs ls -t 2>/dev/null)
+  backups=$(find "$DATA_DIR" -type f \( -name "*.sql.zst" -o -name "*.sql.zst.gpg" -o -name "*.sql.zst.age" \) 2>/dev/null | xargs ls -t 2>/dev/null)
   if [[ -z "$backups" ]]; then
     gum style --foreground 196 "No backup files found"
     return 1
@@ -1108,7 +1066,7 @@ tui_select_backup() {
     rel="${f#$DATA_DIR/}"
     size=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
     date=$(ls -l "$f" 2>/dev/null | awk '{print $6, $7}')
-    [[ "$f" == *.gpg ]] && lock="🔒 "
+    [[ "$f" == *.gpg || "$f" == *.age ]] && lock="🔒 "
     formatted+="${lock}${rel} (${size}, ${date})"$'\n'
   done <<< "$backups"
 
