@@ -70,8 +70,7 @@ cmd_backup() {
     esac
   done
 
-  [[ -z "$host" ]] && die "Usage: dbx backup [-v] <host> <database>"
-  [[ -z "$database" ]] && die "Usage: dbx backup [-v] <host> <database>"
+  [[ -z "$host" ]] && die "Usage: dbx backup [-v] [--upload] <host> [database]"
 
   require_config
   require_jq
@@ -80,6 +79,29 @@ cmd_backup() {
   local host_config
   host_config=$(get_host_config "$host")
   [[ -z "$host_config" ]] && die "Host '$host' not found in config"
+
+  # If no database specified, backup all databases for this host
+  if [[ -z "$database" ]]; then
+    local databases
+    databases=$(jq -r ".hosts[\"$host\"].databases | keys[]" "$CONFIG_FILE" 2>/dev/null)
+    if [[ -z "$databases" ]]; then
+      die "No databases configured for host '$host'. Add them with: dbx config edit"
+    fi
+    log_step "Backing up all databases for $host"
+    local db_errors=0
+    while IFS= read -r db; do
+      log_info "--- $db ---"
+      local backup_args=("$host" "$db")
+      [[ "$verbose" == "true" ]] && backup_args+=("-v")
+      [[ "$upload" == "true" ]] && backup_args+=("--upload")
+      cmd_backup "${backup_args[@]}" || ((db_errors++)) || true
+    done <<< "$databases"
+    if [[ $db_errors -gt 0 ]]; then
+      log_error "$db_errors database(s) failed to backup"
+      return 1
+    fi
+    return 0
+  fi
 
   # Create SSH tunnel if configured
   if has_ssh_tunnel "$host"; then
@@ -98,28 +120,43 @@ cmd_backup() {
   ts=$(timestamp)
   local backup_file="$backup_dir/${database}_${ts}.sql.zst"
 
+  local backup_rc=0
   case "$db_type" in
     postgres|postgresql)
-      pg_backup "$host" "$database" "$backup_file" "$verbose"
+      pg_backup "$host" "$database" "$backup_file" "$verbose" || backup_rc=$?
       ;;
     mysql|mariadb)
-      mysql_backup "$host" "$database" "$backup_file" "$verbose"
+      mysql_backup "$host" "$database" "$backup_file" "$verbose" || backup_rc=$?
       ;;
     *)
       die "Unknown database type: $db_type"
       ;;
   esac
 
+  if [[ $backup_rc -ne 0 ]]; then
+    notify_backup_failure "$host" "$database" "Backup process exited with code $backup_rc"
+    return $backup_rc
+  fi
+
   echo ""
   log_success "Backup complete: $host/$database"
 
-  # Upload to cloud storage if requested
-  if [[ "$upload" == "true" ]]; then
+  # Resolve actual backup file path (may have encryption extension)
+  local enc_ext
+  enc_ext=$(get_encryption_extension)
+  local completed_file="$backup_dir/${database}_${ts}.sql.zst${enc_ext}"
+
+  # Send notification
+  local completed_size
+  completed_size=$(stat -f%z "$completed_file" 2>/dev/null || stat -c%s "$completed_file" 2>/dev/null || echo "0")
+  notify_backup_success "$host" "$database" "$completed_file" "$completed_size"
+
+  # Upload to cloud storage if requested or configured
+  local auto_upload
+  auto_upload=$(get_config_value ".defaults.auto_upload" 2>/dev/null || echo "")
+  if [[ "$upload" == "true" || "$auto_upload" == "true" ]]; then
     if is_storage_configured; then
-      local enc_ext
-      enc_ext=$(get_encryption_extension)
-      local actual_file="$backup_dir/${database}_${ts}.sql.zst${enc_ext}"
-      storage_upload "$actual_file" "$host/$database/$(basename "$actual_file")"
+      storage_upload "$completed_file" "$host/$database/$(basename "$completed_file")"
     else
       log_warn "Storage not configured. Skipping upload."
     fi
@@ -239,8 +276,10 @@ cmd_restore() {
 
   # Determine target database name
   if [[ -z "$target_name" ]]; then
-    local base_name="${database:-$(basename "$backup_file" .sql.zst.gpg)}"
-    base_name="${base_name%.sql.zst}"  # Handle non-encrypted
+    local base_name="${database:-$(basename "$backup_file")}"
+    base_name="${base_name%.sql.zst.age}"
+    base_name="${base_name%.sql.zst.gpg}"
+    base_name="${base_name%.sql.zst}"
     base_name="${base_name%%_[0-9]*}"  # Remove timestamp suffix
     local date_suffix
     date_suffix=$(date +"%Y%m%d")
@@ -293,6 +332,7 @@ cmd_restore() {
 
   echo ""
   log_success "Database restored as: $target_name"
+  notify_restore_success "$backup_file" "$target_name"
 }
 
 cmd_list() {
@@ -353,7 +393,11 @@ cmd_list() {
 }
 
 cmd_clean() {
-  local keep=10
+  local keep
+  keep=$(get_config_value ".defaults.keep_backups" 2>/dev/null || echo "10")
+  [[ -z "$keep" || "$keep" == "null" ]] && keep=10
+  local dry_run=false
+  local older_than_days=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -361,12 +405,24 @@ cmd_clean() {
         keep="$2"
         shift 2
         ;;
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      --older-than)
+        older_than_days="$2"
+        shift 2
+        ;;
+      -*)
+        die "Unknown option: $1"
+        ;;
       *)
         shift
         ;;
     esac
   done
 
+  [[ "$dry_run" == "true" ]] && log_info "[DRY RUN] No files will be deleted"
   log_step "Cleaning old backups (keeping $keep per database)"
 
   local total_removed=0
@@ -392,16 +448,57 @@ cmd_clean() {
           meta_file="${backup%.age}"
           meta_file="${meta_file%.gpg}"
           meta_file="${meta_file%.sql.zst}.meta.json"
-          rm -f "$backup" "$meta_file"
+          if [[ "$dry_run" == "true" ]]; then
+            log_info "Would remove: $(basename "$backup")"
+          else
+            rm -f "$backup" "$meta_file"
+            log_info "Removed: $(basename "$backup")"
+          fi
           ((total_removed++))
-          log_info "Removed: $(basename "$backup")"
+        done
+      fi
+
+      # Time-based retention (skip backups in the keep set)
+      if [[ -n "$older_than_days" ]]; then
+        local idx=0
+        for backup in "${backups[@]}"; do
+          ((idx++))
+          # Preserve the newest $keep backups regardless of age
+          [[ $idx -le $keep ]] && continue
+          # Skip if already removed by count-based retention
+          [[ ! -f "$backup" ]] && continue
+          local file_age_days
+          if is_macos; then
+            file_age_days=$(( ($(date +%s) - $(stat -f%m "$backup")) / 86400 ))
+          else
+            file_age_days=$(( ($(date +%s) - $(stat -c%Y "$backup")) / 86400 ))
+          fi
+          if [[ $file_age_days -gt $older_than_days ]]; then
+            local size meta_file
+            size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
+            total_freed=$((total_freed + size))
+            meta_file="${backup%.age}"
+            meta_file="${meta_file%.gpg}"
+            meta_file="${meta_file%.sql.zst}.meta.json"
+            if [[ "$dry_run" == "true" ]]; then
+              log_info "Would remove (${file_age_days}d old): $(basename "$backup")"
+            else
+              rm -f "$backup" "$meta_file"
+              log_info "Removed (${file_age_days}d old): $(basename "$backup")"
+            fi
+            ((total_removed++))
+          fi
         done
       fi
     done
   done
 
   if [[ $total_removed -gt 0 ]]; then
-    log_success "Removed $total_removed backups, freed $(human_size $total_freed)"
+    if [[ "$dry_run" == "true" ]]; then
+      log_info "Would remove $total_removed backups, freeing $(human_size $total_freed)"
+    else
+      log_success "Removed $total_removed backups, freed $(human_size $total_freed)"
+    fi
   else
     log_info "No old backups to remove"
   fi
@@ -608,6 +705,7 @@ cmd_config() {
 }
 EOF
       log_success "Config created: $CONFIG_FILE"
+      secure_file "$CONFIG_FILE"
       log_info "Edit it with: dbx config edit"
       log_info "Store passwords with: dbx vault set <host>"
       ;;
@@ -615,6 +713,13 @@ EOF
     edit)
       require_config
       "${EDITOR:-vim}" "$CONFIG_FILE"
+      # Validate JSON after editing
+      if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        log_error "Config file contains invalid JSON!"
+        log_warn "Fix it with: dbx config edit"
+      else
+        log_success "Config is valid JSON"
+      fi
       ;;
 
     show)
@@ -623,8 +728,94 @@ EOF
       jq '.' "$CONFIG_FILE"
       ;;
 
+    validate)
+      require_config
+      require_jq
+
+      local errors=0
+
+      # Check valid JSON
+      if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+        log_error "Config file is not valid JSON"
+        return 1
+      fi
+      log_success "Valid JSON"
+
+      # Check hosts exist
+      local host_count
+      host_count=$(jq '.hosts | length' "$CONFIG_FILE")
+      if [[ "$host_count" -eq 0 ]]; then
+        log_warn "No hosts configured"
+      else
+        log_success "$host_count host(s) configured"
+      fi
+
+      # Validate each host
+      local hosts
+      hosts=$(jq -r '.hosts | keys[]' "$CONFIG_FILE")
+      while IFS= read -r h; do
+        local htype huser
+        htype=$(jq -r ".hosts[\"$h\"].type // empty" "$CONFIG_FILE")
+        huser=$(jq -r ".hosts[\"$h\"].user // empty" "$CONFIG_FILE")
+
+        if [[ -z "$htype" ]]; then
+          log_error "Host '$h': missing 'type' (postgres or mysql)"
+          ((errors++))
+        elif [[ "$htype" != "postgres" && "$htype" != "postgresql" && "$htype" != "mysql" && "$htype" != "mariadb" ]]; then
+          log_error "Host '$h': invalid type '$htype' (use postgres or mysql)"
+          ((errors++))
+        fi
+
+        if [[ -z "$huser" ]]; then
+          log_error "Host '$h': missing 'user'"
+          ((errors++))
+        fi
+
+        # Check if a password source exists (without invoking external commands)
+        local has_vault has_cmd has_plain
+        has_vault=$(keychain_get "$h" 2>/dev/null || true)
+        has_cmd=$(get_config_value ".hosts[\"$h\"].password_cmd" 2>/dev/null || true)
+        has_plain=$(get_config_value ".hosts[\"$h\"].password" 2>/dev/null || true)
+        if [[ -z "$has_vault" && -z "$has_cmd" && -z "$has_plain" ]]; then
+          log_warn "Host '$h': no password source found (vault, password_cmd, or config)"
+        fi
+      done <<< "$hosts"
+
+      # Check encryption config coherence
+      local enc_type
+      enc_type=$(get_encryption_type 2>/dev/null || echo "none")
+      if [[ "$enc_type" == "age" ]]; then
+        local recipients
+        recipients=$(get_age_recipients_file)
+        if [[ ! -f "$recipients" ]]; then
+          log_error "Encryption type 'age' but recipients file missing: $recipients"
+          log_info "Run: dbx vault init-age"
+          ((errors++))
+        else
+          log_success "Age encryption configured"
+        fi
+      elif [[ "$enc_type" == "gpg" ]]; then
+        if ! get_encryption_key &>/dev/null; then
+          log_error "Encryption type 'gpg' but no encryption key set"
+          log_info "Run: dbx vault set-encryption-key"
+          ((errors++))
+        else
+          log_success "GPG encryption configured"
+        fi
+      fi
+
+      if [[ $errors -gt 0 ]]; then
+        echo ""
+        log_error "$errors error(s) found"
+        return 1
+      else
+        echo ""
+        log_success "Config validation passed"
+      fi
+      ;;
+
     *)
-      die "Unknown config action: $action (use: init, edit, show)"
+      die "Unknown config action: $action (use: init, edit, show, validate)"
       ;;
   esac
 }
@@ -868,6 +1059,111 @@ cmd_query() {
       die "Unknown database type: $db_type"
       ;;
   esac
+}
+
+cmd_test() {
+  local host="${1:-}"
+
+  [[ -z "$host" ]] && die "Usage: dbx test <host>"
+
+  require_config
+  require_jq
+  require_docker
+
+  local host_config
+  host_config=$(get_host_config "$host")
+  [[ -z "$host_config" ]] && die "Host '$host' not found in config"
+
+  log_step "Testing connection to: $host"
+
+  local db_type db_host db_port db_user
+  db_type=$(get_db_type "$host")
+  db_host=$(get_config_value ".hosts[\"$host\"].host")
+  db_port=$(get_config_value ".hosts[\"$host\"].port")
+  db_user=$(get_config_value ".hosts[\"$host\"].user")
+
+  # Test 1: SSH tunnel (if configured)
+  if has_ssh_tunnel "$host"; then
+    log_info "SSH tunnel configured"
+    if create_ssh_tunnel "$host"; then
+      log_success "SSH tunnel established"
+    else
+      log_error "SSH tunnel failed"
+      return 1
+    fi
+    db_host=$(get_effective_host "$host")
+    db_port=$(get_effective_port "$host")
+  else
+    log_info "No SSH tunnel (direct connection)"
+  fi
+
+  # Test 2: Docker container
+  case "$db_type" in
+    postgres|postgresql)
+      log_info "Checking PostgreSQL container..."
+      require_container "$POSTGRES_CONTAINER"
+      log_success "Container ready: $POSTGRES_CONTAINER"
+      ;;
+    mysql|mariadb)
+      log_info "Checking MySQL container..."
+      require_container "$MYSQL_CONTAINER"
+      log_success "Container ready: $MYSQL_CONTAINER"
+      ;;
+  esac
+
+  # Test 3: Credentials
+  local db_pass
+  db_pass=$(get_password "$host" 2>/dev/null || true)
+  if [[ -n "$db_pass" ]]; then
+    log_success "Credentials found"
+  else
+    log_error "No credentials found for '$host'"
+    log_info "Set with: dbx vault set $host"
+    return 1
+  fi
+
+  # Test 4: Database connectivity
+  log_info "Testing database connection..."
+  case "$db_type" in
+    postgres|postgresql)
+      if docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -c "SELECT 1" >/dev/null 2>&1; then
+        log_success "PostgreSQL connection successful"
+      else
+        log_error "PostgreSQL connection failed"
+        return 1
+      fi
+      ;;
+    mysql|mariadb)
+      if docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+        mysqladmin ping -h "$db_host" -P "$db_port" -u "$db_user" >/dev/null 2>&1; then
+        log_success "MySQL connection successful"
+      else
+        log_error "MySQL connection failed"
+        return 1
+      fi
+      ;;
+  esac
+
+  # Test 5: List available databases
+  log_info "Available databases:"
+  case "$db_type" in
+    postgres|postgresql)
+      docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -t -A -c \
+        "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname" 2>/dev/null | \
+        while read -r dbname; do echo "  - $dbname"; done
+      ;;
+    mysql|mariadb)
+      docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+        mysql -h "$db_host" -P "$db_port" -u "$db_user" -N -e "SHOW DATABASES" 2>/dev/null | \
+        grep -v -E "^(information_schema|performance_schema|mysql|sys)$" | \
+        while read -r dbname; do echo "  - $dbname"; done
+      ;;
+  esac
+
+  echo ""
+  log_success "All connection tests passed for: $host"
 }
 
 # ============================================================================
@@ -1441,8 +1737,9 @@ ${BOLD}COMMANDS:${NC}
   verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker
+  test <host>                  Test connection to a database host
   list [host] [database]       List available backups
-  clean [--keep N]             Remove old backups (default: keep 10)
+  clean [--keep N] [--dry-run] [--older-than D]  Remove old backups
 
 ${BOLD}CREDENTIAL & ENCRYPTION:${NC}
   vault set|get|delete|list    Manage host credentials
@@ -1454,7 +1751,7 @@ ${BOLD}SCHEDULING & STORAGE:${NC}
   schedule add|remove|list     Manage scheduled backups (launchd/systemd)
   storage upload|download|sync S3/MinIO cloud storage
   storage info                 Show storage configuration
-  config init|edit|show        Manage configuration
+  config init|edit|show|validate  Manage configuration
 
 ${BOLD}EXAMPLES:${NC}
   # Setup
@@ -1564,6 +1861,9 @@ main() {
       ;;
     verify)
       cmd_verify "$@"
+      ;;
+    test|ping)
+      cmd_test "$@"
       ;;
     analyze|stats)
       cmd_analyze "$@"
