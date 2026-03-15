@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.5.0"
+VERSION="0.6.0"
 #
 # Usage:
 #   dbx backup [-v] [--upload] <host> [database]
