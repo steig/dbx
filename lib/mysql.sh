@@ -128,12 +128,17 @@ mysql_backup() {
   # Clean up credential file in container
   docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
 
+  # Get compression level from config
+  local comp_level
+  comp_level=$(get_config_value ".defaults.compression_level" 2>/dev/null || echo "3")
+  [[ ! "$comp_level" =~ ^[0-9]+$ ]] && comp_level=3
+
   # Combine, compress, and optionally encrypt
   log_info "Compressing..."
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
-    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -3 | encrypt_backup_stream > "$output_file"
+    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$output_file"
   else
-    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -3 > "$output_file"
+    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" > "$output_file"
   fi
   secure_file "$output_file"
 

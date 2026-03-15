@@ -74,12 +74,17 @@ pg_backup() {
   [[ "$verbose" == "true" ]] && pg_opts+=(--verbose)
   pg_opts+=("${exclude_opts[@]}")
 
+  # Get compression level from config
+  local comp_level
+  comp_level=$(get_config_value ".defaults.compression_level" 2>/dev/null || echo "3")
+  [[ ! "$comp_level" =~ ^[0-9]+$ ]] && comp_level=3
+
   # Run pg_dump with compression and optional encryption
   log_info "Running pg_dump..."
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
     # With encryption
     if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -3 | encrypt_backup_stream > "$output_file"; then
+      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$output_file"; then
       log_error "pg_dump failed"
       rm -f "$output_file"
       audit_backup "$host" "$database" "failure"
@@ -88,7 +93,7 @@ pg_backup() {
   else
     # Without encryption
     if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -3 > "$output_file"; then
+      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" > "$output_file"; then
       log_error "pg_dump failed"
       rm -f "$output_file"
       audit_backup "$host" "$database" "failure"
