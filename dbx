@@ -7,14 +7,19 @@
 VERSION="0.5.0"
 #
 # Usage:
-#   dbx backup <host> <database>
+#   dbx backup [-v] [--upload] <host> [database]
 #   dbx restore <host>/<database>/latest [--name <name>]
 #   dbx restore <backup-file> [--name <name>]
+#   dbx test <host>
 #   dbx list [host] [database]
-#   dbx clean [--keep N]
-#   dbx config edit|show|init
-#   dbx vault set|get|list|delete <host>
+#   dbx clean [--keep N] [--dry-run] [--older-than D]
+#   dbx verify [backup-file]
+#   dbx analyze <host> <database>
 #   dbx query <host> [database]
+#   dbx config init|edit|show|validate
+#   dbx vault set|get|list|delete <host>
+#   dbx schedule add|remove|list|run
+#   dbx storage upload|download|sync|info
 #
 
 set -euo pipefail
@@ -356,10 +361,12 @@ cmd_list() {
 
     for meta in "$backup_dir"/*.meta.json; do
       [[ ! -f "$meta" ]] && continue
-      local filename size_human timestamp
-      filename=$(jq -r '.filename' "$meta")
-      size_human=$(jq -r '.size_human' "$meta")
-      timestamp=$(jq -r '.timestamp' "$meta" | cut -d'T' -f1)
+      local filename size_bytes size_human timestamp
+      filename=$(jq -r '.database + "_" + (.timestamp // "" | split("T")[0]) + ".sql.zst"' "$meta" 2>/dev/null)
+      [[ -z "$filename" || "$filename" == "null_" ]] && filename=$(basename "$meta" .meta.json)
+      size_bytes=$(jq -r '.size // 0' "$meta")
+      size_human=$(human_size "$size_bytes")
+      timestamp=$(jq -r '.timestamp // "" | split("T")[0]' "$meta")
       printf "%-40s %10s %12s\n" "$filename" "$size_human" "$timestamp"
     done
   elif [[ -n "$host" ]]; then
@@ -1732,7 +1739,7 @@ ${BOLD}USAGE:${NC}
 
 ${BOLD}COMMANDS:${NC}
   tui                          Interactive TUI mode (requires gum)
-  backup [-v] <host> <database>  Backup a remote database (-v for verbose)
+  backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
   restore <source> [--name N]  Restore a backup to local container
   verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database

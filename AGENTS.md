@@ -7,7 +7,7 @@ encryption (age/GPG), S3 storage, scheduled backups, and a TUI mode.
 ## Project Structure
 
 ```
-dbx                    # Main entrypoint script (~1650 lines)
+dbx                    # Main entrypoint script (~1900 lines)
 lib/
   core.sh              # Config, logging, vault, crypto, verification, utilities
   tunnel.sh            # SSH tunnel creation/cleanup
@@ -144,7 +144,8 @@ done
 1. Add `cmd_<name>()` function in `dbx`
 2. Add case to `main()` dispatcher (include aliases if appropriate)
 3. Add to `cmd_help()` output
-4. If it needs a new library, create `lib/<name>.sh` and source it at top of `dbx`
+4. Update usage comment block at top of `dbx`
+5. If it needs a new library, create `lib/<name>.sh` and source it at top of `dbx`
 
 ### Adding a New Library Module
 
