@@ -63,6 +63,8 @@ require_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     die "Config not found. Run: dbx config init"
   fi
+  # Ensure config has secure permissions (contains host info)
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
 require_jq() {
@@ -187,30 +189,36 @@ is_linux() { [[ "$(uname)" == "Linux" ]]; }
 # GPG-encrypted vault file location
 VAULT_GPG_FILE="$CONFIG_DIR/vault.gpg"
 VAULT_GPG_KEY=""  # Set via config or DBX_GPG_KEY env
+_VAULT_BACKEND_CACHE=""
 
 # Detect available vault backend
 detect_vault_backend() {
+  if [[ -n "$_VAULT_BACKEND_CACHE" ]]; then
+    echo "$_VAULT_BACKEND_CACHE"
+    return
+  fi
+
+  local result=""
   local configured_backend
   configured_backend=$(get_config_value ".vault.backend" 2>/dev/null || echo "")
 
   # If explicitly configured, use that
   if [[ -n "$configured_backend" && "$configured_backend" != "auto" ]]; then
-    echo "$configured_backend"
-    return
+    result="$configured_backend"
+  elif is_macos; then
+    result="keychain"
+  elif is_linux && command -v secret-tool &>/dev/null; then
+    result="secret-tool"
+  elif command -v pass &>/dev/null; then
+    result="pass"
+  elif command -v gpg &>/dev/null; then
+    result="gpg-file"
+  else
+    result="none"
   fi
 
-  # Auto-detect by priority
-  if is_macos; then
-    echo "keychain"
-  elif is_linux && command -v secret-tool &>/dev/null; then
-    echo "secret-tool"
-  elif command -v pass &>/dev/null; then
-    echo "pass"
-  elif command -v gpg &>/dev/null; then
-    echo "gpg-file"
-  else
-    echo "none"
-  fi
+  _VAULT_BACKEND_CACHE="$result"
+  echo "$result"
 }
 
 # Get configured GPG key for vault
@@ -772,6 +780,9 @@ cleanup_secrets() {
 setup_security_trap() {
   trap 'cleanup_secrets' EXIT INT TERM
 }
+
+# Activate security cleanup on exit
+setup_security_trap
 
 # ============================================================================
 # Backup Verification
