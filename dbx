@@ -226,14 +226,15 @@ cmd_restore() {
       printf "%-60s %8s  %s\n" "$rel_path" "$size" "$date"
     done)
 
-    # Run fzf
+    # Run fzf — pass DATA_DIR via env so the preview shell can quote it,
+    # which keeps paths with spaces or shell metacharacters safe.
     local selected
-    selected=$(echo "$formatted" | fzf \
+    selected=$(echo "$formatted" | DBX_PREVIEW_DIR="$DATA_DIR" fzf \
       --header="Select backup to restore (ESC to cancel)" \
       --prompt="Restore> " \
       --height=80% \
       --layout=reverse \
-      --preview="echo 'File: {1}'; echo ''; zstd -dcq '$DATA_DIR/{1}' 2>/dev/null | head -30 || gzip -dc '$DATA_DIR/{1}' 2>/dev/null | head -30 || head -30 '$DATA_DIR/{1}'" \
+      --preview='echo "File: {1}"; echo ""; zstd -dcq "$DBX_PREVIEW_DIR/{1}" 2>/dev/null | head -30 || gzip -dc "$DBX_PREVIEW_DIR/{1}" 2>/dev/null | head -30 || head -30 "$DBX_PREVIEW_DIR/{1}"' \
       --preview-window=right:50%:wrap \
       | awk '{print $1}')
 
