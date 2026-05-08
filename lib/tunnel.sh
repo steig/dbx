@@ -107,12 +107,11 @@ cleanup_tunnel() {
 get_effective_host() {
   local host="$1"
   if has_ssh_tunnel "$host"; then
-    # Docker containers can't reach localhost on host - use host.docker.internal on macOS
-    if [[ "$(uname)" == "Darwin" ]]; then
-      echo "host.docker.internal"
-    else
-      echo "172.17.0.1"  # Docker bridge gateway on Linux
-    fi
+    # Containers reach the host at host.docker.internal — added via
+    # --add-host=...:host-gateway when require_container creates them.
+    # Works on Docker Desktop (mac/win), rootful and rootless Docker,
+    # and Podman, regardless of which network the container is on.
+    echo "host.docker.internal"
   else
     get_config_value ".hosts[\"$host\"].host"
   fi
