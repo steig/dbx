@@ -1,6 +1,37 @@
 # dbx
 
-Database backup and restore utility. Uses Docker for pg_dump/mysqldump (no local DB install needed). Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.).
+> A pragmatic database backup and restore CLI for PostgreSQL and MySQL. No local DB install. SSH tunnels for remote production. Encryption at rest. S3-compatible cloud storage. Scheduled backups via launchd or systemd. macOS and Linux.
+
+[![CI](https://github.com/steig/dbx/actions/workflows/ci.yml/badge.svg)](https://github.com/steig/dbx/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/steig/dbx)](https://github.com/steig/dbx/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-97%20passing-brightgreen)](tests/)
+
+```text
+$ dbx backup production myapp
+==> Backing up PostgreSQL: myapp@production
+[INFO] SSH tunnel established (PID: 81923)
+[INFO] Encryption: age
+[INFO] Excluding data: sessions cache logs
+[INFO] Running pg_dump...
+[OK]   Backup complete: ~/.data/dbx/production/myapp/myapp_20260508_103000.sql.zst.age
+[INFO] Checksum (SHA256): 7a3f...
+```
+
+---
+
+## Why dbx?
+
+Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them with the operational glue you'd otherwise build yourself:
+
+- **No local Postgres or MySQL** — dump and restore happen inside official Docker images. Your laptop stays clean.
+- **SSH tunnels handled** — remote DBs in private VPCs (RDS, EC2 internal hosts) just work. Tunnels are reused across runs and torn down on exit.
+- **Restore to a fresh local DB by default** — `dbx restore prod/myapp/latest` creates a versioned, sandboxed copy in a managed Docker container. Production stays untouched.
+- **Encryption at rest** — backups can be `age`-encrypted with one command. Keys live in your sops directory.
+- **Credentials in the system vault** — no plaintext passwords in shell history or config files. macOS Keychain, GNOME libsecret, `pass`, or a GPG-encrypted file as fallback.
+- **One config file, JSON** — version-controllable, tab-completable, no surprises.
+
+Not for you if: you need streaming/PITR replication, point-in-time recovery from WAL, or anything beyond logical dumps.
 
 ## Install
 
@@ -8,79 +39,124 @@ Database backup and restore utility. Uses Docker for pg_dump/mysqldump (no local
 curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash
 ```
 
-Or clone manually:
+Or clone:
+
 ```bash
 git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
 ```
 
-### Requirements
+Once installed, `dbx update` upgrades in place when a new release is out.
 
-- docker
-- jq
-- zstd
-- ssh (for remote databases)
+<details>
+<summary><b>Requirements</b></summary>
 
-#### Optional
+**Required**
 
-- libsecret-tools (Linux, for credential storage) or macOS Keychain
-- pass (Linux, alternative credential storage)
-- age (for age encryption)
-- gpg (for GPG encryption)
-- mc or aws (for S3/MinIO storage)
-- gum (for TUI mode) - `brew install gum`
+- `docker`
+- `jq`
+- `zstd`
+- `ssh` (for remote databases)
+
+**Optional**
+
+| Tool | What it enables |
+|------|-----------------|
+| `libsecret-tools` | Linux desktop credential storage (GNOME Keyring) |
+| `pass` | Linux headless credential storage |
+| `age` | Recommended modern backup encryption |
+| `gpg` | Alternative encryption + headless vault fallback |
+| `mc` or `aws` CLI | S3 / MinIO upload |
+| `gum` | Interactive TUI mode (`dbx tui`) |
+| `fzf` | Interactive backup picker for restore / verify |
+| `pv` | Progress bar during MySQL restore |
+
+</details>
 
 ## Quick Start
 
 ```bash
-# Create config
+# 1. Initialize config + encryption
 dbx config init
-dbx config edit
+dbx config edit                       # add your hosts
+dbx config init-encryption            # generate age keys
 
-# Store credentials securely
+# 2. Store the DB password in the system vault
 dbx vault set production
 
-# Enable encryption (recommended)
-dbx config init-encryption  # Sets up age encryption
+# 3. Test the connection end-to-end
+dbx test production
 
-# Backup
+# 4. Back up
 dbx backup production myapp
 
-# Restore to local Docker container
+# 5. Restore to a sandboxed local container
 dbx restore production/myapp/latest
-
-# Verify backup integrity
-dbx verify production/myapp/latest
 ```
+
+Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-managed `postgres-dbx` or `mysql-dbx` container — production stays untouched.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `dbx tui` | Interactive TUI mode (requires gum) |
-| `dbx backup <host> <database> [--upload]` | Backup a database (optionally upload to S3) |
-| `dbx restore <source> [--name N]` | Restore to local container |
-| `dbx verify <backup-file>` | Verify backup checksum |
-| `dbx query <host> [database]` | Interactive SQL shell |
-| `dbx analyze <host> <database>` | Table size analysis |
-| `dbx list [host] [database]` | List available backups |
-| `dbx clean [--keep N]` | Remove old backups |
-| `dbx vault set\|get\|delete\|list\|info` | Manage credentials |
-| `dbx config init\|edit\|show` | Manage configuration |
-| `dbx schedule add\|list\|remove` | Manage scheduled backups |
-| `dbx storage list\|upload\|download\|sync` | Manage cloud storage |
+| `dbx tui` | Interactive menu mode (requires `gum`) |
+| `dbx backup [-v] [--upload] <host> [database]` | Back up one DB or every DB on a host |
+| `dbx restore <source> [--name N]` | Restore to a local container |
+| `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
+| `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
+| `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
+| `dbx analyze <host> <database>` | Pick tables to exclude from data dumps |
+| `dbx list [host] [database]` | List local backups |
+| `dbx clean [--keep N] [--dry-run] [--older-than D]` | Retention sweep |
+| `dbx vault set\|get\|delete\|list\|info` | Manage host credentials |
+| `dbx config init\|edit\|show\|validate` | Manage configuration |
+| `dbx schedule add\|list\|remove\|run` | Manage scheduled backups |
+| `dbx storage upload\|download\|list\|sync\|info` | Cloud storage |
 | `dbx update` | Re-run install.sh to upgrade to the latest release |
+| `dbx version` | Print version |
+| `dbx help` | Full reference |
 
 ## Configuration
 
-Config lives at `~/.config/dbx/config.json`:
+Config lives at `~/.config/dbx/config.json`. Minimal example:
+
+```json
+{
+  "hosts": {
+    "production": {
+      "type": "postgres",
+      "user": "backup_user",
+      "ssh_tunnel": {
+        "jump_host": "bastion",
+        "target_host": "db.internal",
+        "target_port": 5432
+      },
+      "databases": {
+        "myapp": { "exclude_data": ["sessions", "cache", "logs"] }
+      }
+    }
+  },
+  "defaults": {
+    "encryption_type": "age",
+    "keep_backups": 10
+  }
+}
+```
+
+<details>
+<summary><b>Full reference (storage, notifications, vault backend)</b></summary>
 
 ```json
 {
   "defaults": {
     "encryption_type": "age",
     "age_recipients": "~/.config/dbx/age-recipients.txt",
-    "age_identity": "~/.config/sops/age/keys.txt"
+    "age_identity": "~/.config/sops/age/keys.txt",
+    "compression_level": 3,
+    "keep_backups": 10,
+    "auto_upload": false,
+    "definer_handling": "strip"
   },
   "hosts": {
     "production": {
@@ -93,10 +169,15 @@ Config lives at `~/.config/dbx/config.json`:
       },
       "databases": {
         "myapp": {
-          "exclude_data": ["sessions", "cache", "logs"]
+          "exclude_data": ["sessions", "cache", "logs"],
+          "parallel_jobs": 4
         }
       }
     }
+  },
+  "vault": {
+    "backend": "auto",
+    "gpg_key": "your-gpg-key-id"
   },
   "storage": {
     "type": "s3",
@@ -109,260 +190,209 @@ Config lives at `~/.config/dbx/config.json`:
     }
   },
   "notifications": {
-    "on_failure": true,
-    "backends": {
-      "slack": {
-        "webhook_url_cmd": "dbx vault get slack-webhook"
-      }
-    }
-  },
-  "vault": {
-    "backend": "auto"
+    "enabled": true,
+    "on": "failure",
+    "backends": ["slack", "desktop"],
+    "slack": { "webhook_url_cmd": "dbx vault get slack-webhook" },
+    "email": { "to": "admin@example.com", "smtp_host": "smtp.example.com" },
+    "command": { "on_failure": "terminal-notifier -title DBX -message 'Backup failed'" }
   }
 }
 ```
 
-## How Restore Works
-
-Restores go to **local Docker containers** that dbx manages automatically:
-
-```bash
-# Restore creates a new database in a local container
-dbx restore production/myapp/latest
-
-# Restored as: myapp_v1_20240115 (auto-named to avoid conflicts)
-# Connect: psql -h 127.0.0.1 -p 5432 -U postgres myapp_v1_20240115
-# (default password: devpassword — override with DBX_PG_PASSWORD)
-```
-
-**Containers are auto-created** if they don't exist:
-- `postgres-dbx` — PostgreSQL 17 with UTF-8 (port 5432)
-- `mysql-dbx` — MySQL 8.0 (port 3306)
-
-Both bind to **127.0.0.1 only** by default so the dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway`, so SSH-tunnel mode reaches the host through `host.docker.internal` on Linux as well as macOS.
-
-No setup required — just run `dbx restore` and it handles everything.
-
-### Custom container names / passwords
-
-Override with environment variables:
-```bash
-export DBX_POSTGRES_CONTAINER=my-postgres
-export DBX_MYSQL_CONTAINER=my-mysql
-export DBX_PG_PASSWORD=...        # default: devpassword
-export DBX_MYSQL_PASSWORD=...     # default: devpassword
-export DBX_BIND_ADDR=0.0.0.0      # default: 127.0.0.1
-```
+Validate after edits with `dbx config validate`.
+</details>
 
 ## Encryption
 
-dbx supports two encryption backends: **age** (recommended) and **GPG**.
+Two backends. **age** is the recommended default.
 
-### Age Encryption (Recommended)
-
-```bash
-# Initialize age encryption (generates keys if needed)
-dbx config init-encryption
-
-# Enable in config
-dbx config edit
-# Set: "defaults": { "encryption_type": "age" }
-```
-
-Age is modern, simple, and doesn't require a keyring. Keys are stored at:
-- Identity (private): `~/.config/sops/age/keys.txt`
-- Recipients (public): `~/.config/dbx/age-recipients.txt`
-
-### GPG Encryption
+### age (recommended)
 
 ```bash
-# Set encryption passphrase
-dbx vault set-encryption-key
-
-# Enable in config
-dbx config edit
-# Set: "defaults": { "encryption_type": "gpg" }
+dbx vault init-age            # generate keys at ~/.config/sops/age/keys.txt
+# then in config: "defaults": { "encryption_type": "age" }
 ```
 
-GPG uses symmetric encryption with a passphrase stored in your system keychain.
+Keys live at:
 
-**Important**: Store your keys/passphrase safely - you cannot recover backups without them!
+| Path | Contents |
+|------|----------|
+| `~/.config/sops/age/keys.txt` | private identity |
+| `~/.config/dbx/age-recipients.txt` | public recipient(s) |
+
+Back the identity file up somewhere safe — without it, your encrypted backups are unreadable.
+
+### GPG
+
+```bash
+dbx vault set-encryption-key   # symmetric passphrase, stored in vault
+# then in config: "defaults": { "encryption_type": "gpg" }
+```
 
 ## Credential Storage
 
-dbx automatically selects the best available credential backend:
+Auto-detected in this order:
 
-| Platform | Priority |
-|----------|----------|
-| macOS | Keychain |
-| Linux (Desktop) | libsecret (GNOME Keyring) |
-| Linux (Headless) | pass (password-store) |
-| Fallback | GPG-encrypted file |
+| Platform | Backend |
+|----------|---------|
+| macOS | `security` (Keychain) |
+| Linux desktop | `secret-tool` (libsecret / GNOME Keyring) |
+| Linux headless | `pass` (password-store) |
+| Fallback | GPG-encrypted file at `~/.config/dbx/vault.gpg` |
 
-Override with config:
+Override in config:
+
 ```json
-{
-  "vault": {
-    "backend": "pass",
-    "gpg_key": "your-gpg-key-id"
-  }
-}
+{ "vault": { "backend": "pass", "gpg_key": "your-key-id" } }
 ```
 
-Check current backend: `dbx vault info`
+`dbx vault info` shows the active backend.
 
 ## Scheduled Backups
 
-Schedule automatic backups using launchd (macOS) or systemd (Linux):
+launchd (macOS) or systemd user timers (Linux):
 
 ```bash
-# Add a daily backup at 2 AM
-dbx schedule add production myapp daily
-
-# Add an hourly backup
+dbx schedule add production myapp daily          # 2am daily
+dbx schedule add production myapp daily@5        # 5am daily
 dbx schedule add production myapp hourly
+dbx schedule add production myapp weekly@0:3     # Sun 3am (0..6 = Sun..Sat)
 
-# Add a weekly backup on Sunday at 3 AM
-dbx schedule add production myapp weekly@0:3
-
-# List scheduled backups
 dbx schedule list
-
-# Remove a scheduled backup
+dbx schedule run production myapp                # one-shot manually
 dbx schedule remove production myapp
 ```
 
-Logs are stored at `~/.local/share/dbx/logs/`.
+Logs at `~/.local/share/dbx/logs/`.
 
-## Cloud Storage (S3/MinIO)
-
-Upload backups to S3-compatible storage:
+## Cloud Storage (S3 / MinIO)
 
 ```bash
-# Upload after backup
-dbx backup --upload production myapp
-
-# Upload existing backup
+dbx backup --upload production myapp             # backup + push in one shot
 dbx storage upload production/myapp/latest.sql.zst
-
-# List remote backups
 dbx storage list
-
-# Download from remote
 dbx storage download production/myapp/backup.sql.zst
-
-# Sync all local backups to remote
-dbx storage sync upload production
-
-# Sync all remote backups to local
+dbx storage sync upload production               # all backups for a host
 dbx storage sync download production
 ```
 
-Requires `mc` (MinIO Client) or `aws` CLI.
+Uses `mc` (MinIO Client) if available, falling back to `aws` CLI.
 
 ## Notifications
 
-Get notified on backup failures:
+Slack, desktop, email, or any custom command:
 
 ```json
 {
   "notifications": {
-    "on_failure": true,
-    "on_success": false,
-    "backends": {
-      "slack": {
-        "webhook_url_cmd": "dbx vault get slack-webhook"
-      },
-      "desktop": {
-        "enabled": true
-      },
-      "email": {
-        "to": "admin@example.com",
-        "smtp_host": "smtp.example.com"
-      },
-      "command": {
-        "on_failure": "terminal-notifier -title 'DBX' -message 'Backup failed'"
-      }
-    }
+    "enabled": true,
+    "on": "failure",
+    "backends": ["slack", "desktop"],
+    "slack": { "webhook_url_cmd": "dbx vault get slack-webhook" },
+    "command": { "on_failure": "terminal-notifier -title DBX -message 'Backup failed'" }
   }
 }
 ```
 
-## Backup Verification
+`on` accepts `failure`, `success`, or `all`.
 
-Every backup includes a `.meta.json` file with SHA-256 checksum:
+## How Restore Works
+
+Restores never touch your source database. They go to **local Docker containers** that dbx auto-manages:
 
 ```bash
-# Verify a backup
-dbx verify /path/to/backup.sql.zst
-
-# Interactive selection
-dbx verify
+dbx restore production/myapp/latest
+# → restored as: myapp_v1_20260508 (auto-named to avoid conflicts)
+# → connect:    psql -h 127.0.0.1 -p 5432 -U postgres myapp_v1_20260508
+#               (default password: devpassword — see env vars below)
 ```
 
-Verification checks:
-1. File exists and is readable
-2. Can decrypt (if encrypted)
-3. Checksum matches metadata
+| Container | Image | Default port |
+|-----------|-------|--------------|
+| `postgres-dbx` | `postgres:17-alpine` (UTF-8) | 5432 |
+| `mysql-dbx` | `mysql:8.0` | 3306 |
 
-## Audit Logging
+Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
 
-All operations are logged to `~/.local/share/dbx/audit.log`:
+## Verification & Audit
+
+Every backup writes a sibling `.meta.json` with size, timestamp, encryption mode, and SHA-256 checksum:
+
+```bash
+dbx verify ~/.data/dbx/production/myapp/myapp_20260508_103000.sql.zst.age
+# [OK] Checksum verified
+```
+
+Every operation appends a JSON line to `~/.local/share/dbx/audit.log`:
 
 ```json
-{"timestamp":"2024-01-15T10:30:00Z","action":"backup","outcome":"success","db_host":"production","database":"myapp","file":"/path/to/backup.sql.zst","size":1234567,"duration_sec":45}
+{"timestamp":"2026-05-08T10:30:00Z","action":"backup","outcome":"success","db_host":"production","database":"myapp","file":"...","size":1234567,"duration_sec":45}
 ```
 
-## Features
-
-- **TUI Mode**: Interactive menu-driven interface with gum (`dbx tui`)
-- **SSH Tunnels**: Auto-creates tunnel for remote DBs, cleans up on exit
-- **Encryption**: Age or GPG encryption at rest
-- **Auto Containers**: Creates local Docker DB containers on demand
-- **DEFINER Strip**: MySQL views/triggers work locally (no permission errors)
-- **Table Exclusions**: Dump schema but skip data for large/sensitive tables
-- **Compression**: zstd compression for fast, small backups
-- **Credential Storage**: macOS Keychain, libsecret, pass, or GPG file
-- **Scheduled Backups**: launchd (macOS) or systemd (Linux) timers
-- **Cloud Storage**: S3/MinIO upload and sync
-- **Notifications**: Slack, email, desktop, or custom command
-- **Verification**: SHA-256 checksums with metadata
-- **Audit Logging**: JSON log of all operations
-
-## Storage
+## Storage Layout
 
 ```
 ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.age|.gpg]
 ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst.meta.json
 ~/.config/dbx/config.json
+~/.config/dbx/age-recipients.txt
 ~/.local/share/dbx/audit.log
-~/.local/share/dbx/logs/  (scheduled backup logs)
+~/.local/share/dbx/logs/                 # scheduled backup logs
+~/.cache/dbx/latest-release              # update-check cache
 ```
+
+## Environment Variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DBX_DATA_DIR` | `~/.data/dbx` | Where backup files are stored |
+| `DBX_CONFIG_DIR` | `~/.config/dbx` | Where config and age recipients live |
+| `DBX_AUDIT_DIR` | `~/.local/share/dbx` | Audit log + scheduled-backup logs |
+| `DBX_CACHE_DIR` | `~/.cache/dbx` | Update-check cache |
+| `DBX_POSTGRES_CONTAINER` | `postgres-dbx` | Container name for PG operations |
+| `DBX_MYSQL_CONTAINER` | `mysql-dbx` | Container name for MySQL operations |
+| `DBX_PG_PASSWORD` | `devpassword` | Initial password for auto-created PG container |
+| `DBX_MYSQL_PASSWORD` | `devpassword` | Initial password for auto-created MySQL container |
+| `DBX_BIND_ADDR` | `127.0.0.1` | Host bind address for the auto-managed containers |
+| `DBX_NO_UPDATE_CHECK` | unset | Set to `1` to suppress update notices |
+| `DBX_REPO_SLUG` | `steig/dbx` | Override for forks |
+| `DBX_UPDATE_CHECK_INTERVAL` | `86400` | Seconds between update API hits |
+| `DBX_GPG_KEY` | unset | GPG key id for vault encryption |
 
 ## Update Notifications
 
-dbx checks GitHub Releases for newer versions and prints a one-line notice at the end of interactive commands when an upgrade is available. Cached for 24h; only runs when stdout is a TTY (so cron/scheduled runs stay silent).
+dbx checks GitHub Releases at the end of each interactive command and prints a one-liner when a newer tag is published. Cached 24h. Skipped when stdout isn't a TTY (so cron and scheduled runs stay silent).
 
-Opt out:
 ```bash
-export DBX_NO_UPDATE_CHECK=1
+$ dbx version
+dbx 0.7.0
+[INFO] dbx 0.7.1 is available (you have 0.7.0). Run 'dbx update' to upgrade.
 ```
 
-Other knobs:
-- `DBX_REPO_SLUG` — point the check at a fork (default `steig/dbx`)
-- `DBX_CACHE_DIR` — cache location (default `~/.cache/dbx`)
-- `DBX_UPDATE_CHECK_INTERVAL` — seconds between fetches (default 86400)
+Opt out with `DBX_NO_UPDATE_CHECK=1`.
 
 ## Development
 
-The project has a bats test suite — see [`tests/README.md`](tests/README.md) for running and adding tests. Conventions for contributors are in [`AGENTS.md`](AGENTS.md). Release notes live in [`CHANGELOG.md`](CHANGELOG.md).
-
 ```bash
-# Quick smoke before opening a PR
+# Lint
 shellcheck -S error dbx lib/*.sh
-bats tests/unit/ tests/integration/
+
+# Unit tests (no docker, ~1s)
+bats tests/unit/
+
+# Integration tests (docker, real postgres + mysql, ~30s)
+bats tests/integration/
 ```
+
+| File | Contents |
+|------|----------|
+| [`AGENTS.md`](AGENTS.md) | Conventions, error-handling patterns, gotchas |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
+| [`tests/README.md`](tests/README.md) | Test layout, debugging guide |
+
+PRs welcome — see `AGENTS.md` for the patterns the test suite enforces (set-e gotchas, BSD vs GNU sed, etc.).
 
 ## License
 
-MIT
+[MIT](LICENSE)
