@@ -362,8 +362,7 @@ cmd_list() {
     for meta in "$backup_dir"/*.meta.json; do
       [[ ! -f "$meta" ]] && continue
       local filename size_bytes size_human timestamp
-      filename=$(jq -r '.database + "_" + (.timestamp // "" | split("T")[0]) + ".sql.zst"' "$meta" 2>/dev/null)
-      [[ -z "$filename" || "$filename" == "null_" ]] && filename=$(basename "$meta" .meta.json)
+      filename=$(basename "${meta%.meta.json}")
       size_bytes=$(jq -r '.size // 0' "$meta")
       size_human=$(human_size "$size_bytes")
       timestamp=$(jq -r '.timestamp // "" | split("T")[0]' "$meta")
