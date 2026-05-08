@@ -76,3 +76,24 @@ EOF
   dbx_run clean --bogus-flag
   [ "$status" -ne 0 ]
 }
+
+@test "clean --older-than preserves the newest --keep regardless of age" {
+  # 5 stale backups, all 30 days old. --keep 2 must preserve the
+  # newest 2 even though all are older than the cutoff.
+  make_fake_backups 5 30
+
+  dbx_run clean --keep 2 --older-than 7
+  [ "$status" -eq 0 ]
+
+  local remaining
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  [ "$remaining" = "2" ]
+}
+
+# NOTE: a "removes only files older than N days" test would belong
+# here, but the current cmd_clean implementation runs count-based
+# retention before --older-than and unconditionally removes
+# backups[$keep:], so --older-than has nothing left to act on.
+# Tracked as a follow-up; once the design is sorted out, add a test
+# that creates fewer backups than --keep, with mixed ages, and
+# verifies --older-than removes only the stale ones.
