@@ -46,6 +46,8 @@ source_dbx_libs() {
   source "$DBX_REPO_ROOT/lib/storage.sh"
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/update.sh"
+  # shellcheck source=/dev/null
+  source "$DBX_REPO_ROOT/lib/tui.sh"
 }
 
 # Write a config.json with the given content.

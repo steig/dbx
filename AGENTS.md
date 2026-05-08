@@ -18,6 +18,7 @@ lib/
   schedule.sh          # Scheduled backups (launchd on macOS, systemd on Linux)
   storage.sh           # Cloud storage (S3/MinIO via mc or aws CLI)
   update.sh            # GitHub Releases API check + caching
+  tui.sh               # Interactive menu UI (gum-driven)
 install.sh             # Curl-based installer script
 tests/
   helpers/             # Shared bats helpers
