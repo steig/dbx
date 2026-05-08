@@ -4,7 +4,9 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
-Eight latent bugs found by the new bats test suite (PR #20) plus the new release-check feature (PR #21). Worth a 0.7.1 cut when the doc/comment cleanup lands.
+## [0.7.1] - 2026-05-08
+
+Eight latent bugs uncovered by the new bats test suite (PR #20), the new release-check feature (PR #21), and the doc/comment follow-ups from the in-depth review (PR #23).
 
 ### Added
 
@@ -82,5 +84,6 @@ docker rm -f postgres-dbx mysql-dbx
 # dbx will recreate on next `backup` / `restore`
 ```
 
-[Unreleased]: https://github.com/steig/dbx/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/steig/dbx/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/steig/dbx/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/steig/dbx/compare/v0.5.0...v0.7.0
