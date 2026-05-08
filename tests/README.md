@@ -76,3 +76,51 @@ setup() { setup_dbx_env; write_local_config; }
   [ "$status" -eq 0 ]
 }
 ```
+
+## Debugging a failing test
+
+bats prints `not ok N` for failures plus the assertion line that fired. If the test exits cleanly but bats reports `Executed M instead of expected N`, several real things to check:
+
+### "Executed X of Y" with a missing test number
+
+Usually means a library being sourced has installed an `EXIT` trap that clobbers bats's own. The trap prevents bats from recording the failure as TAP output, so the test "vanishes." `lib/core.sh` no longer auto-installs its trap on source for this reason — if a future module does, move the call out to `dbx`.
+
+### `set -e` killing the test mid-body
+
+Tests inherit the harness's `set -e` rules. If your assertion writes to a variable from a function that exits non-zero (e.g. `count=$(some_cmd)`), the script exits before bats sees the failure. Wrap with `|| true` or use `run` so bats captures the exit code.
+
+### `gh pr view` / `dbx` returning unexpected exit codes
+
+Probably a polluted environment. `setup_dbx_env` already unsets `DEV_SERVICES_MODE`, `DEV_PG_*`, `DEV_MYSQL_*`. If the test depends on another env var that the dev shell leaks, add it to that unset list.
+
+### Integration test "container failed to become ready"
+
+`ensure_mysql_container` polls for an authenticated `mysql -u root` (not just `mysqladmin ping` — ping returns success before the root password is initialised). If you get this, check `docker logs mysql-dbx` directly. If postgres-dbx is the issue, `pg_isready` is usually accurate; check the docker daemon and that port 5432 isn't already bound on the host.
+
+### Inspecting a test's working directory
+
+Each test gets `BATS_TEST_TMPDIR`. To preserve it for inspection:
+
+```bash
+bats --no-tempdir-cleanup tests/integration/<file>.bats
+```
+
+bats prints the kept tmpdir path; backup files, configs, and meta.json fixtures are all under there.
+
+### Running just one test
+
+Filter by name (substring match):
+
+```bash
+bats --filter 'restore round-trips' tests/integration/postgres_roundtrip.bats
+```
+
+### Adding diagnostic output without breaking the test
+
+bats redirects stdout/stderr; use FD 3 for "always-visible" output:
+
+```bash
+echo "saw value: $result" >&3
+```
+
+It surfaces in the test log without contaminating `$output` (which `run` captures from FDs 1/2).

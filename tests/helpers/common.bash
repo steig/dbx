@@ -6,6 +6,8 @@
 #   setup() { setup_dbx_env; source_dbx_libs; }
 
 DBX_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+# Used by dbx_run() in helpers/integration.bash, which sources this file.
+# shellcheck disable=SC2034
 DBX_BIN="$DBX_REPO_ROOT/dbx"
 
 # Isolate this test's data/config/audit dirs under BATS_TEST_TMPDIR.
