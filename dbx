@@ -313,7 +313,7 @@ cmd_restore() {
     db_type=$(get_db_type "$host")
   else
     # Try to detect from file content
-    if decompress "$backup_file" | head -c 100 | grep -q "PostgreSQL"; then
+    if decompress_backup "$backup_file" | head -c 100 | grep -q "PostgreSQL"; then
       db_type="postgres"
     else
       db_type="mysql"
