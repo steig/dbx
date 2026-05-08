@@ -23,17 +23,29 @@ fi
 # Common Utilities
 # ============================================================================
 
-# Generate a safe job name from host and database. Use printf so the
-# input has no trailing newline — `tr -c` would otherwise translate
-# that newline into a "-" and the job name would end with a dash.
+# Generate a launchd/systemd-safe job identifier from a host and
+# database name. Lowercases input and replaces anything outside
+# [a-z0-9.] with "-". Uses printf so the input has no trailing
+# newline — `tr -c` would otherwise translate that newline into a
+# "-" and the job name would end with a dash.
+# Args: $1=host alias, $2=database name
+# Echoes: "com.dbx.backup.<host>.<database>"
 make_job_name() {
   local host="$1"
   local database="$2"
   printf '%s' "${SCHEDULE_PREFIX}.${host}.${database}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.' '-'
 }
 
-# Parse cron-like schedule to components
-# Supports: "daily", "hourly", "weekly", or cron syntax "0 2 * * *"
+# Translate a friendly schedule string to a 5-field cron expression.
+# Accepted forms:
+#   hourly         -> "0 * * * *"
+#   daily          -> "0 2 * * *"           (default 2am)
+#   daily@<H>      -> "0 <H> * * *"
+#   weekly         -> "0 2 * * 0"            (default Sun 2am)
+#   weekly@<D>:<H> -> "0 <H> * * <D>"        (D = 0..6, Sun..Sat)
+#   "<m> <h> ..."  -> passed through unchanged (raw cron)
+# Echoes the cron expression. Used by the launchd path; the systemd
+# path has its own translator (it needs day names rather than numbers).
 parse_schedule() {
   local schedule="$1"
 

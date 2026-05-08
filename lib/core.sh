@@ -458,10 +458,15 @@ vault_info() {
   esac
 }
 
+# Resolve the password for a configured host. Tries sources in order:
+#   1. The system vault backend (keychain / secret-tool / pass / gpg-file)
+#   2. The configured `password_cmd` (eval'd — anything that prints a
+#      password to stdout works, e.g. `op read op://...`)
+#   3. Plaintext `.hosts[host].password` in the config file (dev only)
+# Echoes the password on success; echoes nothing if no source succeeds.
 get_password() {
   local host="$1"
 
-  # Priority 1: Try keychain first (most secure)
   local keychain_pass
   keychain_pass=$(keychain_get "$host" 2>/dev/null || true)
   if [[ -n "$keychain_pass" ]]; then
@@ -469,7 +474,6 @@ get_password() {
     return
   fi
 
-  # Priority 2: password_cmd in config (e.g., 1Password CLI, pass, etc.)
   local password_cmd
   password_cmd=$(get_config_value ".hosts[\"$host\"].password_cmd")
   if [[ -n "$password_cmd" ]]; then
@@ -477,7 +481,6 @@ get_password() {
     return
   fi
 
-  # Priority 3: Plain text password in config (least secure, for dev only)
   get_config_value ".hosts[\"$host\"].password"
 }
 
@@ -593,7 +596,12 @@ decompress_stdin() {
 AUDIT_LOG_DIR="${DBX_AUDIT_DIR:-$HOME/.local/share/dbx}"
 AUDIT_LOG_FILE="$AUDIT_LOG_DIR/audit.log"
 
-# Write audit log entry (JSON format)
+# Append a JSON audit-log entry to ~/.local/share/dbx/audit.log.
+# Args: $1=action ("backup", "restore", "vault_set", ...)
+#       $2=outcome ("success" | "failure"; default "success")
+#       $3..N=alternating key/value pairs added as extra fields
+# Example:
+#   audit_log "backup" "success" "db_host" "$h" "size" "$bytes"
 audit_log() {
   local action="$1"
   local outcome="${2:-success}"
@@ -702,8 +710,12 @@ secure_dir() {
   fi
 }
 
-# Create MySQL credential file for secure authentication
-# Returns path to temp file (caller must clean up)
+# Create a [client] credential file for `mysql --defaults-extra-file`
+# so we never pass the password on the command line (would show up in
+# `ps`). Echoes the path to the new tempfile (chmod 600). Caller must
+# remove it — typically via a RETURN trap on the surrounding function:
+#   trap "rm -f '$cred_file'" RETURN
+# Args: $1=user, $2=password, $3=host (default localhost), $4=port (3306)
 create_mysql_credential_file() {
   local user="$1"
   local password="$2"
@@ -725,9 +737,11 @@ EOF
   echo "$cred_file"
 }
 
-# Cleanup sensitive variables on exit. AWS_* vars are exported by
-# aws_configure_env in lib/storage.sh; clear them so S3 credentials
-# don't leak into subsequent dbx operations or subprocesses.
+# Cleanup sensitive environment variables on exit. Run by the
+# EXIT/INT/TERM trap installed by setup_security_trap. Cleared:
+#   - db_pass, PGPASSWORD, MYSQL_PWD: per-invocation DB credentials
+#   - AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION:
+#     exported by aws_configure_env (lib/storage.sh) for the AWS CLI
 cleanup_secrets() {
   unset db_pass PGPASSWORD MYSQL_PWD \
         AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION \
@@ -746,7 +760,11 @@ setup_security_trap() {
 # Backup Verification
 # ============================================================================
 
-# Verify backup integrity via checksum (works for all database types)
+# Verify backup integrity via SHA-256 checksum (database-agnostic).
+# Args: $1=path to backup file (encrypted or plain)
+# Returns 0 if the checksum in the matching .meta.json matches, or if
+# the file is readable and there's no metadata to compare against.
+# Returns 1 if the checksum mismatches or the file is missing/unreadable.
 verify_backup() {
   local backup_file="$1"
 

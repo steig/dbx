@@ -27,6 +27,15 @@ get_tunnel_config() {
   get_config_value ".hosts[\"$host\"].ssh_tunnel.$field"
 }
 
+# Open an SSH tunnel for the given host. Reuses an existing tunnel for
+# the same target if one is already running (so concurrent dbx
+# invocations don't create N forwards to the same db). Sets globals:
+#   TUNNEL_PID         — process to kill on cleanup
+#   TUNNEL_LOCAL_PORT  — port to use as the effective DB port
+#   TUNNEL_REUSED      — true if an existing tunnel was reused; cleanup
+#                        skips kill in that case to avoid breaking
+#                        another in-flight dbx run
+# Installs an EXIT/INT/TERM trap calling cleanup_tunnel.
 create_ssh_tunnel() {
   local host="$1"
 
@@ -104,6 +113,12 @@ cleanup_tunnel() {
   fi
 }
 
+# Hostname to point pg_dump / mysqldump at. Echoes either:
+#   - host.docker.internal — when an SSH tunnel is active; the tunnel
+#     bound to the dbx host can be reached from inside the
+#     postgres-dbx / mysql-dbx containers via the host-gateway alias
+#     (added on container creation, see require_container in core.sh).
+#   - .hosts[host].host — direct connection, no tunnel.
 get_effective_host() {
   local host="$1"
   if has_ssh_tunnel "$host"; then

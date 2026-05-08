@@ -288,6 +288,10 @@ aws_delete() {
 # Unified Storage Interface
 # ============================================================================
 
+# Upload a local file (and its sibling .meta.json, if present) to
+# the configured S3-compatible storage. Picks `mc` (MinIO Client) if
+# available, falling back to `aws` CLI; dies if neither is installed.
+# Args: $1=local file path, $2=remote path (default: basename of $1)
 storage_upload() {
   local local_file="$1"
   local remote_path="${2:-}"
