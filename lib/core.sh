@@ -555,13 +555,14 @@ human_size() {
   fi
 }
 
-# Strip MySQL DEFINER clauses for clean restores
+# Strip MySQL DEFINER clauses for clean restores. Uses POSIX
+# [[:space:]] rather than \s so the regex works under BSD sed (macOS).
 strip_definer() {
   local handling="${1:-strip}"
   case "$handling" in
     strip)
       # Remove DEFINER clause entirely
-      sed -E 's/DEFINER=`[^`]+`@`[^`]+`\s*//g'
+      sed -E 's/DEFINER=`[^`]+`@`[^`]+`[[:space:]]*//g'
       ;;
     current_user)
       # Replace with CURRENT_USER
