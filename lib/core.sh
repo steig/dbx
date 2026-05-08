@@ -91,7 +91,11 @@ require_container() {
     return 0
   fi
 
-  # Doesn't exist - create it
+  # Doesn't exist - create it.
+  # Bind to loopback by default so the auto-managed dev containers aren't
+  # reachable from the LAN with the default password. Override with
+  # DBX_BIND_ADDR (e.g. 0.0.0.0) if you have a reason to expose them.
+  local bind_addr="${DBX_BIND_ADDR:-127.0.0.1}"
   log_info "Creating container: $container"
   case "$container" in
     postgres-dbx)
@@ -99,7 +103,7 @@ require_container() {
         -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
         -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
         -e LANG=C.UTF-8 \
-        -p 5432:5432 \
+        -p "${bind_addr}:5432:5432" \
         postgres:17-alpine >/dev/null
       # Wait for postgres to be ready
       log_info "Waiting for PostgreSQL to initialize..."
@@ -113,7 +117,7 @@ require_container() {
     mysql-dbx)
       docker run -d --name mysql-dbx \
         -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
-        -p 3306:3306 \
+        -p "${bind_addr}:3306:3306" \
         mysql:8.0 >/dev/null
       # Wait for mysql to be ready
       log_info "Waiting for MySQL to initialize..."
