@@ -40,6 +40,11 @@ source "$LIB_DIR/notify.sh"
 source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/storage.sh"
 
+# Install the EXIT/INT/TERM cleanup trap. Defined in core.sh but called
+# here so that sourcing libs in tests doesn't clobber the test runner's
+# own trap.
+setup_security_trap
+
 # ============================================================================
 # Commands
 # ============================================================================
@@ -85,10 +90,12 @@ cmd_backup() {
   host_config=$(get_host_config "$host")
   [[ -z "$host_config" ]] && die "Host '$host' not found in config"
 
-  # If no database specified, backup all databases for this host
+  # If no database specified, backup all databases for this host.
+  # `|| true` because jq exits non-zero when .databases is missing/null,
+  # and we want to fall through to the empty-string check below.
   if [[ -z "$database" ]]; then
     local databases
-    databases=$(jq -r ".hosts[\"$host\"].databases | keys[]" "$CONFIG_FILE" 2>/dev/null)
+    databases=$(jq -r ".hosts[\"$host\"].databases | keys[]?" "$CONFIG_FILE" 2>/dev/null || true)
     if [[ -z "$databases" ]]; then
       die "No databases configured for host '$host'. Add them with: dbx config edit"
     fi
@@ -267,8 +274,10 @@ cmd_restore() {
     [[ ! -d "$backup_dir" ]] && die "No backups found for $host/$database"
 
     if [[ "$selector" == "latest" ]]; then
-      # Find latest backup (encrypted or not)
-      backup_file=$(ls -t "$backup_dir"/*.sql.zst.age "$backup_dir"/*.sql.zst.gpg "$backup_dir"/*.sql.zst 2>/dev/null | head -1)
+      # Find latest backup across encrypted/plain. `|| true` keeps the
+      # pipeline from failing under set -o pipefail when one of the globs
+      # has no matches (ls exits 2 in that case).
+      backup_file=$(ls -t "$backup_dir"/*.sql.zst.age "$backup_dir"/*.sql.zst.gpg "$backup_dir"/*.sql.zst 2>/dev/null | head -1 || true)
     else
       backup_file="$backup_dir/$selector"
     fi
@@ -305,15 +314,15 @@ cmd_restore() {
     done
   fi
 
-  # Determine database type from metadata or config
+  # Determine database type. Try metadata first, then host config, then
+  # fall back to content sniffing. Metadata may not include a .type
+  # field for older or postgres backups, so an empty result there should
+  # fall through rather than terminate the chain.
   local db_type=""
   local meta_file="${backup_file}.meta.json"
-  if [[ -f "$meta_file" ]]; then
-    db_type=$(jq -r '.type // empty' "$meta_file")
-  elif [[ -n "$host" ]]; then
-    db_type=$(get_db_type "$host")
-  else
-    # Try to detect from file content
+  [[ -f "$meta_file" ]] && db_type=$(jq -r '.type // empty' "$meta_file")
+  [[ -z "$db_type" && -n "$host" ]] && db_type=$(get_db_type "$host")
+  if [[ -z "$db_type" ]]; then
     if decompress_backup "$backup_file" | head -c 100 | grep -q "PostgreSQL"; then
       db_type="postgres"
     else
@@ -451,17 +460,16 @@ cmd_clean() {
           local size meta_file
           size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
           total_freed=$((total_freed + size))
-          # Handle both encrypted and non-encrypted meta files
-          meta_file="${backup%.age}"
-          meta_file="${meta_file%.gpg}"
-          meta_file="${meta_file%.sql.zst}.meta.json"
+          # Metadata is written at "<backup_filename>.meta.json" regardless
+          # of encryption suffix (see pg_backup / mysql_backup).
+          meta_file="${backup}.meta.json"
           if [[ "$dry_run" == "true" ]]; then
             log_info "Would remove: $(basename "$backup")"
           else
             rm -f "$backup" "$meta_file"
             log_info "Removed: $(basename "$backup")"
           fi
-          ((total_removed++))
+          ((total_removed++)) || true
         done
       fi
 
@@ -469,7 +477,7 @@ cmd_clean() {
       if [[ -n "$older_than_days" ]]; then
         local idx=0
         for backup in "${backups[@]}"; do
-          ((idx++))
+          ((idx++)) || true
           # Preserve the newest $keep backups regardless of age
           [[ $idx -le $keep ]] && continue
           # Skip if already removed by count-based retention
@@ -484,16 +492,14 @@ cmd_clean() {
             local size meta_file
             size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
             total_freed=$((total_freed + size))
-            meta_file="${backup%.age}"
-            meta_file="${meta_file%.gpg}"
-            meta_file="${meta_file%.sql.zst}.meta.json"
+            meta_file="${backup}.meta.json"
             if [[ "$dry_run" == "true" ]]; then
               log_info "Would remove (${file_age_days}d old): $(basename "$backup")"
             else
               rm -f "$backup" "$meta_file"
               log_info "Removed (${file_age_days}d old): $(basename "$backup")"
             fi
-            ((total_removed++))
+            ((total_removed++)) || true
           fi
         done
       fi
@@ -767,15 +773,15 @@ EOF
 
         if [[ -z "$htype" ]]; then
           log_error "Host '$h': missing 'type' (postgres or mysql)"
-          ((errors++))
+          ((errors++)) || true
         elif [[ "$htype" != "postgres" && "$htype" != "postgresql" && "$htype" != "mysql" && "$htype" != "mariadb" ]]; then
           log_error "Host '$h': invalid type '$htype' (use postgres or mysql)"
-          ((errors++))
+          ((errors++)) || true
         fi
 
         if [[ -z "$huser" ]]; then
           log_error "Host '$h': missing 'user'"
-          ((errors++))
+          ((errors++)) || true
         fi
 
         # Check if a password source exists (without invoking external commands)
@@ -797,7 +803,7 @@ EOF
         if [[ ! -f "$recipients" ]]; then
           log_error "Encryption type 'age' but recipients file missing: $recipients"
           log_info "Run: dbx vault init-age"
-          ((errors++))
+          ((errors++)) || true
         else
           log_success "Age encryption configured"
         fi
@@ -805,7 +811,7 @@ EOF
         if ! get_encryption_key &>/dev/null; then
           log_error "Encryption type 'gpg' but no encryption key set"
           log_info "Run: dbx vault set-encryption-key"
-          ((errors++))
+          ((errors++)) || true
         else
           log_success "GPG encryption configured"
         fi

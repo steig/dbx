@@ -733,13 +733,13 @@ cleanup_secrets() {
         2>/dev/null || true
 }
 
-# Set trap to cleanup on exit
+# Set trap to cleanup on exit. Caller (dbx entrypoint) is responsible
+# for invoking this — sourcing the lib does not install the trap, so
+# tests and other consumers can use the lib without clobbering their
+# own EXIT trap.
 setup_security_trap() {
   trap 'cleanup_secrets' EXIT INT TERM
 }
-
-# Activate security cleanup on exit
-setup_security_trap
 
 # ============================================================================
 # Backup Verification

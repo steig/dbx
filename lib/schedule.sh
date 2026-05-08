@@ -23,11 +23,13 @@ fi
 # Common Utilities
 # ============================================================================
 
-# Generate a safe job name from host and database
+# Generate a safe job name from host and database. Use printf so the
+# input has no trailing newline — `tr -c` would otherwise translate
+# that newline into a "-" and the job name would end with a dash.
 make_job_name() {
   local host="$1"
   local database="$2"
-  echo "${SCHEDULE_PREFIX}.${host}.${database}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.' '-'
+  printf '%s' "${SCHEDULE_PREFIX}.${host}.${database}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.' '-'
 }
 
 # Parse cron-like schedule to components
@@ -40,16 +42,19 @@ parse_schedule() {
       echo "0 * * * *"
       ;;
     daily|daily@*)
-      local hour="${schedule#daily@}"
-      hour="${hour:-2}"  # Default 2 AM
+      # ${schedule#daily@} is a no-op when there's no "@", so set the
+      # default first and only override when an @-suffix is present.
+      local hour=2
+      [[ "$schedule" == daily@* ]] && hour="${schedule#daily@}"
       echo "0 $hour * * *"
       ;;
     weekly|weekly@*)
-      local day_hour="${schedule#weekly@}"
-      local day="${day_hour%:*}"
-      local hour="${day_hour#*:}"
-      day="${day:-0}"    # Default Sunday
-      hour="${hour:-2}"  # Default 2 AM
+      local day=0 hour=2
+      if [[ "$schedule" == weekly@* ]]; then
+        local day_hour="${schedule#weekly@}"
+        day="${day_hour%:*}"
+        hour="${day_hour#*:}"
+      fi
       echo "0 $hour * * $day"
       ;;
     *)
@@ -240,16 +245,17 @@ systemd_create() {
       oncalendar="hourly"
       ;;
     daily|daily@*)
-      local hour="${schedule#daily@}"
-      hour="${hour:-2}"
+      local hour=2
+      [[ "$schedule" == daily@* ]] && hour="${schedule#daily@}"
       oncalendar="*-*-* ${hour}:00:00"
       ;;
     weekly|weekly@*)
-      local day_hour="${schedule#weekly@}"
-      local day="${day_hour%:*}"
-      local hour="${day_hour#*:}"
-      day="${day:-Sun}"
-      hour="${hour:-2}"
+      local day="Sun" hour=2
+      if [[ "$schedule" == weekly@* ]]; then
+        local day_hour="${schedule#weekly@}"
+        day="${day_hour%:*}"
+        hour="${day_hour#*:}"
+      fi
       # systemd OnCalendar wants day names (Mon..Sun); cron syntax accepts
       # 0-6 (or 7) for Sun..Sat. Translate numeric input.
       case "$day" in
