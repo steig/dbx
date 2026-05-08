@@ -429,15 +429,15 @@ storage_sync_upload() {
   fi
 
   local count=0
-  find "$backup_dir" -name "*.sql.zst*" -type f | while read -r file; do
+  while read -r file; do
     # Skip metadata files
     [[ "$file" == *.meta.json ]] && continue
 
-    local relative_path="${file#$DATA_DIR/}"
+    local relative_path="${file#"$DATA_DIR/"}"
     log_info "Uploading: $relative_path"
     storage_upload "$file" "$relative_path"
     ((count++)) || true
-  done
+  done < <(find "$backup_dir" -name "*.sql.zst*" -type f)
 
   log_success "Synced $count backup(s) to remote storage"
 }
@@ -467,15 +467,15 @@ storage_sync_download() {
       prefix=$(get_storage_config "s3.prefix")
       prefix="${prefix%/}"
 
-      mc find "${MC_ALIAS}/${bucket}/${prefix}/${remote_path}" --name "*.sql.zst*" 2>/dev/null | while read -r remote_file; do
+      while read -r remote_file; do
         [[ "$remote_file" == *.meta.json ]] && continue
-        local relative="${remote_file#${MC_ALIAS}/${bucket}/${prefix}/}"
+        local relative="${remote_file#"${MC_ALIAS}/${bucket}/${prefix}/"}"
         local local_file="$DATA_DIR/$relative"
         mkdir -p "$(dirname "$local_file")"
         log_info "Downloading: $relative"
         mc cp "$remote_file" "$local_file" >/dev/null
         ((count++)) || true
-      done
+      done < <(mc find "${MC_ALIAS}/${bucket}/${prefix}/${remote_path}" --name "*.sql.zst*" 2>/dev/null)
       ;;
     aws)
       aws_configure_env
