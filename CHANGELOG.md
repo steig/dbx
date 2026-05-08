@@ -2,6 +2,32 @@
 
 All notable changes to dbx are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Eight latent bugs found by the new bats test suite (PR #20) plus the new release-check feature (PR #21). Worth a 0.7.1 cut when the doc/comment cleanup lands.
+
+### Added
+
+- **Release-check on every interactive command.** Hits the GitHub Releases API and prints a one-line notice when a newer tag is available. Cached 24h, gated to TTY-only invocations, opt-out via `DBX_NO_UPDATE_CHECK=1`. New `dbx update` command (aliases: `self-update`, `upgrade`) re-runs `install.sh`. (#21)
+- **bats test suite** under `tests/` — 92 tests across `tests/unit/` (pure functions, no docker) and `tests/integration/` (real postgres + mysql round-trips, plain + age-encrypted). New CI jobs: `unit-tests` (ubuntu + macOS matrix) and `integration-tests` (ubuntu + docker). (#20)
+- `DBX_REPO_SLUG`, `DBX_CACHE_DIR`, `DBX_UPDATE_CHECK_INTERVAL`, `DBX_NO_UPDATE_CHECK` env vars for the release-check feature.
+
+### Fixed
+
+These were uncovered by writing the test suite:
+
+- `parse_schedule "daily"` / `"weekly"` (bare, no `@` suffix) returned literal `"daily"` / `"weekly"` for the hour/day fields. `${schedule#daily@}` is a no-op without an `@`; defaults are now set first and only overridden when the suffix is present. The same shape was duplicated in `systemd_create`'s inline parser; both fixed.
+- `make_job_name` produced trailing-dash names (`com.dbx.backup.prod.myapp-`) because `tr -c` translated `echo`'s newline into `-`. Switched to `printf '%s'` so the input has no trailing newline.
+- `dbx restore <host>/<db>/latest` died silently with rc=2 when no encrypted backups existed. `ls -t a b c | head -1` returns 2 under `set -o pipefail` when any of the globs have no matches; appended `|| true`.
+- `dbx clean` left orphan `.meta.json` files. Same path-strip bug as the original #3 fix, present independently in `cmd_clean`. Now uses `${backup}.meta.json` directly.
+- `((var++))` killed the script when `var` was 0 — `((0))` returns 1, `set -e` exits. Six call sites in `cmd_clean` and `cmd_config validate` now have `|| true`.
+- `dbx backup <host>` (no database) died silently when `databases` was missing or null. `jq '... | keys[]'` exits non-zero on null input, killing the assignment under `set -e` before the empty-string check could call `die`. Switched to `keys[]?` plus `|| true`.
+- `strip_definer` left a stray space on macOS — GNU `sed` accepts `\s` as a Perl-style whitespace shorthand; BSD `sed` (macOS default) does not. Switched to POSIX `[[:space:]]`.
+
+### Changed
+
+- `lib/core.sh` no longer auto-installs the `EXIT/INT/TERM` cleanup trap on source. `setup_security_trap` is still defined there but is now invoked from `dbx` itself. Without this, sourcing the lib in tests clobbered bats's own EXIT trap and silently dropped failing tests from TAP output.
+
 ## [0.7.0] - 2026-05-08
 
 Bugfix and hardening release. The 0.6.0 version constant was bumped on `main` but never tagged or released, so 0.7.0 is the first published release after [v0.5.0](https://github.com/steig/dbx/releases/tag/v0.5.0).
@@ -56,4 +82,5 @@ docker rm -f postgres-dbx mysql-dbx
 # dbx will recreate on next `backup` / `restore`
 ```
 
+[Unreleased]: https://github.com/steig/dbx/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/steig/dbx/compare/v0.5.0...v0.7.0

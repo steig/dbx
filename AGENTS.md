@@ -17,7 +17,12 @@ lib/
   notify.sh            # Notification backends (Slack, desktop, email, command)
   schedule.sh          # Scheduled backups (launchd on macOS, systemd on Linux)
   storage.sh           # Cloud storage (S3/MinIO via mc or aws CLI)
+  update.sh            # GitHub Releases API check + caching
 install.sh             # Curl-based installer script
+tests/
+  helpers/             # Shared bats helpers
+  unit/                # Pure-function tests, no docker
+  integration/         # CLI round-trip tests against real postgres + mysql
 ```
 
 ## Build / Lint / Test Commands
@@ -36,18 +41,46 @@ bash -n dbx && for f in lib/*.sh; do bash -n "$f"; done
 
 ### Testing & CI
 
-No formal test suite. CI (`.github/workflows/ci.yml`, push/PR to `main`) validates:
-1. ShellCheck passes (severity: error) on all `.sh` files and `dbx`
-2. Bash syntax check (`bash -n`) on all scripts
-3. Install script works + `dbx help` runs (ubuntu + macOS matrix)
-4. `dbx config init` creates a valid config file
+Two-tier bats test suite under `tests/`. See `tests/README.md` for layout, conventions, and a debugging guide.
 
-Verify changes manually:
 ```bash
-bash -n dbx && for f in lib/*.sh; do bash -n "$f"; done  # syntax
-shellcheck dbx lib/*.sh                                   # lint
-./dbx help && ./dbx version                               # smoke test
+# Unit tests — pure functions, no docker, ~1s
+bats tests/unit/
+
+# Integration tests — boots postgres-dbx + mysql-dbx, runs CLI
+# round-trips, ~30s. Requires docker.
+bats tests/integration/
+
+# Full sweep
+bats tests/unit/ tests/integration/
 ```
+
+CI (`.github/workflows/ci.yml`, push/PR to `main`) runs:
+1. **Shellcheck** (severity: error) on all `.sh` files and `dbx`
+2. **Bash syntax** (`bash -n`) on all scripts
+3. **Test Install** — runs `install.sh`, verifies `dbx help` works (ubuntu + macOS matrix)
+4. **Unit tests (bats)** — ubuntu + macOS matrix
+5. **Integration tests (docker)** — ubuntu only
+
+Pre-PR smoke check:
+```bash
+bash -n dbx && for f in lib/*.sh; do bash -n "$f"; done
+shellcheck -S error dbx lib/*.sh
+bats tests/unit/ tests/integration/
+```
+
+### Lessons / patterns to follow
+
+The early test pass surfaced eight bugs whose root causes are easy to repeat. If you find yourself writing one of these patterns, look twice.
+
+- **`((var++))` under `set -e`.** `((expr))` returns 1 when `expr` evaluates to 0, which under strict mode exits the script. Counter increments where `var` starts at 0 must use `((var++)) || true` (or `var=$((var + 1))`).
+- **`cmd1 | cmd2 | head -N` under `set -o pipefail`.** If `cmd1` exits non-zero (e.g. `ls` with a missing glob), the whole pipeline returns non-zero, and the surrounding `var=$()` exits the script. Append `|| true`.
+- **`jq '... | keys[]'` on null.** Errors at runtime when the path doesn't exist. Use `keys[]?` (the optional iterator) plus `|| true` if you want a clean empty-string fallback.
+- **Cross-platform sed.** GNU sed accepts `\s`, `\d`, `\w`. BSD sed (macOS default) does not. Use POSIX classes: `[[:space:]]`, `[[:digit:]]`, `[[:alnum:]]`.
+- **`tr -c` with `echo` input.** `echo` adds a trailing newline; `tr -c '<allowed>'` translates that newline along with everything else, leaving a `-` (or whatever) at the end of the output. Use `printf '%s'` for input that shouldn't have a trailing newline.
+- **`ls -t pat1 pat2 pat3`.** Returns 2 if any of the patterns have no matches, even with `2>/dev/null` redirected. Wrap the pipeline in `|| true`, or use `find -type f \( -name pat1 -o -name pat2 \)` instead.
+- **Don't install EXIT traps at module load time.** A library that calls `trap '...' EXIT INT TERM` on source clobbers the caller's trap. Define the function but require the caller to invoke it (see `setup_security_trap` in `lib/core.sh`).
+- **`local x=$(cmd)` masks return codes (SC2155).** Splitting `local x; x=$(cmd)` lets `set -e` see failures.
 
 ## Code Style Guidelines
 
@@ -153,3 +186,32 @@ done
 2. Source it in `dbx` after its dependencies (core.sh must be first)
 3. Prefix public functions with the module name
 4. Update `install.sh` to include the new file in the download list
+5. Update `tests/helpers/common.bash::source_dbx_libs` so unit tests can call into the new module
+6. Don't fire EXIT traps or other side effects at module load time — define the function and have `dbx` call it
+
+### Adding a Test
+
+Pure function (fast, runs in CI on ubuntu + macOS):
+```bash
+# tests/unit/<lib>.bats
+load '../helpers/common'
+setup() { setup_dbx_env; source_dbx_libs; }
+
+@test "describe what is being tested" {
+  result=$(your_function arg)
+  [ "$result" = "expected" ]
+}
+```
+
+End-to-end behavior (slower, ubuntu-only, needs docker):
+```bash
+# tests/integration/<feature>.bats
+load '../helpers/integration'
+setup_file() { require_docker; ensure_postgres_container; }
+setup() { setup_dbx_env; write_local_config; }
+
+@test "behavior under <condition>" {
+  dbx_run backup local-pg some_db
+  [ "$status" -eq 0 ]
+}
+```

@@ -69,6 +69,7 @@ dbx verify production/myapp/latest
 | `dbx config init\|edit\|show` | Manage configuration |
 | `dbx schedule add\|list\|remove` | Manage scheduled backups |
 | `dbx storage list\|upload\|download\|sync` | Manage cloud storage |
+| `dbx update` | Re-run install.sh to upgrade to the latest release |
 
 ## Configuration
 
@@ -130,21 +131,27 @@ Restores go to **local Docker containers** that dbx manages automatically:
 dbx restore production/myapp/latest
 
 # Restored as: myapp_v1_20240115 (auto-named to avoid conflicts)
-# Connect: psql -h localhost -p 5432 -U postgres myapp_v1_20240115
+# Connect: psql -h 127.0.0.1 -p 5432 -U postgres myapp_v1_20240115
+# (default password: devpassword — override with DBX_PG_PASSWORD)
 ```
 
 **Containers are auto-created** if they don't exist:
-- `postgres-dbx` - PostgreSQL 17 with UTF-8 (port 5432)
-- `mysql-dbx` - MySQL 8.0 (port 3306)
+- `postgres-dbx` — PostgreSQL 17 with UTF-8 (port 5432)
+- `mysql-dbx` — MySQL 8.0 (port 3306)
 
-No setup required - just run `dbx restore` and it handles everything.
+Both bind to **127.0.0.1 only** by default so the dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway`, so SSH-tunnel mode reaches the host through `host.docker.internal` on Linux as well as macOS.
 
-### Custom container names
+No setup required — just run `dbx restore` and it handles everything.
+
+### Custom container names / passwords
 
 Override with environment variables:
 ```bash
 export DBX_POSTGRES_CONTAINER=my-postgres
 export DBX_MYSQL_CONTAINER=my-mysql
+export DBX_PG_PASSWORD=...        # default: devpassword
+export DBX_MYSQL_PASSWORD=...     # default: devpassword
+export DBX_BIND_ADDR=0.0.0.0      # default: 127.0.0.1
 ```
 
 ## Encryption
@@ -330,6 +337,30 @@ All operations are logged to `~/.local/share/dbx/audit.log`:
 ~/.config/dbx/config.json
 ~/.local/share/dbx/audit.log
 ~/.local/share/dbx/logs/  (scheduled backup logs)
+```
+
+## Update Notifications
+
+dbx checks GitHub Releases for newer versions and prints a one-line notice at the end of interactive commands when an upgrade is available. Cached for 24h; only runs when stdout is a TTY (so cron/scheduled runs stay silent).
+
+Opt out:
+```bash
+export DBX_NO_UPDATE_CHECK=1
+```
+
+Other knobs:
+- `DBX_REPO_SLUG` — point the check at a fork (default `steig/dbx`)
+- `DBX_CACHE_DIR` — cache location (default `~/.cache/dbx`)
+- `DBX_UPDATE_CHECK_INTERVAL` — seconds between fetches (default 86400)
+
+## Development
+
+The project has a bats test suite — see [`tests/README.md`](tests/README.md) for running and adding tests. Conventions for contributors are in [`AGENTS.md`](AGENTS.md). Release notes live in [`CHANGELOG.md`](CHANGELOG.md).
+
+```bash
+# Quick smoke before opening a PR
+shellcheck -S error dbx lib/*.sh
+bats tests/unit/ tests/integration/
 ```
 
 ## License
