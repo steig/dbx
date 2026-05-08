@@ -306,9 +306,9 @@ cmd_restore() {
 
   # Determine database type from metadata or config
   local db_type=""
-  local meta_file="${backup_file%.sql.zst}.meta.json"
+  local meta_file="${backup_file}.meta.json"
   if [[ -f "$meta_file" ]]; then
-    db_type=$(jq -r '.type' "$meta_file")
+    db_type=$(jq -r '.type // empty' "$meta_file")
   elif [[ -n "$host" ]]; then
     db_type=$(get_db_type "$host")
   else
