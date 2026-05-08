@@ -251,7 +251,11 @@ notify_command() {
 # Unified Notification Interface
 # ============================================================================
 
-# Send notification through all configured backends
+# Send a notification through every backend listed in
+# .notifications.backends (any of: slack, desktop, email, command).
+# Idempotent and self-gating — does nothing when notifications are
+# disabled or the event doesn't match the configured filter.
+# Args: $1=title, $2=message, $3=status ("info" | "success" | "failure")
 notify() {
   local title="$1"
   local message="$2"

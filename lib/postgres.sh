@@ -9,6 +9,14 @@
 # PostgreSQL Backup
 # ============================================================================
 
+# Run pg_dump from inside postgres-dbx, piping through zstd and the
+# configured encryption (if any) into $output_file. If encryption is
+# enabled, $output_file gets the matching extension appended (.age /
+# .gpg) and a sibling .meta.json is written next to it with size,
+# checksum, and dbx_version.
+# Args: $1=host alias, $2=database name, $3=output base path,
+#       $4=verbose ("true"/"false")
+# Returns 0 on success, non-zero (and removes $output_file) on failure.
 pg_backup() {
   local host="$1"
   local database="$2"
@@ -153,6 +161,11 @@ pg_backup() {
 # PostgreSQL Restore
 # ============================================================================
 
+# Decompress (and decrypt if needed) $backup_file, then restore into
+# $target_db on the postgres-dbx container. Creates the target
+# database if it doesn't exist. pg_restore warnings are passed through;
+# fatal errors are surfaced.
+# Args: $1=backup file path, $2=target database name
 pg_restore_backup() {
   local backup_file="$1"
   local target_db="$2"

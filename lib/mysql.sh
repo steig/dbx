@@ -9,6 +9,14 @@
 # MySQL Backup
 # ============================================================================
 
+# Run a two-pass mysqldump from inside mysql-dbx (schema for all
+# tables including excluded; data for non-excluded), strip DEFINER
+# per the host's `definer_handling` setting, pipe through zstd and
+# the configured encryption (if any) into $output_file. Writes a
+# sibling .meta.json with size, checksum, dbx_version, and
+# `type: "mysql"`.
+# Args: $1=host alias, $2=database name, $3=output base path,
+#       $4=verbose ("true"/"false")
 mysql_backup() {
   local host="$1"
   local database="$2"
