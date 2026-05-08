@@ -234,7 +234,7 @@ mysql_restore_backup() {
         mysql --defaults-extra-file="$cred_file" "$target_db" 2>/dev/null
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
-      decompress "$backup_file" | filter_sql | \
+      decompress_backup "$backup_file" | filter_sql | \
         mysql --defaults-extra-file="$cred_file" "$target_db" 2>/dev/null
     fi
   else
@@ -270,7 +270,7 @@ mysql_restore_backup() {
         docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
-      decompress "$backup_file" | filter_sql | docker exec -i "$MYSQL_CONTAINER" \
+      decompress_backup "$backup_file" | filter_sql | docker exec -i "$MYSQL_CONTAINER" \
         mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
     fi
 

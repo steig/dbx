@@ -564,63 +564,6 @@ strip_definer() {
   esac
 }
 
-# Decompress based on file extension (.gz, .zst, .gpg, .age, or plain)
-# Handles encrypted files by decrypting first, then decompressing
-decompress() {
-  local file="$1"
-  case "$file" in
-    *.sql.zst.age)
-      # Age encrypted + compressed
-      require_age
-      age_decrypt_stream < "$file" | zstd -d
-      ;;
-    *.sql.zst.gpg)
-      # GPG encrypted + compressed
-      require_gpg
-      decrypt_stream < "$file" | zstd -d
-      ;;
-    *.sql.gz.age)
-      # Age encrypted + gzip compressed
-      require_age
-      age_decrypt_stream < "$file" | gunzip
-      ;;
-    *.sql.gz.gpg)
-      # GPG encrypted + gzip compressed
-      require_gpg
-      decrypt_stream < "$file" | gunzip
-      ;;
-    *.sql.age)
-      # Age encrypted only
-      require_age
-      age_decrypt_stream < "$file"
-      ;;
-    *.sql.gpg)
-      # GPG encrypted only
-      require_gpg
-      decrypt_stream < "$file"
-      ;;
-    *.zst)
-      zstd -d < "$file"
-      ;;
-    *.gz)
-      gunzip -c "$file"
-      ;;
-    *.sql)
-      cat "$file"
-      ;;
-    *)
-      # Try to detect by magic bytes
-      if head -c 4 "$file" | grep -q $'\x28\xb5\x2f\xfd'; then
-        zstd -d < "$file"
-      elif head -c 2 "$file" | grep -q $'\x1f\x8b'; then
-        gunzip -c "$file"
-      else
-        cat "$file"
-      fi
-      ;;
-  esac
-}
-
 # Decompress from stdin based on extension hint
 decompress_stdin() {
   local ext="$1"
@@ -816,14 +759,14 @@ verify_backup() {
     [[ "$backup_file" == *.age || "$backup_file" == *.gpg ]] && is_encrypted=true
 
     if $is_encrypted; then
-      if decompress "$backup_file" 2>/dev/null | head -c 1024 >/dev/null; then
+      if decompress_backup "$backup_file" 2>/dev/null | head -c 1024 >/dev/null; then
         log_success "Backup file is readable (encrypted)"
       else
         log_error "Failed to decrypt/read backup"
         return 1
       fi
     else
-      if decompress "$backup_file" 2>/dev/null | head -c 1024 >/dev/null; then
+      if decompress_backup "$backup_file" 2>/dev/null | head -c 1024 >/dev/null; then
         log_success "Backup file is readable"
       else
         log_error "Failed to read backup"
