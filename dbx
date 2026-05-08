@@ -39,6 +39,7 @@ source "$LIB_DIR/mysql.sh"
 source "$LIB_DIR/notify.sh"
 source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/storage.sh"
+source "$LIB_DIR/update.sh"
 
 # Install the EXIT/INT/TERM cleanup trap. Defined in core.sh but called
 # here so that sourcing libs in tests doesn't clobber the test runner's
@@ -1187,23 +1188,22 @@ require_gum() {
   command -v gum &>/dev/null || die "gum is required for TUI mode. Install: brew install gum (or go install github.com/charmbracelet/gum@latest)"
 }
 
-# Check for updates (cached for session)
+# Cached for the lifetime of one TUI session — fetch_latest_release hits
+# the network every call, but the TUI redraws frequently and we don't
+# want a flicker on each keystroke.
 LATEST_VERSION=""
 check_for_updates() {
   if [[ -z "$LATEST_VERSION" ]]; then
-    LATEST_VERSION=$(curl -fsSL --connect-timeout 2 "https://raw.githubusercontent.com/steig/dbx/main/dbx" 2>/dev/null | grep '^VERSION=' | cut -d'"' -f2 || echo "")
+    LATEST_VERSION=$(fetch_latest_release 2>/dev/null || echo "")
   fi
-  if [[ -n "$LATEST_VERSION" && "$LATEST_VERSION" != "$VERSION" ]]; then
-    return 0  # Update available
-  fi
-  return 1  # No update
+  [[ -n "$LATEST_VERSION" ]] && version_gt "$LATEST_VERSION" "$VERSION"
 }
 
 run_self_update() {
   echo ""
   gum style --foreground 39 --bold "  Updating dbx..."
   echo ""
-  if curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash; then
+  if curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash; then
     echo ""
     gum style --foreground 40 --bold "  ✓ Updated! Please restart dbx tui"
     sleep 2
@@ -1736,6 +1736,12 @@ cmd_tui() {
   done
 }
 
+cmd_update() {
+  log_step "Updating dbx..."
+  log_info "Re-running install.sh from ${DBX_REPO_SLUG}@main"
+  curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
+}
+
 cmd_help() {
   cat <<EOF
 ${BOLD}dbx${NC} - Database backup and restore utility
@@ -1753,6 +1759,7 @@ ${BOLD}COMMANDS:${NC}
   test <host>                  Test connection to a database host
   list [host] [database]       List available backups
   clean [--keep N] [--dry-run] [--older-than D]  Remove old backups
+  update                       Re-run install.sh to upgrade to the latest release
 
 ${BOLD}CREDENTIAL & ENCRYPTION:${NC}
   vault set|get|delete|list    Manage host credentials
@@ -1911,10 +1918,18 @@ main() {
     version|--version|-V)
       echo "dbx $VERSION"
       ;;
+    update|self-update|upgrade)
+      cmd_update
+      ;;
     *)
       die "Unknown command: $cmd (run 'dbx help' for usage)"
       ;;
   esac
+
+  # After every interactive command, hint at a newer release if one
+  # exists. Self-gated to TTY only; cached so the API is hit at most
+  # once per UPDATE_CHECK_INTERVAL_SECONDS.
+  maybe_notify_update
 }
 
 main "$@"
