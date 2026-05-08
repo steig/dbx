@@ -771,9 +771,13 @@ EOF
   echo "$cred_file"
 }
 
-# Cleanup sensitive variables
+# Cleanup sensitive variables on exit. AWS_* vars are exported by
+# aws_configure_env in lib/storage.sh; clear them so S3 credentials
+# don't leak into subsequent dbx operations or subprocesses.
 cleanup_secrets() {
-  unset db_pass PGPASSWORD MYSQL_PWD 2>/dev/null || true
+  unset db_pass PGPASSWORD MYSQL_PWD \
+        AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION \
+        2>/dev/null || true
 }
 
 # Set trap to cleanup on exit
