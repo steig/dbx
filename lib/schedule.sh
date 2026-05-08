@@ -250,6 +250,17 @@ systemd_create() {
       local hour="${day_hour#*:}"
       day="${day:-Sun}"
       hour="${hour:-2}"
+      # systemd OnCalendar wants day names (Mon..Sun); cron syntax accepts
+      # 0-6 (or 7) for Sun..Sat. Translate numeric input.
+      case "$day" in
+        0|7) day="Sun" ;;
+        1)   day="Mon" ;;
+        2)   day="Tue" ;;
+        3)   day="Wed" ;;
+        4)   day="Thu" ;;
+        5)   day="Fri" ;;
+        6)   day="Sat" ;;
+      esac
       oncalendar="${day} *-*-* ${hour}:00:00"
       ;;
     *)
