@@ -180,8 +180,8 @@ tui_dashboard() {
       while IFS= read -r host; do
         local htype dbs_count backup_count
         htype=$(get_db_type "$host" 2>/dev/null || echo "?")
-        dbs_count=$(tui_list_databases_for_host "$host" 2>/dev/null | grep -c .)
-        backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$')
+        dbs_count=$(tui_list_databases_for_host "$host" 2>/dev/null | grep -c . || true)
+        backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$' || true)
         printf "%-18s %-10s %-12s %s\n" \
           "$(tui_truncate "$host" 17)" \
           "$htype" \
@@ -235,7 +235,7 @@ tui_dashboard() {
   if [[ -d "$DATA_DIR" ]]; then
     local total_size total_count
     total_size=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1 || echo "0B")
-    total_count=$(find "$DATA_DIR" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$')
+    total_count=$(find "$DATA_DIR" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$' || true)
     footer="Total: ${total_count:-0} backups (${total_size})"
   fi
   is_any_encryption_enabled 2>/dev/null && footer+="  🔒 Encrypted"
@@ -329,7 +329,7 @@ tui_select_host() {
   while IFS= read -r host; do
     local htype backup_count
     htype=$(get_db_type "$host" 2>/dev/null || echo "?")
-    backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$')
+    backup_count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$' || true)
     host_options+="$host ($htype, ${backup_count} backups)"$'\n'
   done <<< "$hosts"
 
@@ -778,7 +778,7 @@ tui_config_delete_backups() {
       local host count
       host=$(tui_select_host) || return 0
       [[ -z "$host" ]] && return 0
-      count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$')
+      count=$(find "$DATA_DIR/$host" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$' || true)
       if gum confirm --default=false "Delete ALL $count backups for '$host'?"; then
         rm -rf "${DATA_DIR:?}/${host:?}"
         gum style --foreground "$TUI_OK" --bold "  ✓ All backups for '$host' deleted"
@@ -799,7 +799,7 @@ tui_config_delete_backups() {
       local db count
       db=$(echo "$dbs" | gum choose --header "Select database:")
       [[ -z "$db" ]] && return 0
-      count=$(find "$DATA_DIR/$host/$db" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$')
+      count=$(find "$DATA_DIR/$host/$db" -name "*.sql.zst*" 2>/dev/null | grep -cv '\.meta\.json$' || true)
 
       if gum confirm --default=false "Delete ALL $count backups for '$host/$db'?"; then
         rm -rf "${DATA_DIR:?}/${host:?}/${db:?}"
