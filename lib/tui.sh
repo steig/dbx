@@ -74,6 +74,15 @@ tui_mtime() {
   stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null || echo 0
 }
 
+# Print a horizontal rule using the U+2500 box-drawing character.
+# Don't use `tr ' ' '─'` — tr is byte-oriented, so a multi-byte UTF-8
+# character as the replacement produces mojibake. printf with awk's
+# repeat-and-print is safe.
+tui_hrule() {
+  local width="$1"
+  awk -v n="$width" 'BEGIN { for (i = 0; i < n; i++) printf "─"; print "" }'
+}
+
 # ============================================================================
 # Requirements
 # ============================================================================
@@ -167,7 +176,7 @@ tui_dashboard() {
   else
     {
       printf "%-18s %-10s %-12s %s\n" "HOST" "TYPE" "DATABASES" "BACKUPS"
-      printf '%*s\n' $((width - 6)) '' | tr ' ' '─'
+      tui_hrule $((width - 6))
       while IFS= read -r host; do
         local htype dbs_count backup_count
         htype=$(get_db_type "$host" 2>/dev/null || echo "?")
@@ -196,7 +205,7 @@ tui_dashboard() {
     if [[ -n "$recent" ]]; then
       {
         printf "%-40s %8s  %-10s\n" "RECENT BACKUPS" "SIZE" "DATE"
-        printf '%*s\n' $((width - 6)) '' | tr ' ' '─'
+        tui_hrule $((width - 6))
         while IFS= read -r f; do
           [[ -z "$f" ]] && continue
           local rel size lock="" iso
