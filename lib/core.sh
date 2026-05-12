@@ -860,7 +860,6 @@ pick_postgres_image() {
   local override="$3"
 
   if [[ -n "$override" ]]; then
-    # Substitute {major} and {version} (alias for {major}).
     local out="$override"
     out="${out//\{major\}/$major}"
     out="${out//\{version\}/$major}"
@@ -869,9 +868,56 @@ pick_postgres_image() {
   fi
 
   if [[ "$major" == "unknown" || -z "$major" ]]; then
-    echo "postgres:17-alpine"
+    major="17"
+  fi
+
+  # Filter out plpgsql (always present, not a real extension for our purposes).
+  local ext_list=()
+  local ext
+  local _raw_exts=()
+  IFS=' ' read -ra _raw_exts <<< "$extensions"
+  for ext in "${_raw_exts[@]}"; do
+    [[ -z "$ext" ]] && continue
+    [[ "$ext" == "plpgsql" ]] && continue
+    ext_list+=("$ext")
+  done
+
+  if [[ ${#ext_list[@]} -eq 0 ]]; then
+    echo "postgres:${major}-alpine"
     return 0
   fi
 
-  echo "postgres:${major}-alpine"
+  # First pass: fail fast on any extension we don't have a mapping for. This
+  # also produces a precise error for the case "one known + one unknown" — we
+  # don't want to claim they all need a specialized image when one of them is
+  # simply unrecognized.
+  local known_exts=()
+  for ext in "${ext_list[@]}"; do
+    case "$ext" in
+      vector|postgis|timescaledb)
+        known_exts+=("$ext")
+        ;;
+      *)
+        log_error "Source database uses extension '$ext' which dbx doesn't have a known image for."
+        log_error "Set DBX_POSTGRES_IMAGE to an image that includes it, or in config:"
+        log_error '  { "defaults": { "postgres_image": "your-registry/your-image:tag" } }'
+        return 1
+        ;;
+    esac
+  done
+
+  # Multiple known extensions: none of our allowlist mappings share an image,
+  # so any combination is unresolvable without an override.
+  if [[ ${#known_exts[@]} -gt 1 ]]; then
+    log_error "Source database uses multiple extensions that map to different specialized images: ${known_exts[*]}."
+    log_error "Set DBX_POSTGRES_IMAGE to an image that includes all of them, or in config:"
+    log_error '  { "defaults": { "postgres_image": "your-registry/your-image:tag" } }'
+    return 1
+  fi
+
+  case "${known_exts[0]}" in
+    vector)       echo "pgvector/pgvector:pg${major}" ;;
+    postgis)      echo "postgis/postgis:${major}-3.5" ;;
+    timescaledb)  echo "timescale/timescaledb:latest-pg${major}" ;;
+  esac
 }
