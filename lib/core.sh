@@ -922,6 +922,12 @@ pick_postgres_image() {
   esac
 }
 
+# Return the Docker image string of a container, or empty if it doesn't exist.
+container_image() {
+  local name="$1"
+  docker inspect --format '{{.Config.Image}}' "$name" 2>/dev/null || true
+}
+
 # Choose a MySQL/MariaDB Docker image.
 # Args:
 #   $1: flavor ("mysql" | "mariadb" | "unknown")
