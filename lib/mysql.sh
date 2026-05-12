@@ -473,3 +473,30 @@ Common exclusions:
     log_info "Changes discarded"
   fi
 }
+
+# ============================================================================
+# MySQL/MariaDB Version Parsing
+# ============================================================================
+
+# Parse a VERSION() string into "flavor major minor".
+# MariaDB version strings contain "MariaDB"; everything else is treated as
+# MySQL. Patch level is discarded — major.minor is the image tag granularity.
+mysql_parse_version_string() {
+  local raw="$1"
+  [[ -z "$raw" ]] && { echo "unknown 0 0"; return 0; }
+
+  local flavor="mysql"
+  [[ "$raw" == *MariaDB* ]] && flavor="mariadb"
+
+  # First numeric component "X.Y" anchored at the start of the string.
+  local major minor
+  if [[ "$raw" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+  else
+    echo "unknown 0 0"
+    return 0
+  fi
+
+  echo "$flavor $major $minor"
+}
