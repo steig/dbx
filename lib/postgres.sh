@@ -266,6 +266,20 @@ pg_verify_backup() {
 # PostgreSQL Analysis
 # ============================================================================
 
+# ============================================================================
+# PostgreSQL Version Parsing
+# ============================================================================
+
+# Parse server_version_num integer → major version string.
+# PG 10+: MMMmmmm encoding (130000 → 13, 160003 → 16).
+# Returns "unknown" if input isn't a non-empty integer.
+pg_parse_server_version_num() {
+  local raw="$1"
+  [[ -z "$raw" ]] && { echo "unknown"; return 0; }
+  [[ "$raw" =~ ^[0-9]+$ ]] || { echo "unknown"; return 0; }
+  echo "$((raw / 10000))"
+}
+
 analyze_postgres() {
   local host="$1"
   local database="$2"
