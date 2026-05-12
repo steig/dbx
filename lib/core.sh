@@ -843,3 +843,35 @@ verify_backup() {
     return 1
   fi
 }
+
+# ============================================================================
+# Image Selection
+# ============================================================================
+
+# Choose a Postgres Docker image for the given major version and extension set.
+# Args:
+#   $1: major version (e.g. "15"). May be "unknown".
+#   $2: space-separated extension names (e.g. "vector postgis"). May be empty.
+#   $3: override template (e.g. "myrepo/pg:{major}"). May be empty.
+# Returns: image string on stdout, exit 1 with message on stderr if no mapping.
+pick_postgres_image() {
+  local major="$1"
+  local extensions="$2"
+  local override="$3"
+
+  if [[ -n "$override" ]]; then
+    # Substitute {major} and {version} (alias for {major}).
+    local out="$override"
+    out="${out//\{major\}/$major}"
+    out="${out//\{version\}/$major}"
+    echo "$out"
+    return 0
+  fi
+
+  if [[ "$major" == "unknown" || -z "$major" ]]; then
+    echo "postgres:17-alpine"
+    return 0
+  fi
+
+  echo "postgres:${major}-alpine"
+}
