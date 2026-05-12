@@ -49,3 +49,38 @@ setup() { setup_dbx_env; source_dbx_libs; }
   result=$(pick_postgres_image 15 "vector" "myrepo/pg:{major}")
   [ "$result" = "myrepo/pg:15" ]
 }
+
+@test "pick_mysql_image: mysql 8.0" {
+  result=$(pick_mysql_image mysql 8 0 "")
+  [ "$result" = "mysql:8.0" ]
+}
+
+@test "pick_mysql_image: mysql 8.4" {
+  result=$(pick_mysql_image mysql 8 4 "")
+  [ "$result" = "mysql:8.4" ]
+}
+
+@test "pick_mysql_image: mariadb 10.11" {
+  result=$(pick_mysql_image mariadb 10 11 "")
+  [ "$result" = "mariadb:10.11" ]
+}
+
+@test "pick_mysql_image: mariadb 11.4" {
+  result=$(pick_mysql_image mariadb 11 4 "")
+  [ "$result" = "mariadb:11.4" ]
+}
+
+@test "pick_mysql_image: unknown flavor falls back to mysql 8.0" {
+  result=$(pick_mysql_image unknown "" "" "")
+  [ "$result" = "mysql:8.0" ]
+}
+
+@test "pick_mysql_image: override template with {version}" {
+  result=$(pick_mysql_image mariadb 10 11 "myrepo/mariadb:{version}")
+  [ "$result" = "myrepo/mariadb:10.11" ]
+}
+
+@test "pick_mysql_image: override with empty version inputs normalizes to 8.0" {
+  result=$(pick_mysql_image unknown "" "" "myrepo/mysql:{version}")
+  [ "$result" = "myrepo/mysql:8.0" ]
+}

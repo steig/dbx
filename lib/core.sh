@@ -921,3 +921,39 @@ pick_postgres_image() {
     timescaledb)  echo "timescale/timescaledb:latest-pg${major}" ;;
   esac
 }
+
+# Choose a MySQL/MariaDB Docker image.
+# Args:
+#   $1: flavor ("mysql" | "mariadb" | "unknown")
+#   $2: major version (e.g. "8", "10"). May be empty.
+#   $3: minor version (e.g. "0", "11"). May be empty.
+#   $4: override template. May be empty.
+pick_mysql_image() {
+  local flavor="$1"
+  local major="$2"
+  local minor="$3"
+  local override="$4"
+
+  # Normalize: if either component is empty, fall back to a sensible default.
+  # This keeps the override path (which substitutes {version}) sane even when
+  # detection upstream returned partial results.
+  [[ -z "$major" ]] && major="8"
+  [[ -z "$minor" ]] && minor="0"
+
+  local version="${major}.${minor}"
+
+  if [[ -n "$override" ]]; then
+    local out="$override"
+    out="${out//\{major\}/$major}"
+    out="${out//\{minor\}/$minor}"
+    out="${out//\{version\}/$version}"
+    echo "$out"
+    return 0
+  fi
+
+  case "$flavor" in
+    mariadb)  echo "mariadb:${version}" ;;
+    mysql)    echo "mysql:${version}" ;;
+    *)        echo "mysql:8.0" ;;
+  esac
+}
