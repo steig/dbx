@@ -126,6 +126,20 @@ pg_backup() {
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
 
+  # Detect source server version + extensions for restore-time image picking.
+  # Redirect stdin from /dev/null so that `docker exec -i` inside these
+  # helpers does not consume stdin from a surrounding while-read loop when
+  # pg_backup is called in a multi-database backup pass.
+  local src_major src_exts_raw
+  src_major=$(pg_detect_server_version "$db_host" "$db_port" "$db_user" "$db_pass" "$database" < /dev/null)
+  src_exts_raw=$(pg_detect_extensions "$db_host" "$db_port" "$db_user" "$db_pass" "$database" < /dev/null)
+  # Build a JSON array from the space-separated list.
+  local src_exts_json="[]"
+  if [[ -n "$src_exts_raw" ]]; then
+    src_exts_json=$(printf '%s\n' "$src_exts_raw" | tr ' ' '\n' \
+      | jq -R . | jq -s 'map(select(length > 0))')
+  fi
+
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
   jq -n \
@@ -136,6 +150,9 @@ pg_backup() {
     --arg checksum "$checksum" \
     --arg encryption "$enc_type" \
     --arg dbx_version "${VERSION:-unknown}" \
+    --arg src_flavor "postgres" \
+    --arg src_major "$src_major" \
+    --argjson src_exts "$src_exts_json" \
     '{
       host: $host,
       database: $database,
@@ -143,7 +160,10 @@ pg_backup() {
       size: ($size | tonumber),
       checksums: { sha256: $checksum },
       encryption: $encryption,
-      dbx_version: $dbx_version
+      dbx_version: $dbx_version,
+      source_flavor: $src_flavor,
+      source_major_version: $src_major,
+      source_extensions: $src_exts
     }' > "$meta_file"
   secure_file "$meta_file"
 

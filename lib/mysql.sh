@@ -157,6 +157,15 @@ mysql_backup() {
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
 
+  # Detect source flavor + version for the meta. mysqldump grammar drifts
+  # across major versions, and Oracle mysqldump doesn't speak MariaDB — both
+  # callers benefit from knowing at restore time.
+  # Redirect stdin from /dev/null so that `docker exec -i` inside the helper
+  # does not consume stdin from a surrounding while-read loop.
+  local mysql_ver flavor src_major src_minor
+  mysql_ver=$(mysql_detect_server_version "$db_host" "$db_port" "$db_user" "$db_pass" < /dev/null)
+  read -r flavor src_major src_minor <<<"$mysql_ver"
+
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
   jq -n \
@@ -168,6 +177,9 @@ mysql_backup() {
     --arg checksum "$checksum" \
     --arg encryption "$enc_type" \
     --arg dbx_version "${VERSION:-unknown}" \
+    --arg src_flavor "$flavor" \
+    --arg src_major "$src_major" \
+    --arg src_minor "$src_minor" \
     '{
       host: $host,
       database: $database,
@@ -176,7 +188,11 @@ mysql_backup() {
       size: ($size | tonumber),
       checksums: { sha256: $checksum },
       encryption: $encryption,
-      dbx_version: $dbx_version
+      dbx_version: $dbx_version,
+      source_flavor: $src_flavor,
+      source_major_version: $src_major,
+      source_minor_version: $src_minor,
+      source_extensions: []
     }' > "$meta_file"
   secure_file "$meta_file"
 
