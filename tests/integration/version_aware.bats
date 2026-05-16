@@ -117,3 +117,49 @@ EOF
   docker exec -e PGPASSWORD=devpassword dbx-pgvector-source \
     psql -U postgres -c "DROP DATABASE IF EXISTS \"$vec_db\"" >/dev/null 2>&1 || true
 }
+
+@test "unknown extension during restore fails with override hint" {
+  # Take a normal backup against a regular postgres source, then inject an
+  # unsupported extension into the meta to simulate a backup from a source
+  # that uses (e.g.) pg_partman.
+  ensure_postgres_container
+
+  local pg_dbx_ip
+  pg_dbx_ip=$(docker inspect postgres-dbx \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "local-pg": {
+      "type": "postgres",
+      "host": "$pg_dbx_ip",
+      "port": 5432,
+      "user": "postgres",
+      "password_cmd": "echo devpassword"
+    }
+  },
+  "defaults": { "compression_level": 1, "keep_backups": 10 }
+}
+EOF
+
+  seed_postgres_db "$TEST_DB"
+
+  dbx_run backup local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+
+  # Inject an unsupported extension into the meta
+  local meta
+  meta=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst.meta.json | head -1)
+  jq '.source_extensions = ["pg_partman"]' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta"
+
+  dbx_run restore "local-pg/$TEST_DB/latest" --name "$RESTORE_DB"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "pg_partman"
+  echo "$output" | grep -q "DBX_POSTGRES_IMAGE"
+
+  # Source DB cleanup happens via teardown (drops TEST_DB on dbx-pg13-source,
+  # but seed_postgres_db just created it on postgres-dbx — clean that too).
+  docker exec -e PGPASSWORD=devpassword postgres-dbx \
+    psql -U postgres -c "DROP DATABASE IF EXISTS \"$TEST_DB\"" >/dev/null 2>&1 || true
+}
