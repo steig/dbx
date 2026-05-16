@@ -928,6 +928,31 @@ container_image() {
   docker inspect --format '{{.Config.Image}}' "$name" 2>/dev/null || true
 }
 
+# Return 0 if the postgres container has at least one non-system database
+# (anything other than postgres/template0/template1), 1 otherwise.
+pg_container_has_user_dbs() {
+  local container="$1"
+  local password="${2:-${DBX_PG_PASSWORD:-devpassword}}"
+  local count
+  count=$(docker exec -e PGPASSWORD="$password" "$container" \
+    psql -U postgres -tA -c \
+    "SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')" \
+    2>/dev/null || echo 0)
+  [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]
+}
+
+# Return 0 if the mysql container has at least one non-system database, else 1.
+mysql_container_has_user_dbs() {
+  local container="$1"
+  local password="${2:-${DBX_MYSQL_PASSWORD:-devpassword}}"
+  local count
+  count=$(docker exec -e MYSQL_PWD="$password" "$container" \
+    mysql -u root -N -e \
+    "SELECT count(*) FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys')" \
+    2>/dev/null || echo 0)
+  [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]
+}
+
 # Choose a MySQL/MariaDB Docker image.
 # Args:
 #   $1: flavor ("mysql" | "mariadb" | "unknown")

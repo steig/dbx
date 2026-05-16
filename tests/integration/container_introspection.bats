@@ -33,3 +33,18 @@ setup() {
   result=$(container_image "this_container_does_not_exist_xyz")
   [ -z "$result" ]
 }
+
+@test "pg_container_has_user_dbs: empty container returns 1" {
+  # Fresh container with no user DBs created
+  run pg_container_has_user_dbs "$TEST_CONTAINER" devpassword
+  [ "$status" -ne 0 ]
+}
+
+@test "pg_container_has_user_dbs: user DB present returns 0" {
+  docker exec -e PGPASSWORD=devpassword "$TEST_CONTAINER" \
+    psql -U postgres -c "CREATE DATABASE check_me" >/dev/null
+  run pg_container_has_user_dbs "$TEST_CONTAINER" devpassword
+  [ "$status" -eq 0 ]
+  docker exec -e PGPASSWORD=devpassword "$TEST_CONTAINER" \
+    psql -U postgres -c "DROP DATABASE check_me" >/dev/null
+}
