@@ -109,7 +109,8 @@ require_container() {
         -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
         -e LANG=C.UTF-8 \
         -p "${bind_addr}:5432:5432" \
-        postgres:17-alpine >/dev/null
+        "${DBX_FORCE_IMAGE:-postgres:17-alpine}" >/dev/null
+      unset DBX_FORCE_IMAGE
       # Wait for postgres to be ready
       log_info "Waiting for PostgreSQL to initialize..."
       for i in {1..30}; do
@@ -124,7 +125,8 @@ require_container() {
         --add-host=host.docker.internal:host-gateway \
         -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
         -p "${bind_addr}:3306:3306" \
-        mysql:8.0 >/dev/null
+        "${DBX_FORCE_IMAGE:-mysql:8.0}" >/dev/null
+      unset DBX_FORCE_IMAGE
       # Wait for mysql to be ready
       log_info "Waiting for MySQL to initialize..."
       for i in {1..60}; do
@@ -986,5 +988,153 @@ pick_mysql_image() {
     mariadb)  echo "mariadb:${version}" ;;
     mysql)    echo "mysql:${version}" ;;
     *)        echo "mysql:8.0" ;;
+  esac
+}
+
+# Given a container name and a desired image, ensure the container is running
+# the desired image. Possible outcomes:
+#   - image matches → no-op, return 0
+#   - container doesn't exist → caller should use require_container, return 0
+#     (DBX_FORCE_IMAGE is exported so require_container picks it up next)
+#   - image mismatch + container has no user DBs → recreate silently
+#   - image mismatch + has user DBs + recreate=true → recreate
+#   - image mismatch + has user DBs + recreate=false → die with DB list
+#
+# Args:
+#   $1: container name (postgres-dbx or mysql-dbx)
+#   $2: desired image
+#   $3: recreate flag ("true" or "false")
+ensure_container_image() {
+  local container="$1"
+  local desired_image="$2"
+  local recreate="$3"
+
+  local current_image
+  current_image=$(container_image "$container")
+
+  # Nothing there → let require_container create it later with the right image.
+  [[ -z "$current_image" ]] && { export DBX_FORCE_IMAGE="$desired_image"; return 0; }
+
+  # Already on the right image.
+  [[ "$current_image" == "$desired_image" ]] && return 0
+
+  # Mismatch. Check for user DBs.
+  # Detect the DB type from the container name first, then fall back to
+  # the current image tag (covers non-standard names used in tests).
+  local has_dbs="false"
+  local _db_type=""
+  case "$container" in
+    *postgres*) _db_type="postgres" ;;
+    *mysql*)    _db_type="mysql" ;;
+    *)
+      case "$current_image" in
+        postgres:*|pgvector/*|postgis/*|timescale/*) _db_type="postgres" ;;
+        mysql:*|mariadb:*)                           _db_type="mysql" ;;
+      esac
+      ;;
+  esac
+  case "$_db_type" in
+    postgres) pg_container_has_user_dbs "$container" && has_dbs="true" ;;
+    mysql)    mysql_container_has_user_dbs "$container" && has_dbs="true" ;;
+  esac
+
+  if [[ "$has_dbs" == "false" ]]; then
+    log_info "Recreating $container: $current_image → $desired_image (no user DBs present)"
+    _recreate_container "$container" "$desired_image"
+    return $?
+  fi
+
+  if [[ "$recreate" == "true" ]]; then
+    log_warn "Recreating $container: $current_image → $desired_image (user DBs will be destroyed)"
+    _recreate_container "$container" "$desired_image"
+    return $?
+  fi
+
+  # User DBs + no flag: fail with the DB list.
+  log_error "$container is running $current_image but this restore needs $desired_image."
+  log_error "The container has user databases that would be destroyed:"
+  _list_user_dbs "$container" | sed 's/^/  - /' >&2
+  log_error ""
+  log_error "Recreate the container (destroys these DBs):"
+  log_error "  dbx restore <source> --recreate-container"
+  log_error ""
+  log_error "Or save them first with: dbx backup <local-host> <db> for each."
+  return 1
+}
+
+# Stop, remove, and recreate a managed container with a new image.
+# For the well-known managed containers (postgres-dbx, mysql-dbx) this
+# delegates to require_container (via DBX_FORCE_IMAGE) so that all port
+# bindings and flags stay consistent. For other container names (e.g. in
+# tests) it starts a minimal container using the image directly, detecting
+# the DB type from the image tag.
+_recreate_container() {
+  local container="$1"
+  local image="$2"
+  docker rm -f "$container" >/dev/null 2>&1 || true
+  case "$container" in
+    postgres-dbx|mysql-dbx)
+      export DBX_FORCE_IMAGE="$image"
+      require_container "$container"
+      ;;
+    *)
+      # Non-standard container name (e.g. integration test containers).
+      # Detect DB type from the image name and start with minimal flags.
+      if [[ "$image" == postgres:* || "$image" == pgvector/* || "$image" == postgis/* || "$image" == timescale/* ]]; then
+        docker run -d --name "$container" \
+          -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
+          "$image" >/dev/null
+        log_info "Waiting for PostgreSQL to initialize..."
+        for i in {1..30}; do
+          docker exec "$container" pg_isready -U postgres >/dev/null 2>&1 && break
+          sleep 1
+        done
+      elif [[ "$image" == mysql:* || "$image" == mariadb:* ]]; then
+        docker run -d --name "$container" \
+          -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
+          "$image" >/dev/null
+        log_info "Waiting for MySQL to initialize..."
+        for i in {1..60}; do
+          docker exec -e MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" "$container" \
+            mysqladmin ping -h localhost -u root >/dev/null 2>&1 && break
+          sleep 1
+        done
+      else
+        die "Cannot recreate container '$container' with unknown image type: $image"
+      fi
+      ;;
+  esac
+}
+
+# List user (non-system) databases on a managed container.
+# Detects DB type from the container name, with fallback to the running image.
+_list_user_dbs() {
+  local container="$1"
+  local _db_type=""
+  case "$container" in
+    *postgres*) _db_type="postgres" ;;
+    *mysql*)    _db_type="mysql" ;;
+    *)
+      local _img
+      _img=$(container_image "$container")
+      case "$_img" in
+        postgres:*|pgvector/*|postgis/*|timescale/*) _db_type="postgres" ;;
+        mysql:*|mariadb:*)                           _db_type="mysql" ;;
+      esac
+      ;;
+  esac
+  case "$_db_type" in
+    postgres)
+      docker exec -e PGPASSWORD="${DBX_PG_PASSWORD:-devpassword}" "$container" \
+        psql -U postgres -tA -c \
+        "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres','template0','template1') ORDER BY datname" \
+        2>/dev/null
+      ;;
+    mysql)
+      docker exec -e MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" "$container" \
+        mysql -u root -N -e \
+        "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys') ORDER BY schema_name" \
+        2>/dev/null
+      ;;
   esac
 }
