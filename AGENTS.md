@@ -82,6 +82,12 @@ The early test pass surfaced eight bugs whose root causes are easy to repeat. If
 - **`ls -t pat1 pat2 pat3`.** Returns 2 if any of the patterns have no matches, even with `2>/dev/null` redirected. Wrap the pipeline in `|| true`, or use `find -type f \( -name pat1 -o -name pat2 \)` instead.
 - **Don't install EXIT traps at module load time.** A library that calls `trap '...' EXIT INT TERM` on source clobbers the caller's trap. Define the function but require the caller to invoke it (see `setup_security_trap` in `lib/core.sh`).
 - **`local x=$(cmd)` masks return codes (SC2155).** Splitting `local x; x=$(cmd)` lets `set -e` see failures.
+- **Postgres `server_version_num` is `MMMmmmm` for PG 10+** (130000 = 13, 160003 = 16). Parsing via `(raw / 10000)` gives the major. Pre-10 used `MMmmm` (90605 = 9.6) — dbx targets PG 10+ only, so we don't handle it.
+- **MariaDB's `VERSION()` contains the literal substring "MariaDB"** (e.g. `10.11.6-MariaDB-1:10.11.6+maria~ubu2204`). Detect flavor by substring match, not by parsing the first numeric component.
+- **`docker exec -i` inside a `while read` loop steals the loop's stdin.** Add `< /dev/null` to detection helpers like `pg_detect_extensions` when they're called inside multi-database backup loops, or the second iteration silently skips.
+- **bats `setup_file` locals aren't visible in `@test` bodies** unless explicitly `export`ed. Use `export TEST_CONTAINER=...` when sharing container names across tests.
+- **`mysqldump --set-gtid-purged=OFF` is a MySQL-only flag.** MariaDB's mysqldump rejects it as unknown. Branch on `flavor` before adding it.
+- **Container-to-container connectivity in tests** prefers the Docker bridge IP (`docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'`) over host-port forwarding. NixOS firewalls often block container → host:loopback even when the host port is published.
 
 ## Code Style Guidelines
 

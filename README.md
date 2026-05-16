@@ -102,7 +102,7 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 |---------|-------------|
 | `dbx tui` | Interactive menu mode (requires `gum`) |
 | `dbx backup [-v] [--upload] <host> [database]` | Back up one DB or every DB on a host |
-| `dbx restore <source> [--name N]` | Restore to a local container |
+| `dbx restore <source> [--name N] [--recreate-container]` | Restore to a local container; recreate the container if its version differs |
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
 | `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
 | `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
@@ -315,6 +315,32 @@ dbx restore production/myapp/latest
 
 Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
 
+## Image Selection
+
+dbx auto-picks the Docker image for the restore container based on the source database's version and extensions, recorded in `.meta.json` at backup time:
+
+- **Postgres, no extensions** → `postgres:<major>-alpine`
+- **Postgres + `vector`** → `pgvector/pgvector:pg<major>`
+- **Postgres + `postgis`** → `postgis/postgis:<major>-3.5`
+- **Postgres + `timescaledb`** → `timescale/timescaledb:latest-pg<major>`
+- **MySQL** → `mysql:<major>.<minor>`
+- **MariaDB** → `mariadb:<major>.<minor>` (MariaDB sources now use the correct dumper — Oracle `mysqldump` previously introduced subtle drift)
+
+For anything outside this list, set `DBX_POSTGRES_IMAGE` or `DBX_MYSQL_IMAGE` (or the `defaults.postgres_image` / `defaults.mysql_image` config keys). The template supports `{major}` and `{version}` substitution:
+
+```bash
+export DBX_POSTGRES_IMAGE='myregistry/pg-everything:{major}'
+```
+
+If the existing restore container's image doesn't match what's needed, dbx will:
+- **Silently recreate** when the container has no user databases.
+- **Fail with a list of restored DBs** and instructions to pass `--recreate-container` when there are user DBs to preserve.
+
+### Limitations
+
+- Postgres backups always use the existing `postgres-dbx` client image. If you back up from a source whose major version is *newer* than `postgres-dbx`'s current image (e.g. `postgres-dbx` is on 13, source is 16), pg_dump will fail because older clients can't dump newer servers. Workaround: restore an older backup first (which switches the image), or set `DBX_POSTGRES_IMAGE='postgres:N-alpine'` to the source version and recreate.
+- The extension allowlist is intentionally narrow (3 known images). For anything else (`pg_partman`, `pg_cron`, Citus, `pgaudit`, etc.), use `DBX_POSTGRES_IMAGE`.
+
 ## Verification & Audit
 
 Every backup writes a sibling `.meta.json` with size, timestamp, encryption mode, and SHA-256 checksum:
@@ -355,6 +381,9 @@ Every operation appends a JSON line to `~/.local/share/dbx/audit.log`:
 | `DBX_PG_PASSWORD` | `devpassword` | Initial password for auto-created PG container |
 | `DBX_MYSQL_PASSWORD` | `devpassword` | Initial password for auto-created MySQL container |
 | `DBX_BIND_ADDR` | `127.0.0.1` | Host bind address for the auto-managed containers |
+| `DBX_POSTGRES_IMAGE` | unset | Override the auto-managed PG container image. Supports `{major}` / `{version}` template substitution. |
+| `DBX_MYSQL_IMAGE` | unset | Override the auto-managed MySQL container image. Supports `{major}`, `{minor}`, `{version}` template substitution. |
+| `DBX_RECREATE_CONTAINER` | unset | Set to `true` (or pass `--recreate-container`) to allow destroying user DBs when the container's version doesn't match the backup. |
 | `DBX_NO_UPDATE_CHECK` | unset | Set to `1` to suppress update notices |
 | `DBX_REPO_SLUG` | `steig/dbx` | Override for forks |
 | `DBX_UPDATE_CHECK_INTERVAL` | `86400` | Seconds between update API hits |
