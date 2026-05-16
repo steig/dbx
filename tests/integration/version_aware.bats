@@ -5,6 +5,7 @@ setup_file() {
   require_docker
   ensure_postgres_container   # the postgres-dbx restore target
   ensure_pg13_source
+  ensure_pgvector_source
 }
 
 setup() {
@@ -63,4 +64,56 @@ teardown() {
 
   result=$(container_image postgres-dbx)
   [ "$result" = "postgres:13-alpine" ]
+}
+
+@test "restoring a backup with pgvector extension uses pgvector image" {
+  ensure_pgvector_source
+
+  local pgvec_ip
+  pgvec_ip=$(docker inspect dbx-pgvector-source \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "pgvec": {
+      "type": "postgres",
+      "host": "$pgvec_ip",
+      "port": 5432,
+      "user": "postgres",
+      "password_cmd": "echo devpassword"
+    }
+  },
+  "defaults": { "compression_level": 1, "keep_backups": 10 }
+}
+EOF
+
+  # Ensure postgres-dbx is running a pg16-compatible image before backing up.
+  # After the preceding test it may be postgres:13-alpine, which cannot dump
+  # a PG 16 source. Recreate it with the pgvector image so the client version
+  # matches; the restore step will confirm it stays on that image.
+  ensure_container_image postgres-dbx pgvector/pgvector:pg16 "true"
+
+  local vec_db="vec_test_$$"
+  docker exec -e PGPASSWORD=devpassword dbx-pgvector-source \
+    psql -U postgres -c "CREATE DATABASE \"$vec_db\"" >/dev/null
+  docker exec -e PGPASSWORD=devpassword dbx-pgvector-source \
+    psql -U postgres -d "$vec_db" -c "CREATE EXTENSION vector;" >/dev/null
+
+  dbx_run backup pgvec "$vec_db"
+  [ "$status" -eq 0 ]
+
+  local meta
+  meta=$(ls "$DBX_DATA_DIR/pgvec/$vec_db"/*.sql.zst.meta.json | head -1)
+  [ "$(jq -r '.source_extensions | join(",")' "$meta")" = "vector" ]
+
+  dbx_run restore "pgvec/$vec_db/latest" --name "${vec_db}_r" --recreate-container
+  [ "$status" -eq 0 ]
+
+  result=$(container_image postgres-dbx)
+  [ "$result" = "pgvector/pgvector:pg16" ]
+
+  pg_drop_db "${vec_db}_r"
+  docker exec -e PGPASSWORD=devpassword dbx-pgvector-source \
+    psql -U postgres -c "DROP DATABASE IF EXISTS \"$vec_db\"" >/dev/null 2>&1 || true
 }

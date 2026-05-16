@@ -154,6 +154,22 @@ ensure_pg13_source() {
   fi
 }
 
+# Spin up a Postgres 16 + pgvector source for extension-aware-restore tests.
+# Idempotent. Container name: dbx-pgvector-source.
+ensure_pgvector_source() {
+  if ! docker ps --format '{{.Names}}' | grep -q '^dbx-pgvector-source$'; then
+    docker rm -f dbx-pgvector-source >/dev/null 2>&1
+    docker run -d --name dbx-pgvector-source \
+      -e POSTGRES_PASSWORD=devpassword \
+      pgvector/pgvector:pg16 >/dev/null
+    for _ in $(seq 1 30); do
+      docker exec dbx-pgvector-source pg_isready -U postgres >/dev/null 2>&1 && return 0
+      sleep 1
+    done
+    return 1
+  fi
+}
+
 # Write a config that points at the local containers and uses password_cmd
 # (echo) to bypass the keychain.
 write_local_config() {
