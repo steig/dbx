@@ -104,3 +104,20 @@ teardown() {
   [ "$status" -eq 0 ]
   ! echo "$output" | grep -qi "unknown database type"
 }
+
+@test "postgres: backup meta contains source_version and source_extensions" {
+  seed_postgres_db "$TEST_DB"
+  dbx_run backup local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+
+  local meta
+  meta=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst.meta.json | head -1)
+
+  # source_flavor must be "postgres"
+  [ "$(jq -r .source_flavor "$meta")" = "postgres" ]
+  # source_major_version should match the postgres-dbx server version
+  [ -n "$(jq -r .source_major_version "$meta")" ]
+  [ "$(jq -r .source_major_version "$meta")" != "null" ]
+  # source_extensions must be an array (possibly empty)
+  [ "$(jq -r '.source_extensions | type' "$meta")" = "array" ]
+}

@@ -126,6 +126,20 @@ pg_backup() {
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
 
+  # Detect source server version + extensions for restore-time image picking.
+  # Redirect stdin from /dev/null so that `docker exec -i` inside these
+  # helpers does not consume stdin from a surrounding while-read loop when
+  # pg_backup is called in a multi-database backup pass.
+  local src_major src_exts_raw
+  src_major=$(pg_detect_server_version "$db_host" "$db_port" "$db_user" "$db_pass" "$database" < /dev/null)
+  src_exts_raw=$(pg_detect_extensions "$db_host" "$db_port" "$db_user" "$db_pass" "$database" < /dev/null)
+  # Build a JSON array from the space-separated list.
+  local src_exts_json="[]"
+  if [[ -n "$src_exts_raw" ]]; then
+    src_exts_json=$(printf '%s\n' "$src_exts_raw" | tr ' ' '\n' \
+      | jq -R . | jq -s 'map(select(length > 0))')
+  fi
+
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
   jq -n \
@@ -136,6 +150,9 @@ pg_backup() {
     --arg checksum "$checksum" \
     --arg encryption "$enc_type" \
     --arg dbx_version "${VERSION:-unknown}" \
+    --arg src_flavor "postgres" \
+    --arg src_major "$src_major" \
+    --argjson src_exts "$src_exts_json" \
     '{
       host: $host,
       database: $database,
@@ -143,7 +160,10 @@ pg_backup() {
       size: ($size | tonumber),
       checksums: { sha256: $checksum },
       encryption: $encryption,
-      dbx_version: $dbx_version
+      dbx_version: $dbx_version,
+      source_flavor: $src_flavor,
+      source_major_version: $src_major,
+      source_extensions: $src_exts
     }' > "$meta_file"
   secure_file "$meta_file"
 
@@ -174,6 +194,32 @@ pg_restore_backup() {
   start_time=$(date +%s)
 
   log_step "Restoring PostgreSQL backup to: $target_db"
+
+  # Determine the right container image based on backup metadata. Legacy
+  # backups without source_* fields use the default (postgres:17-alpine).
+  local src_major src_exts override desired_image
+  local meta_file="${backup_file%.zst}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file}.meta.json"
+  # Handle .age/.gpg suffixes too (they sit on top of .zst).
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.age}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.gpg}.meta.json"
+
+  if [[ -f "$meta_file" ]]; then
+    src_major=$(jq -r '.source_major_version // "unknown"' "$meta_file")
+    src_exts=$(jq -r '.source_extensions // [] | join(" ")' "$meta_file")
+  else
+    src_major="unknown"
+    src_exts=""
+  fi
+
+  override="${DBX_POSTGRES_IMAGE:-$(get_config_value '.defaults.postgres_image' 2>/dev/null || echo '')}"
+  if ! desired_image=$(pick_postgres_image "$src_major" "$src_exts" "$override"); then
+    return 1
+  fi
+
+  # If the running container doesn't match, gate on user DBs unless flag set.
+  local recreate="${DBX_RECREATE_CONTAINER:-false}"
+  ensure_container_image "$POSTGRES_CONTAINER" "$desired_image" "$recreate" || return 1
 
   # Decompress backup first (use DATA_DIR to avoid /tmp quota issues)
   local tmp_dir="$DATA_DIR/.tmp"
@@ -265,6 +311,47 @@ pg_verify_backup() {
 # ============================================================================
 # PostgreSQL Analysis
 # ============================================================================
+
+# ============================================================================
+# PostgreSQL Version Parsing
+# ============================================================================
+
+# Parse server_version_num integer → major version string.
+# PG 10+: MMMmmmm encoding (130000 → 13, 160003 → 16).
+# Returns "unknown" if input isn't a non-empty integer.
+pg_parse_server_version_num() {
+  local raw="$1"
+  [[ -z "$raw" ]] && { echo "unknown"; return 0; }
+  [[ "$raw" =~ ^[0-9]+$ ]] || { echo "unknown"; return 0; }
+  echo "$((raw / 10000))"
+}
+
+# Detect the major version of a remote Postgres server. Returns "unknown" on
+# any failure (connection, permissions, parse error) — callers fall back to
+# the default image.
+# Args: $1=host $2=port $3=user $4=password [$5=database, default "postgres"]
+pg_detect_server_version() {
+  local host="$1" port="$2" user="$3" password="$4" db="${5:-postgres}"
+  local raw
+  raw=$(docker exec -i -e PGPASSWORD="$password" \
+    "${POSTGRES_CONTAINER:-postgres-dbx}" \
+    psql -h "$host" -p "$port" -U "$user" -d "$db" -tA -c \
+    "SELECT current_setting('server_version_num')" 2>/dev/null \
+    | tr -d '[:space:]')
+  pg_parse_server_version_num "$raw"
+}
+
+# Detect extensions installed in a specific database. Returns a space-separated
+# list with plpgsql filtered out. Empty string when none or on failure.
+# Args: $1=host $2=port $3=user $4=password $5=database
+pg_detect_extensions() {
+  local host="$1" port="$2" user="$3" password="$4" db="$5"
+  docker exec -i -e PGPASSWORD="$password" \
+    "${POSTGRES_CONTAINER:-postgres-dbx}" \
+    psql -h "$host" -p "$port" -U "$user" -d "$db" -tA -c \
+    "SELECT extname FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname" \
+    2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
 
 analyze_postgres() {
   local host="$1"

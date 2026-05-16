@@ -75,3 +75,44 @@ teardown() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -qF "$real_name"
 }
+
+@test "mysql: mariadb source → backup uses mariadb image and writes mariadb flavor" {
+  ensure_mariadb_source
+
+  # Resolve the source's Docker bridge IP so mysql-dbx can reach it.
+  local maria_ip
+  maria_ip=$(docker inspect dbx-mariadb-source \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  # Override the config to point at the mariadb source on the bridge IP.
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "local-mariadb": {
+      "type": "mysql",
+      "host": "$maria_ip",
+      "port": 3306,
+      "user": "root",
+      "password_cmd": "echo devpassword"
+    }
+  },
+  "defaults": { "compression_level": 1, "keep_backups": 10 }
+}
+EOF
+
+  # Seed a DB on the MariaDB source.
+  docker exec -e MYSQL_PWD=devpassword dbx-mariadb-source \
+    mariadb -u root -e "DROP DATABASE IF EXISTS mariatest; CREATE DATABASE mariatest; CREATE TABLE mariatest.t (id int); INSERT INTO mariatest.t VALUES (1),(2);" >/dev/null
+
+  dbx_run backup local-mariadb mariatest
+  [ "$status" -eq 0 ]
+
+  local meta
+  meta=$(ls "$DBX_DATA_DIR/local-mariadb/mariatest"/*.sql.zst.meta.json | head -1)
+  [ "$(jq -r .source_flavor "$meta")" = "mariadb" ]
+  [ "$(jq -r .source_major_version "$meta")" = "10" ]
+
+  # The mysql-dbx container should now be running mariadb, not mysql:8.0
+  result=$(docker inspect --format '{{.Config.Image}}' mysql-dbx 2>/dev/null)
+  [[ "$result" =~ ^mariadb: ]]
+}

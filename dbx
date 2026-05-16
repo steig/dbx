@@ -190,6 +190,10 @@ cmd_restore() {
         target_name="$2"
         shift 2
         ;;
+      --recreate-container)
+        export DBX_RECREATE_CONTAINER=true
+        shift
+        ;;
       *)
         die "Unknown option: $1"
         ;;

@@ -4,6 +4,19 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+- Version-aware Docker image selection: the restore container now matches the source database's major version. Postgres extensions (`vector`, `postgis`, `timescaledb`) auto-select the right specialized image.
+- `--recreate-container` flag on `dbx restore` for explicit consent to destroy user DBs when switching versions.
+- `DBX_POSTGRES_IMAGE` / `DBX_MYSQL_IMAGE` env vars and matching config keys (`defaults.postgres_image`, `defaults.mysql_image`) for image override. Templates support `{major}`, `{minor}`, `{version}` substitution.
+- New `.meta.json` fields written at backup time: `source_flavor`, `source_major_version`, `source_extensions`, plus `source_minor_version` for MySQL.
+
+### Changed
+- MariaDB sources now use the `mariadb:<major>.<minor>` image for the dumper container, replacing the Oracle `mysql:8.0` image that previously caused subtle definer/encoding drift in MariaDB dumps.
+- `mysqldump --set-gtid-purged=OFF` is now conditional on flavor — MariaDB rejects the flag.
+
+### Fixed
+- `pg_detect_extensions` and `pg_detect_server_version` redirect stdin from `/dev/null` so they don't consume the outer `while read` loop's stdin in multi-database backup runs.
+
 ## [0.7.1] - 2026-05-08
 
 Eight latent bugs uncovered by the new bats test suite (PR #20), the new release-check feature (PR #21), and the doc/comment follow-ups from the in-depth review (PR #23).

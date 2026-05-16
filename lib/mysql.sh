@@ -59,6 +59,21 @@ mysql_backup() {
   [[ "$enc_type" != "none" ]] && log_info "Encryption: $enc_type"
   [[ ${#exclude_tables[@]} -gt 0 ]] && log_info "Excluding data: ${exclude_tables[*]}"
 
+  # Match the dumper container to the source flavor/version. mysqldump grammar
+  # drifts across major versions, and Oracle's mysqldump doesn't speak
+  # MariaDB. This is the dumper container — nothing valuable lives in
+  # mysql-dbx during a backup, so we always recreate if mismatched.
+  local flavor src_major src_minor
+  local mysql_ver
+  mysql_ver=$(mysql_detect_server_version "$db_host" "$db_port" "$db_user" "$db_pass" < /dev/null)
+  read -r flavor src_major src_minor <<<"$mysql_ver"
+
+  local override
+  override="${DBX_MYSQL_IMAGE:-$(get_config_value '.defaults.mysql_image' 2>/dev/null || echo '')}"
+  local desired_image
+  desired_image=$(pick_mysql_image "$flavor" "$src_major" "$src_minor" "$override")
+  ensure_container_image "$MYSQL_CONTAINER" "$desired_image" "true" || return 1
+
   require_container "$MYSQL_CONTAINER"
 
   local tmpdir
@@ -78,6 +93,10 @@ mysql_backup() {
   local verbose_flag=""
   [[ "$verbose" == "true" ]] && verbose_flag="--verbose"
 
+  # --set-gtid-purged is MySQL-only; MariaDB rejects it as an unknown variable.
+  local gtid_flag=""
+  [[ "$flavor" != "mariadb" ]] && gtid_flag="--set-gtid-purged=OFF"
+
   # Copy credential file to container for secure access
   docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
   docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
@@ -88,7 +107,7 @@ mysql_backup() {
     mysqldump \
       --defaults-extra-file=/tmp/my.cnf \
       --single-transaction \
-      --set-gtid-purged=OFF \
+      $gtid_flag \
       --skip-lock-tables \
       --no-data \
       --routines \
@@ -120,7 +139,7 @@ mysql_backup() {
     mysqldump \
       --defaults-extra-file=/tmp/my.cnf \
       --single-transaction \
-      --set-gtid-purged=OFF \
+      $gtid_flag \
       --skip-lock-tables \
       --no-create-info \
       --skip-triggers \
@@ -168,6 +187,9 @@ mysql_backup() {
     --arg checksum "$checksum" \
     --arg encryption "$enc_type" \
     --arg dbx_version "${VERSION:-unknown}" \
+    --arg src_flavor "$flavor" \
+    --arg src_major "$src_major" \
+    --arg src_minor "$src_minor" \
     '{
       host: $host,
       database: $database,
@@ -176,7 +198,11 @@ mysql_backup() {
       size: ($size | tonumber),
       checksums: { sha256: $checksum },
       encryption: $encryption,
-      dbx_version: $dbx_version
+      dbx_version: $dbx_version,
+      source_flavor: $src_flavor,
+      source_major_version: $src_major,
+      source_minor_version: $src_minor,
+      source_extensions: []
     }' > "$meta_file"
   secure_file "$meta_file"
 
@@ -472,4 +498,46 @@ Common exclusions:
   else
     log_info "Changes discarded"
   fi
+}
+
+# ============================================================================
+# MySQL/MariaDB Version Parsing
+# ============================================================================
+
+# Parse a VERSION() string into "flavor major minor".
+# MariaDB version strings contain "MariaDB"; everything else is treated as
+# MySQL. Patch level is discarded — major.minor is the image tag granularity.
+mysql_parse_version_string() {
+  local raw="$1"
+  [[ -z "$raw" ]] && { echo "unknown 0 0"; return 0; }
+
+  local flavor="mysql"
+  [[ "$raw" == *MariaDB* ]] && flavor="mariadb"
+
+  # First numeric component "X.Y" anchored at the start of the string.
+  local major minor
+  if [[ "$raw" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+  else
+    echo "unknown 0 0"
+    return 0
+  fi
+
+  echo "$flavor $major $minor"
+}
+
+# Detect flavor + major + minor of a remote MySQL or MariaDB server.
+# Returns "flavor major minor" or "unknown 0 0" on any failure.
+# Uses the dbx-managed mysql container as the client to avoid needing a
+# local mysql binary.
+# Args: $1=host $2=port $3=user $4=password
+mysql_detect_server_version() {
+  local host="$1" port="$2" user="$3" password="$4"
+  local raw
+  raw=$(docker exec -i -e MYSQL_PWD="$password" \
+    "${MYSQL_CONTAINER:-mysql-dbx}" \
+    mysql -h "$host" -P "$port" -u "$user" -N -e 'SELECT VERSION()' \
+    2>/dev/null | tr -d '\r')
+  mysql_parse_version_string "$raw"
 }
