@@ -88,3 +88,54 @@ setup() {
   result=$(container_image "$TEST_CONTAINER")
   [ "$result" = "postgres:13-alpine" ]
 }
+
+@test "pg_detect_server_version: against PG 15 source" {
+  # TEST_CONTAINER may have been recreated as postgres:13-alpine by Task 8.
+  # Reset to a known PG 15 source. No host-port binding needed — we connect
+  # container-to-container via the Docker bridge IP.
+  docker rm -f "$TEST_CONTAINER" >/dev/null 2>&1
+  docker run -d --name "$TEST_CONTAINER" \
+    -e POSTGRES_PASSWORD=devpassword \
+    postgres:15-alpine >/dev/null
+  for _ in $(seq 1 30); do
+    docker exec "$TEST_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+    sleep 1
+  done
+
+  # We need a postgres-dbx container available as the psql client. Make sure it exists.
+  if ! docker ps --format '{{.Names}}' | grep -q '^postgres-dbx$'; then
+    docker run -d --name postgres-dbx \
+      --add-host=host.docker.internal:host-gateway \
+      -e POSTGRES_PASSWORD=devpassword \
+      postgres:17-alpine >/dev/null
+    for _ in $(seq 1 30); do
+      docker exec postgres-dbx pg_isready -U postgres >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+
+  # Resolve the container IP so postgres-dbx can reach it via the Docker bridge.
+  local pg_ip
+  pg_ip=$(docker inspect "$TEST_CONTAINER" \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  result=$(pg_detect_server_version "$pg_ip" 5432 postgres devpassword)
+  [ "$result" = "15" ]
+}
+
+@test "pg_detect_extensions: empty database returns empty" {
+  # Re-resolve the container IP (the variable from the previous test is gone).
+  local pg_ip
+  pg_ip=$(docker inspect "$TEST_CONTAINER" \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  docker exec -e PGPASSWORD=devpassword "$TEST_CONTAINER" \
+    psql -U postgres -c "CREATE DATABASE detect_ext_test" >/dev/null
+
+  result=$(pg_detect_extensions "$pg_ip" 5432 postgres devpassword detect_ext_test)
+  # plpgsql is always present but we filter it out in the SQL
+  [ -z "$result" ]
+
+  docker exec -e PGPASSWORD=devpassword "$TEST_CONTAINER" \
+    psql -U postgres -c "DROP DATABASE detect_ext_test" >/dev/null 2>&1 || true
+}

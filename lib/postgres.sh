@@ -280,6 +280,33 @@ pg_parse_server_version_num() {
   echo "$((raw / 10000))"
 }
 
+# Detect the major version of a remote Postgres server. Returns "unknown" on
+# any failure (connection, permissions, parse error) — callers fall back to
+# the default image.
+# Args: $1=host $2=port $3=user $4=password [$5=database, default "postgres"]
+pg_detect_server_version() {
+  local host="$1" port="$2" user="$3" password="$4" db="${5:-postgres}"
+  local raw
+  raw=$(docker exec -i -e PGPASSWORD="$password" \
+    "${POSTGRES_CONTAINER:-postgres-dbx}" \
+    psql -h "$host" -p "$port" -U "$user" -d "$db" -tA -c \
+    "SELECT current_setting('server_version_num')" 2>/dev/null \
+    | tr -d '[:space:]')
+  pg_parse_server_version_num "$raw"
+}
+
+# Detect extensions installed in a specific database. Returns a space-separated
+# list with plpgsql filtered out. Empty string when none or on failure.
+# Args: $1=host $2=port $3=user $4=password $5=database
+pg_detect_extensions() {
+  local host="$1" port="$2" user="$3" password="$4" db="$5"
+  docker exec -i -e PGPASSWORD="$password" \
+    "${POSTGRES_CONTAINER:-postgres-dbx}" \
+    psql -h "$host" -p "$port" -U "$user" -d "$db" -tA -c \
+    "SELECT extname FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname" \
+    2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
 analyze_postgres() {
   local host="$1"
   local database="$2"
