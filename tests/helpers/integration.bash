@@ -115,6 +115,28 @@ mysql_drop_db() {
     mysql -u root -e "DROP DATABASE IF EXISTS \`$1\`" >/dev/null 2>&1 || true
 }
 
+# Spin up a MariaDB 10.11 source for testing flavor detection + image match.
+# Idempotent. Container name: dbx-mariadb-source. No host-port mapping —
+# bats tests connect via the Docker bridge IP (firewall blocks host port
+# forwarding from inside containers on this host).
+ensure_mariadb_source() {
+  if ! docker ps --format '{{.Names}}' | grep -q '^dbx-mariadb-source$'; then
+    docker rm -f dbx-mariadb-source >/dev/null 2>&1
+    docker run -d --name dbx-mariadb-source \
+      -e MARIADB_ROOT_PASSWORD=devpassword \
+      mariadb:10.11 >/dev/null
+    for _ in $(seq 1 60); do
+      if docker exec -e MYSQL_PWD=devpassword dbx-mariadb-source \
+           mariadb -u root -e 'SELECT 1' >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    echo "dbx-mariadb-source failed to become ready" >&2
+    return 1
+  fi
+}
+
 # Write a config that points at the local containers and uses password_cmd
 # (echo) to bypass the keychain.
 write_local_config() {

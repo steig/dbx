@@ -59,6 +59,21 @@ mysql_backup() {
   [[ "$enc_type" != "none" ]] && log_info "Encryption: $enc_type"
   [[ ${#exclude_tables[@]} -gt 0 ]] && log_info "Excluding data: ${exclude_tables[*]}"
 
+  # Match the dumper container to the source flavor/version. mysqldump grammar
+  # drifts across major versions, and Oracle's mysqldump doesn't speak
+  # MariaDB. This is the dumper container — nothing valuable lives in
+  # mysql-dbx during a backup, so we always recreate if mismatched.
+  local flavor src_major src_minor
+  local mysql_ver
+  mysql_ver=$(mysql_detect_server_version "$db_host" "$db_port" "$db_user" "$db_pass" < /dev/null)
+  read -r flavor src_major src_minor <<<"$mysql_ver"
+
+  local override
+  override="${DBX_MYSQL_IMAGE:-$(get_config_value '.defaults.mysql_image' 2>/dev/null || echo '')}"
+  local desired_image
+  desired_image=$(pick_mysql_image "$flavor" "$src_major" "$src_minor" "$override")
+  ensure_container_image "$MYSQL_CONTAINER" "$desired_image" "true" || return 1
+
   require_container "$MYSQL_CONTAINER"
 
   local tmpdir
@@ -78,6 +93,10 @@ mysql_backup() {
   local verbose_flag=""
   [[ "$verbose" == "true" ]] && verbose_flag="--verbose"
 
+  # --set-gtid-purged is MySQL-only; MariaDB rejects it as an unknown variable.
+  local gtid_flag=""
+  [[ "$flavor" != "mariadb" ]] && gtid_flag="--set-gtid-purged=OFF"
+
   # Copy credential file to container for secure access
   docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
   docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
@@ -88,7 +107,7 @@ mysql_backup() {
     mysqldump \
       --defaults-extra-file=/tmp/my.cnf \
       --single-transaction \
-      --set-gtid-purged=OFF \
+      $gtid_flag \
       --skip-lock-tables \
       --no-data \
       --routines \
@@ -120,7 +139,7 @@ mysql_backup() {
     mysqldump \
       --defaults-extra-file=/tmp/my.cnf \
       --single-transaction \
-      --set-gtid-purged=OFF \
+      $gtid_flag \
       --skip-lock-tables \
       --no-create-info \
       --skip-triggers \
@@ -156,15 +175,6 @@ mysql_backup() {
   duration=$((end_time - start_time))
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
-
-  # Detect source flavor + version for the meta. mysqldump grammar drifts
-  # across major versions, and Oracle mysqldump doesn't speak MariaDB — both
-  # callers benefit from knowing at restore time.
-  # Redirect stdin from /dev/null so that `docker exec -i` inside the helper
-  # does not consume stdin from a surrounding while-read loop.
-  local mysql_ver flavor src_major src_minor
-  mysql_ver=$(mysql_detect_server_version "$db_host" "$db_port" "$db_user" "$db_pass" < /dev/null)
-  read -r flavor src_major src_minor <<<"$mysql_ver"
 
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
