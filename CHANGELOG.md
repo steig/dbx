@@ -16,6 +16,7 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ### Fixed
 - `pg_detect_extensions` and `pg_detect_server_version` redirect stdin from `/dev/null` so they don't consume the outer `while read` loop's stdin in multi-database backup runs.
+- `dbx clean --older-than D` was effectively a no-op when combined with the default `--keep 10`. Count-based retention ran first and deleted `backups[$keep:]`; the `--older-than` pass then iterated the same array and skipped everything that was already gone. The two modes are now mutually exclusive, and the default `--keep` is treated as advisory in age-based mode (explicit `--keep N` is still honored as a floor). (#22)
 
 ## [0.7.1] - 2026-05-08
 

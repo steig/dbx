@@ -90,10 +90,39 @@ EOF
   [ "$remaining" = "2" ]
 }
 
-# NOTE: a "removes only files older than N days" test would belong
-# here, but the current cmd_clean implementation runs count-based
-# retention before --older-than and unconditionally removes
-# backups[$keep:], so --older-than has nothing left to act on.
-# Tracked as a follow-up; once the design is sorted out, add a test
-# that creates fewer backups than --keep, with mixed ages, and
-# verifies --older-than removes only the stale ones.
+@test "clean --older-than removes only stale backups beyond the --keep floor" {
+  # 5 fresh backups (1-5 days old) and 7 stale (61-67 days old).
+  # --keep 3 --older-than 30 should:
+  #   - preserve the 3 newest (floor)
+  #   - preserve the 2 fresh backups beyond the floor (not stale)
+  #   - remove the 7 stale backups
+  # Expected: 5 remain.
+  make_fake_backups 5 0
+  make_fake_backups 7 60
+
+  local before
+  before=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  [ "$before" = "12" ]
+
+  dbx_run clean --keep 3 --older-than 30
+  [ "$status" -eq 0 ]
+
+  local remaining
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  [ "$remaining" = "5" ]
+}
+
+@test "clean --older-than with default --keep deletes stale backups (regression for #22)" {
+  # User's exact repro from #22: 3 backups all 30 days old, default
+  # --keep (10), --older-than 7 should not be a no-op just because
+  # the backup count is below the default floor. When --keep is not
+  # explicitly passed, age-based retention is authoritative.
+  make_fake_backups 3 30
+
+  dbx_run clean --older-than 7
+  [ "$status" -eq 0 ]
+
+  local remaining
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  [ "$remaining" = "0" ]
+}
