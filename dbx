@@ -420,11 +420,13 @@ cmd_clean() {
   [[ -z "$keep" || "$keep" == "null" ]] && keep=10
   local dry_run=false
   local older_than_days=""
+  local keep_explicit=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --keep|-k)
         keep="$2"
+        keep_explicit=true
         shift 2
         ;;
       --dry-run)
@@ -444,8 +446,21 @@ cmd_clean() {
     esac
   done
 
+  # In age-based mode, the default --keep value is advisory — it
+  # would otherwise turn `dbx clean --older-than D` into a no-op
+  # whenever the backup count happens to be below the default floor
+  # (#22). Explicit --keep is still honored as a floor.
+  local effective_keep=$keep
+  if [[ -n "$older_than_days" && "$keep_explicit" == "false" ]]; then
+    effective_keep=0
+  fi
+
   [[ "$dry_run" == "true" ]] && log_info "[DRY RUN] No files will be deleted"
-  log_step "Cleaning old backups (keeping $keep per database)"
+  if [[ -n "$older_than_days" ]]; then
+    log_step "Cleaning backups older than ${older_than_days}d (keeping newest $effective_keep per database)"
+  else
+    log_step "Cleaning old backups (keeping $effective_keep per database)"
+  fi
 
   local total_removed=0
   local total_freed=0
@@ -460,34 +475,15 @@ cmd_clean() {
         [[ -n "$f" ]] && backups+=("$f")
       done < <(ls -t "$db_dir"/*.sql.zst.age "$db_dir"/*.sql.zst.gpg "$db_dir"/*.sql.zst 2>/dev/null)
 
-      if [[ ${#backups[@]} -gt $keep ]]; then
-        local to_remove=("${backups[@]:$keep}")
-        for backup in "${to_remove[@]}"; do
-          local size meta_file
-          size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
-          total_freed=$((total_freed + size))
-          # Metadata is written at "<backup_filename>.meta.json" regardless
-          # of encryption suffix (see pg_backup / mysql_backup).
-          meta_file="${backup}.meta.json"
-          if [[ "$dry_run" == "true" ]]; then
-            log_info "Would remove: $(basename "$backup")"
-          else
-            rm -f "$backup" "$meta_file"
-            log_info "Removed: $(basename "$backup")"
-          fi
-          ((total_removed++)) || true
-        done
-      fi
-
-      # Time-based retention (skip backups in the keep set)
+      # The two retention modes are mutually exclusive. --older-than
+      # used to run after count-based retention had already deleted
+      # backups[$keep:], leaving it with nothing to act on (#22).
       if [[ -n "$older_than_days" ]]; then
         local idx=0
         for backup in "${backups[@]}"; do
           ((idx++)) || true
-          # Preserve the newest $keep backups regardless of age
-          [[ $idx -le $keep ]] && continue
-          # Skip if already removed by count-based retention
-          [[ ! -f "$backup" ]] && continue
+          # Preserve the newest $effective_keep backups regardless of age.
+          [[ $idx -le $effective_keep ]] && continue
           local file_age_days
           if is_macos; then
             file_age_days=$(( ($(date +%s) - $(stat -f%m "$backup")) / 86400 ))
@@ -507,6 +503,23 @@ cmd_clean() {
             fi
             ((total_removed++)) || true
           fi
+        done
+      elif [[ ${#backups[@]} -gt $effective_keep ]]; then
+        local to_remove=("${backups[@]:$effective_keep}")
+        for backup in "${to_remove[@]}"; do
+          local size meta_file
+          size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
+          total_freed=$((total_freed + size))
+          # Metadata is written at "<backup_filename>.meta.json" regardless
+          # of encryption suffix (see pg_backup / mysql_backup).
+          meta_file="${backup}.meta.json"
+          if [[ "$dry_run" == "true" ]]; then
+            log_info "Would remove: $(basename "$backup")"
+          else
+            rm -f "$backup" "$meta_file"
+            log_info "Removed: $(basename "$backup")"
+          fi
+          ((total_removed++)) || true
         done
       fi
     done
@@ -1263,6 +1276,8 @@ ${BOLD}EXAMPLES:${NC}
   dbx list                     # Show all hosts
   dbx list production          # Show databases for host
   dbx clean --keep 5           # Keep only 5 latest per database
+  dbx clean --older-than 30    # Remove backups older than 30 days
+  dbx clean --keep 3 --older-than 30  # Keep 3 newest, remove older beyond
 
 ${BOLD}CONFIG STRUCTURE:${NC}
   {
