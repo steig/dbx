@@ -195,6 +195,32 @@ pg_restore_backup() {
 
   log_step "Restoring PostgreSQL backup to: $target_db"
 
+  # Determine the right container image based on backup metadata. Legacy
+  # backups without source_* fields use the default (postgres:17-alpine).
+  local src_major src_exts override desired_image
+  local meta_file="${backup_file%.zst}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file}.meta.json"
+  # Handle .age/.gpg suffixes too (they sit on top of .zst).
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.age}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.gpg}.meta.json"
+
+  if [[ -f "$meta_file" ]]; then
+    src_major=$(jq -r '.source_major_version // "unknown"' "$meta_file")
+    src_exts=$(jq -r '.source_extensions // [] | join(" ")' "$meta_file")
+  else
+    src_major="unknown"
+    src_exts=""
+  fi
+
+  override="${DBX_POSTGRES_IMAGE:-$(get_config_value '.defaults.postgres_image' 2>/dev/null || echo '')}"
+  if ! desired_image=$(pick_postgres_image "$src_major" "$src_exts" "$override"); then
+    return 1
+  fi
+
+  # If the running container doesn't match, gate on user DBs unless flag set.
+  local recreate="${DBX_RECREATE_CONTAINER:-false}"
+  ensure_container_image "$POSTGRES_CONTAINER" "$desired_image" "$recreate" || return 1
+
   # Decompress backup first (use DATA_DIR to avoid /tmp quota issues)
   local tmp_dir="$DATA_DIR/.tmp"
   mkdir -p "$tmp_dir"

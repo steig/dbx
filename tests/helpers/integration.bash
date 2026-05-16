@@ -137,6 +137,23 @@ ensure_mariadb_source() {
   fi
 }
 
+# Spin up a Postgres 13 source for cross-version restore testing.
+# Idempotent. Container name: dbx-pg13-source.
+ensure_pg13_source() {
+  if ! docker ps --format '{{.Names}}' | grep -q '^dbx-pg13-source$'; then
+    docker rm -f dbx-pg13-source >/dev/null 2>&1
+    docker run -d --name dbx-pg13-source \
+      -e POSTGRES_PASSWORD=devpassword \
+      postgres:13-alpine >/dev/null
+    for _ in $(seq 1 30); do
+      docker exec dbx-pg13-source pg_isready -U postgres >/dev/null 2>&1 && return 0
+      sleep 1
+    done
+    echo "dbx-pg13-source failed to become ready" >&2
+    return 1
+  fi
+}
+
 # Write a config that points at the local containers and uses password_cmd
 # (echo) to bypass the keychain.
 write_local_config() {
