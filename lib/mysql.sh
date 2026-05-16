@@ -500,3 +500,18 @@ mysql_parse_version_string() {
 
   echo "$flavor $major $minor"
 }
+
+# Detect flavor + major + minor of a remote MySQL or MariaDB server.
+# Returns "flavor major minor" or "unknown 0 0" on any failure.
+# Uses the dbx-managed mysql container as the client to avoid needing a
+# local mysql binary.
+# Args: $1=host $2=port $3=user $4=password
+mysql_detect_server_version() {
+  local host="$1" port="$2" user="$3" password="$4"
+  local raw
+  raw=$(docker exec -i -e MYSQL_PWD="$password" \
+    "${MYSQL_CONTAINER:-mysql-dbx}" \
+    mysql -h "$host" -P "$port" -u "$user" -N -e 'SELECT VERSION()' \
+    2>/dev/null | tr -d '\r')
+  mysql_parse_version_string "$raw"
+}

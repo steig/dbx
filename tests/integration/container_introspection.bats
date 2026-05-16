@@ -139,3 +139,43 @@ setup() {
   docker exec -e PGPASSWORD=devpassword "$TEST_CONTAINER" \
     psql -U postgres -c "DROP DATABASE detect_ext_test" >/dev/null 2>&1 || true
 }
+
+@test "mysql_detect_server_version: detects mysql flavor + version" {
+  # Spin up a temporary mysql 8.0 source. No host-port binding — we connect
+  # container-to-container via the Docker bridge IP (firewall blocks host
+  # port forwards from inside containers).
+  MYSQL_TEST_CONTAINER="dbx_mysql_introspect_test_$$"
+  docker rm -f "$MYSQL_TEST_CONTAINER" >/dev/null 2>&1
+  docker run -d --name "$MYSQL_TEST_CONTAINER" \
+    -e MYSQL_ROOT_PASSWORD=devpassword \
+    mysql:8.0 >/dev/null
+  for _ in $(seq 1 60); do
+    docker exec -e MYSQL_PWD=devpassword "$MYSQL_TEST_CONTAINER" \
+      mysql -u root -e 'SELECT 1' >/dev/null 2>&1 && break
+    sleep 1
+  done
+
+  # Need mysql-dbx running as the client (it has the mysql binary).
+  if ! docker ps --format '{{.Names}}' | grep -q '^mysql-dbx$'; then
+    docker run -d --name mysql-dbx \
+      --add-host=host.docker.internal:host-gateway \
+      -e MYSQL_ROOT_PASSWORD=devpassword \
+      mysql:8.0 >/dev/null
+    for _ in $(seq 1 60); do
+      if docker exec -e MYSQL_PWD=devpassword mysql-dbx \
+           mysql -u root -e 'SELECT 1' >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+  fi
+
+  local mysql_ip
+  mysql_ip=$(docker inspect "$MYSQL_TEST_CONTAINER" \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  result=$(mysql_detect_server_version "$mysql_ip" 3306 root devpassword)
+  [ "$result" = "mysql 8 0" ]
+
+  docker rm -f "$MYSQL_TEST_CONTAINER" >/dev/null 2>&1
+}
