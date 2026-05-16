@@ -163,3 +163,45 @@ EOF
   docker exec -e PGPASSWORD=devpassword postgres-dbx \
     psql -U postgres -c "DROP DATABASE IF EXISTS \"$TEST_DB\"" >/dev/null 2>&1 || true
 }
+
+@test "backups missing source fields restore using default image" {
+  ensure_postgres_container
+
+  local pg_dbx_ip
+  pg_dbx_ip=$(docker inspect postgres-dbx \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "local-pg": {
+      "type": "postgres",
+      "host": "$pg_dbx_ip",
+      "port": 5432,
+      "user": "postgres",
+      "password_cmd": "echo devpassword"
+    }
+  },
+  "defaults": { "compression_level": 1, "keep_backups": 10 }
+}
+EOF
+
+  seed_postgres_db "$TEST_DB"
+  dbx_run backup local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+
+  # Strip the new fields from meta to simulate a pre-feature backup
+  local meta
+  meta=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst.meta.json | head -1)
+  jq 'del(.source_flavor, .source_major_version, .source_extensions)' "$meta" \
+    > "$meta.tmp" && mv "$meta.tmp" "$meta"
+
+  dbx_run restore "local-pg/$TEST_DB/latest" --name "$RESTORE_DB" --recreate-container
+  [ "$status" -eq 0 ]
+  # Should use the default image (postgres:17-alpine)
+  result=$(container_image postgres-dbx)
+  [ "$result" = "postgres:17-alpine" ]
+
+  docker exec -e PGPASSWORD=devpassword postgres-dbx \
+    psql -U postgres -c "DROP DATABASE IF EXISTS \"$TEST_DB\"" >/dev/null 2>&1 || true
+}
