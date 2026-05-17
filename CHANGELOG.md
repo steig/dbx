@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-17
+
+Two-feature minor release: version-aware Docker images for backup and restore (#28 / PR #29), and a fix for `dbx clean --older-than` being a no-op against the default `--keep` (#22 / PR #30).
+
 ### Added
 - Version-aware Docker image selection: the restore container now matches the source database's major version. Postgres extensions (`vector`, `postgis`, `timescaledb`) auto-select the right specialized image.
 - `--recreate-container` flag on `dbx restore` for explicit consent to destroy user DBs when switching versions.
@@ -98,6 +102,7 @@ docker rm -f postgres-dbx mysql-dbx
 # dbx will recreate on next `backup` / `restore`
 ```
 
-[Unreleased]: https://github.com/steig/dbx/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/steig/dbx/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/steig/dbx/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/steig/dbx/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/steig/dbx/compare/v0.5.0...v0.7.0
