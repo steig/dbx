@@ -417,6 +417,33 @@ pg_verify_restore() {
   return 1
 }
 
+# Verify all source_extensions from backup meta are installed in target.
+# Args: $1 = tgt_container, $2 = database, $3 = space-separated extension names
+# Returns: 0 if all installed, 1 if any missing
+pg_verify_extensions() {
+  local container="$1"
+  local db="$2"
+  local expected="$3"
+  [[ -z "$expected" ]] && return 0
+  local installed
+  installed=$(docker exec -i "$container" psql -U postgres -d "$db" -At -c \
+    "SELECT extname FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname" </dev/null)
+  local missing=""
+  local ext
+  for ext in $expected; do
+    [[ "$ext" == "plpgsql" ]] && continue
+    if ! echo "$installed" | grep -qx "$ext"; then
+      missing="$missing $ext"
+    fi
+  done
+  if [[ -n "$missing" ]]; then
+    log_error "Extension verification FAILED for '$db': missing extension(s):$missing"
+    return 1
+  fi
+  log_info "Extension verification PASSED: all expected extensions installed in '$db'"
+  return 0
+}
+
 analyze_postgres() {
   local host="$1"
   local database="$2"
