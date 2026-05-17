@@ -394,6 +394,29 @@ EOSQL
     | sed 's/^NOTICE:  //'
 }
 
+# Compare row counts between source and target containers for a database.
+# Prints per-table diff and returns:
+#   0 if all tables match
+#   1 if any table count differs
+# Args: $1 = src_container, $2 = tgt_container, $3 = database
+pg_verify_restore() {
+  local src="$1"
+  local tgt="$2"
+  local db="$3"
+  local src_counts tgt_counts
+  src_counts=$(pg_table_row_counts "$src" "$db")
+  tgt_counts=$(pg_table_row_counts "$tgt" "$db")
+  if [[ "$src_counts" == "$tgt_counts" ]]; then
+    local n
+    n=$(echo "$src_counts" | grep -c .)
+    log_info "Row-count verification PASSED: $n tables match in '$db'"
+    return 0
+  fi
+  log_error "Row-count verification FAILED for database '$db':"
+  diff <(echo "$src_counts") <(echo "$tgt_counts") | sed 's/^/  /' >&2
+  return 1
+}
+
 analyze_postgres() {
   local host="$1"
   local database="$2"
