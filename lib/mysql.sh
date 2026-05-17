@@ -527,6 +527,33 @@ mysql_parse_version_string() {
   echo "$flavor $major $minor"
 }
 
+# Return tab-separated "table\tcount" lines for every user table in the
+# given database, sorted by table name. stdin redirected from /dev/null
+# for same reason as mysql_detect_server_version.
+# Args: $1 = container, $2 = database, $3 = mysql_user, $4 = mysql_password
+mysql_table_row_counts() {
+  local container="$1"
+  local db="$2"
+  local user="$3"
+  local pass="$4"
+  # First list the tables, then iterate. This avoids the GROUP_CONCAT
+  # max-length pitfall and works identically on mysql and mariadb.
+  local tables
+  tables=$(docker exec -i -e MYSQL_PWD="$pass" "$container" \
+    mysql -u"$user" -D "$db" -N -B -e \
+    "SELECT table_name FROM information_schema.tables \
+     WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' \
+     ORDER BY table_name" </dev/null 2>/dev/null | tr -d '\r')
+  [[ -z "$tables" ]] && return 0
+  local t count
+  while IFS= read -r t; do
+    [[ -z "$t" ]] && continue
+    count=$(docker exec -i -e MYSQL_PWD="$pass" "$container" \
+      mysql -u"$user" -D "$db" -N -B -e "SELECT COUNT(*) FROM \`$t\`" </dev/null 2>/dev/null | tr -d '\r')
+    printf '%s\t%s\n' "$t" "$count"
+  done <<< "$tables"
+}
+
 # Detect flavor + major + minor of a remote MySQL or MariaDB server.
 # Returns "flavor major minor" or "unknown 0 0" on any failure.
 # Uses the dbx-managed mysql container as the client to avoid needing a
