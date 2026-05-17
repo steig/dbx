@@ -1138,3 +1138,21 @@ _list_user_dbs() {
       ;;
   esac
 }
+
+# ============================================================================
+# Migrate refusal gates
+# ============================================================================
+
+# Refuse a migration where source and target major versions are equal.
+# Args: $1 = source_major, $2 = target_major
+# Returns: 0 (proceed) or 1 (refuse, with message on stdout)
+migrate_refuse_same_version() {
+  local src="$1"
+  local tgt="$2"
+  [[ "$src" == "unknown" || "$tgt" == "unknown" ]] && return 0
+  if [[ "$src" == "$tgt" ]]; then
+    echo "Source and target are the same major version ($src). Use 'dbx restore' instead — migrate is for version changes only."
+    return 1
+  fi
+  return 0
+}
