@@ -427,8 +427,238 @@ EOF
   require_jq
   require_docker
 
-  log_info "dbx migrate — full safety gates, refusals, flow added in Task 11"
-  return 0
+  # Resolve source host config
+  local host_cfg
+  host_cfg=$(get_host_config "$source_host")
+  [[ -z "$host_cfg" || "$host_cfg" == "null" ]] && die "Host '$source_host' not found in config"
+  local source_flavor
+  source_flavor=$(echo "$host_cfg" | jq -r '.type // "postgres"')
+
+  # Resolve effective network coordinates + credentials for source detection.
+  local src_host src_port src_user src_pass
+  src_host=$(get_effective_host "$source_host")
+  src_port=$(get_effective_port "$source_host")
+  src_user=$(get_config_value ".hosts[\"$source_host\"].user")
+  src_pass=$(get_password "$source_host")
+
+  # Detect source version + (postgres) extensions.
+  local source_major="" source_minor="" source_extensions=""
+  case "$source_flavor" in
+    postgres)
+      # Ensure the dbx client container is up so we can use it as psql client.
+      require_container "$POSTGRES_CONTAINER"
+      source_major=$(pg_detect_server_version "$src_host" "$src_port" "$src_user" "$src_pass" </dev/null || echo "unknown")
+      ;;
+    mysql|mariadb)
+      require_container "$MYSQL_CONTAINER"
+      local detected
+      detected=$(mysql_detect_server_version "$src_host" "$src_port" "$src_user" "$src_pass" </dev/null || echo "unknown 0 0")
+      source_flavor=$(echo "$detected" | awk '{print $1}')
+      source_major=$(echo "$detected" | awk '{print $2}')
+      source_minor=$(echo "$detected" | awk '{print $3}')
+      ;;
+    *)
+      die "Unsupported source flavor: $source_flavor"
+      ;;
+  esac
+
+  # For postgres, also detect extensions per-database (uses first DB only).
+  local first_db
+  first_db=$(echo "$host_cfg" | jq -r '.databases | if type == "array" then .[0] elif type == "object" then keys[0] else empty end // empty')
+  if [[ "$source_flavor" == "postgres" && -n "$first_db" ]]; then
+    source_extensions=$(pg_detect_extensions "$src_host" "$src_port" "$src_user" "$src_pass" "$first_db" </dev/null || echo "")
+  fi
+
+  # Resolve target image + major
+  local target_flavor="$source_flavor" target_major="" target_image=""
+  if [[ -n "$to_image" ]]; then
+    target_image="$to_image"
+    target_major="${to_version:-unknown}"
+  elif [[ -n "$to_version" ]]; then
+    target_major="$to_version"
+    case "$source_flavor" in
+      postgres)
+        target_image=$(pick_postgres_image "$to_version" "$source_extensions" "") \
+          || die "Could not select target image for PG $to_version"
+        ;;
+      mysql|mariadb)
+        # For mysql/mariadb, --to-version is the major. Carry the source
+        # minor forward so the user-visible image tag is sensible.
+        target_image=$(pick_mysql_image "$source_flavor" "$to_version" "${source_minor:-0}" "") \
+          || die "Could not select target image for $source_flavor $to_version"
+        ;;
+    esac
+  else
+    die "Must specify --to-version N or --to-image IMAGE"
+  fi
+
+  # Safety gates
+  migrate_refuse_same_version "$source_major" "$target_major" || exit 1
+  migrate_refuse_cross_flavor "$source_flavor" "$target_flavor" || exit 1
+  if migrate_is_downgrade "$source_major" "$target_major"; then
+    if [[ "$force_downgrade" != "true" ]]; then
+      die "Refusing downgrade ($source_major → $target_major). Pass --force-downgrade if you really mean it (newer dumps may emit syntax older servers reject)."
+    fi
+    log_warn "Proceeding with downgrade ($source_major → $target_major) per --force-downgrade"
+  fi
+
+  # Determine backup path (existing or to-be-created)
+  local backup_path=""
+  if [[ -n "$from_backup" ]]; then
+    [[ ! -f "$from_backup" ]] && die "--from-backup file not found: $from_backup"
+    backup_path="$from_backup"
+  fi
+
+  # Dry-run: print plan and exit
+  if [[ "$dry_run" == "true" ]]; then
+    migrate_print_plan \
+      "source_host=$source_host" \
+      "source_flavor=$source_flavor" \
+      "source_major=$source_major" \
+      "target_image=$target_image" \
+      "target_major=$target_major" \
+      "backup_path=${backup_path:-<will be created>}" \
+      "from_backup=$([[ -n "$from_backup" ]] && echo true || echo false)" \
+      "keep_source=$keep_source" \
+      "skip_verify=$skip_verify"
+    return 0
+  fi
+
+  # Determine target container for this flavor.
+  local target_container
+  case "$source_flavor" in
+    postgres)      target_container="$POSTGRES_CONTAINER" ;;
+    mysql|mariadb) target_container="$MYSQL_CONTAINER" ;;
+  esac
+
+  # Snapshot source row counts BEFORE any destructive operation. Uses the
+  # dbx-managed client container as a TCP client against the source. If the
+  # source IS the same container we are about to recreate (degenerate case
+  # — e.g. local-pg pointing at postgres-dbx), we'd lose source counts
+  # after recreate, so capturing now keeps verification possible.
+  local src_counts=""
+  if [[ "$skip_verify" != "true" && -n "$first_db" ]]; then
+    case "$source_flavor" in
+      postgres)
+        src_counts=$(pg_table_row_counts_remote "$POSTGRES_CONTAINER" \
+          "$src_host" "$src_port" "$src_user" "$src_pass" "$first_db" 2>/dev/null || true)
+        ;;
+      mysql|mariadb)
+        src_counts=$(mysql_table_row_counts_remote "$MYSQL_CONTAINER" \
+          "$src_host" "$src_port" "$src_user" "$src_pass" "$first_db" 2>/dev/null || true)
+        ;;
+    esac
+  fi
+
+  # === DESTRUCTIVE PATH BEGINS ===
+
+  # Step A: take backup (unless --from-backup)
+  if [[ -z "$from_backup" ]]; then
+    log_info "Step 1/5: backing up $source_host (rollback artifact)…"
+    cmd_backup "$source_host" || die "Backup failed; nothing destroyed yet"
+    # Locate the most recent backup for this host.
+    backup_path=$(find "$DATA_DIR/$source_host" -type f \
+      \( -name "*.sql.zst" -o -name "*.sql.zst.age" -o -name "*.sql.zst.gpg" \) \
+      2>/dev/null | xargs -r ls -1t 2>/dev/null | head -1 || true)
+    [[ -z "$backup_path" || ! -f "$backup_path" ]] && die "Backup completed but artifact not found in $DATA_DIR/$source_host"
+    log_info "Backup created: $backup_path"
+  else
+    log_info "Step 1/5: using existing backup: $backup_path"
+  fi
+
+  # Step B: ensure target container has the right image. We pass recreate=true
+  # because this IS the destructive-recreate flow the user opted into via
+  # 'dbx migrate'.
+  log_info "Step 2/5: ensuring target container ($target_container) on image $target_image"
+  if ! ensure_container_image "$target_container" "$target_image" "true"; then
+    log_error "Could not prepare target container on $target_image"
+    log_info "ROLLBACK: dbx restore $backup_path"
+    exit 1
+  fi
+  # ensure_container_image only exports DBX_FORCE_IMAGE if the container
+  # was missing. For an existing-but-wrong-image case, _recreate_container
+  # already handled it. Either way, make sure it's running before restore.
+  require_container "$target_container"
+
+  # Step C: restore into target
+  log_info "Step 3/5: restoring backup into target"
+  if ! cmd_restore "$backup_path" --name "$first_db" --recreate-container; then
+    log_error "Restore failed"
+    log_info "ROLLBACK: dbx restore $backup_path  (target may be in partial state)"
+    exit 1
+  fi
+
+  # Step D: verify
+  if [[ "$skip_verify" == "true" ]]; then
+    log_warn "Step 4/5: verification SKIPPED (--skip-verify)"
+  elif [[ -z "$first_db" ]]; then
+    log_warn "Step 4/5: verification SKIPPED (no databases listed in host config)"
+  else
+    log_info "Step 4/5: verifying restore"
+    case "$source_flavor" in
+      postgres)
+        local tgt_counts
+        tgt_counts=$(pg_table_row_counts "$target_container" "$first_db" 2>/dev/null || true)
+        if [[ "$src_counts" != "$tgt_counts" ]]; then
+          log_error "Row-count verification FAILED for database '$first_db':"
+          diff <(echo "$src_counts") <(echo "$tgt_counts") | sed 's/^/  /' >&2 || true
+          log_info "ROLLBACK: dbx restore $backup_path"
+          exit 1
+        fi
+        local n
+        n=$(echo "$src_counts" | grep -c . || true)
+        log_info "Row-count verification PASSED: $n tables match in '$first_db'"
+        pg_verify_extensions "$target_container" "$first_db" "$source_extensions" || {
+          log_error "Extension verification failed"
+          log_info "ROLLBACK: dbx restore $backup_path"
+          exit 1
+        }
+        ;;
+      mysql|mariadb)
+        local m_user m_pass
+        m_user=$(echo "$host_cfg" | jq -r '.user // "root"')
+        m_pass=$(get_password "$source_host")
+        local tgt_counts
+        tgt_counts=$(mysql_table_row_counts "$target_container" "$first_db" "$m_user" "$m_pass" 2>/dev/null || true)
+        if [[ "$src_counts" != "$tgt_counts" ]]; then
+          log_error "Row-count verification FAILED for database '$first_db':"
+          diff <(echo "$src_counts") <(echo "$tgt_counts") | sed 's/^/  /' >&2 || true
+          log_info "ROLLBACK: dbx restore $backup_path"
+          exit 1
+        fi
+        local n
+        n=$(echo "$src_counts" | grep -c . || true)
+        log_info "Row-count verification PASSED: $n tables match in '$first_db'"
+        ;;
+    esac
+  fi
+
+  # Step E: cleanup. The old container's user-DB volume was destroyed in
+  # Step B (ensure_container_image with recreate=true). --keep-source would
+  # have honored a flag we'd thread through that helper — for v1, we
+  # document the limitation: --keep-source is preserved as an option but
+  # currently has no effect on in-place migrate (the recreate is mandatory
+  # for an image swap). The rollback artifact (backup file) remains the
+  # primary safety net.
+  log_info "Step 5/5: migration complete"
+
+  if [[ "$update_config" == "true" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    jq --arg h "$source_host" --arg img "$target_image" \
+      '.hosts[$h].image = $img' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+    log_info "Updated config: hosts.$source_host.image = $target_image"
+  else
+    echo ""
+    echo "To make this permanent in config:"
+    echo "  Set hosts.$source_host.image = \"$target_image\" in $CONFIG_FILE"
+    echo "  Or re-run with --update-config"
+  fi
+
+  echo ""
+  echo "Backup retained as rollback artifact: $backup_path"
+  echo "To rollback:  dbx restore $backup_path"
 }
 
 cmd_list() {

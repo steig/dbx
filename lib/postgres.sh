@@ -444,6 +444,41 @@ pg_verify_extensions() {
   return 0
 }
 
+# Return tab-separated "schema.table\tcount" lines for every user table
+# in a REMOTE postgres database, using the dbx-managed client container.
+# Args: $1=client_container $2=host $3=port $4=user $5=password $6=database
+pg_table_row_counts_remote() {
+  local client="$1"
+  local host="$2" port="$3" user="$4" password="$5" db="$6"
+  local tab=$'\t'
+  local sql
+  sql=$(cat <<EOSQL
+DO \$\$
+DECLARE
+  r record;
+  n bigint;
+BEGIN
+  FOR r IN
+    SELECT n.nspname AS schema_name, c.relname AS table_name
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg_%'
+    ORDER BY n.nspname, c.relname
+  LOOP
+    EXECUTE format('SELECT count(*) FROM %I.%I', r.schema_name, r.table_name) INTO n;
+    RAISE NOTICE '%.%${tab}%', r.schema_name, r.table_name, n;
+  END LOOP;
+END \$\$;
+EOSQL
+)
+  docker exec -i -e PGPASSWORD="$password" "$client" \
+    psql -h "$host" -p "$port" -U "$user" -d "$db" -At -c "$sql" </dev/null 2>&1 \
+    | grep -E '^NOTICE:  ' \
+    | sed 's/^NOTICE:  //'
+}
+
 analyze_postgres() {
   local host="$1"
   local database="$2"

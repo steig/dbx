@@ -554,6 +554,29 @@ mysql_table_row_counts() {
   done <<< "$tables"
 }
 
+# Return tab-separated "table\tcount" lines for every user table in a REMOTE
+# mysql/mariadb database, using the dbx-managed client container.
+# Args: $1=client_container $2=host $3=port $4=user $5=password $6=database
+mysql_table_row_counts_remote() {
+  local client="$1"
+  local host="$2" port="$3" user="$4" password="$5" db="$6"
+  local tables
+  tables=$(docker exec -i -e MYSQL_PWD="$password" "$client" \
+    mysql -h "$host" -P "$port" -u"$user" -D "$db" -N -B -e \
+    "SELECT table_name FROM information_schema.tables \
+     WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' \
+     ORDER BY table_name" </dev/null 2>/dev/null | tr -d '\r')
+  [[ -z "$tables" ]] && return 0
+  local t count
+  while IFS= read -r t; do
+    [[ -z "$t" ]] && continue
+    count=$(docker exec -i -e MYSQL_PWD="$password" "$client" \
+      mysql -h "$host" -P "$port" -u"$user" -D "$db" -N -B -e \
+      "SELECT COUNT(*) FROM \`$t\`" </dev/null 2>/dev/null | tr -d '\r')
+    printf '%s\t%s\n' "$t" "$count"
+  done <<< "$tables"
+}
+
 # Compare row counts between source and target containers.
 # Args: $1 = src_container, $2 = tgt_container, $3 = database,
 #       $4 = src_user, $5 = src_pass, $6 = tgt_user, $7 = tgt_pass
