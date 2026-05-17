@@ -554,6 +554,29 @@ mysql_table_row_counts() {
   done <<< "$tables"
 }
 
+# Compare row counts between source and target containers.
+# Args: $1 = src_container, $2 = tgt_container, $3 = database,
+#       $4 = src_user, $5 = src_pass, $6 = tgt_user, $7 = tgt_pass
+mysql_verify_restore() {
+  local src="$1"
+  local tgt="$2"
+  local db="$3"
+  local src_user="$4" src_pass="$5"
+  local tgt_user="$6" tgt_pass="$7"
+  local src_counts tgt_counts
+  src_counts=$(mysql_table_row_counts "$src" "$db" "$src_user" "$src_pass")
+  tgt_counts=$(mysql_table_row_counts "$tgt" "$db" "$tgt_user" "$tgt_pass")
+  if [[ "$src_counts" == "$tgt_counts" ]]; then
+    local n
+    n=$(echo "$src_counts" | grep -c .)
+    log_info "Row-count verification PASSED: $n tables match in '$db'"
+    return 0
+  fi
+  log_error "Row-count verification FAILED for database '$db':"
+  diff <(echo "$src_counts") <(echo "$tgt_counts") | sed 's/^/  /' >&2
+  return 1
+}
+
 # Detect flavor + major + minor of a remote MySQL or MariaDB server.
 # Returns "flavor major minor" or "unknown 0 0" on any failure.
 # Uses the dbx-managed mysql container as the client to avoid needing a
