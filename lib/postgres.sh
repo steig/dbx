@@ -353,6 +353,47 @@ pg_detect_extensions() {
     2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
 
+# Return tab-separated "schema.table\tcount" lines for every user table
+# in the given database, sorted by schema.table. stdin is redirected from
+# /dev/null on the docker exec to avoid consuming an outer while-read
+# loop's stdin (same fix as pg_detect_*).
+# Args: $1 = container name, $2 = database name
+# Returns: 0 on success, prints "schema.table\tcount" lines to stdout
+pg_table_row_counts() {
+  local container="$1"
+  local db="$2"
+  # Use a DO block that loops over user tables and RAISE NOTICEs
+  # "schema.table<TAB>count". Notices go to stderr; we capture both
+  # streams, then filter lines starting with "NOTICE:  " and strip that
+  # prefix. The literal tab is embedded with $'\t' for portability.
+  local tab=$'\t'
+  local sql
+  sql=$(cat <<EOSQL
+DO \$\$
+DECLARE
+  r record;
+  n bigint;
+BEGIN
+  FOR r IN
+    SELECT n.nspname AS schema_name, c.relname AS table_name
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg_%'
+    ORDER BY n.nspname, c.relname
+  LOOP
+    EXECUTE format('SELECT count(*) FROM %I.%I', r.schema_name, r.table_name) INTO n;
+    RAISE NOTICE '%.%${tab}%', r.schema_name, r.table_name, n;
+  END LOOP;
+END \$\$;
+EOSQL
+)
+  docker exec -i "$container" psql -U postgres -d "$db" -At -c "$sql" </dev/null 2>&1 \
+    | grep -E '^NOTICE:  ' \
+    | sed 's/^NOTICE:  //'
+}
+
 analyze_postgres() {
   local host="$1"
   local database="$2"
