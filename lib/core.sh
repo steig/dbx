@@ -1192,3 +1192,61 @@ migrate_is_downgrade() {
   fi
   return 1
 }
+
+# Print a human-readable plan describing what the migration will do.
+# Args: a series of "key=value" pairs.
+# Keys: source_host source_flavor source_major target_image target_major
+#       backup_path from_backup keep_source skip_verify
+migrate_print_plan() {
+  local source_host="" source_flavor="" source_major=""
+  local target_image="" target_major=""
+  local backup_path="" from_backup="false"
+  local keep_source="false" skip_verify="false"
+  local kv
+  for kv in "$@"; do
+    case "$kv" in
+      source_host=*)   source_host="${kv#*=}";;
+      source_flavor=*) source_flavor="${kv#*=}";;
+      source_major=*)  source_major="${kv#*=}";;
+      target_image=*)  target_image="${kv#*=}";;
+      target_major=*)  target_major="${kv#*=}";;
+      backup_path=*)   backup_path="${kv#*=}";;
+      from_backup=*)   from_backup="${kv#*=}";;
+      keep_source=*)   keep_source="${kv#*=}";;
+      skip_verify=*)   skip_verify="${kv#*=}";;
+    esac
+  done
+
+  echo "Migration plan:"
+  echo "  Source:        $source_host ($source_flavor $source_major)"
+  echo "  Target image:  $target_image (major $target_major)"
+  echo ""
+  echo "  Steps:"
+  local step=1
+  if [[ "$from_backup" == "true" ]]; then
+    echo "    $step. Use existing backup: $backup_path"
+  else
+    echo "    $step. Backup source → $backup_path (rollback artifact)"
+  fi
+  ((step++)) || true
+  echo "    $step. Pull target image: $target_image"
+  ((step++)) || true
+  echo "    $step. Ensure target container running matching image"
+  ((step++)) || true
+  echo "    $step. restore backup into target container"
+  ((step++)) || true
+  if [[ "$skip_verify" == "true" ]]; then
+    echo "    $step. (verification SKIPPED via --skip-verify)"
+  else
+    echo "    $step. verify: databases present, row counts match, extensions installed"
+  fi
+  ((step++)) || true
+  if [[ "$keep_source" == "true" ]]; then
+    echo "    $step. (--keep-source: old container volume preserved)"
+  else
+    echo "    $step. Delete old container's data volume (backup is rollback)"
+  fi
+  echo ""
+  echo "  On any failure after backup: backup file preserved, rollback recipe printed, target left as-is."
+  return 0
+}
