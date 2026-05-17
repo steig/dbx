@@ -341,6 +341,43 @@ If the existing restore container's image doesn't match what's needed, dbx will:
 - Postgres backups always use the existing `postgres-dbx` client image. If you back up from a source whose major version is *newer* than `postgres-dbx`'s current image (e.g. `postgres-dbx` is on 13, source is 16), pg_dump will fail because older clients can't dump newer servers. Workaround: restore an older backup first (which switches the image), or set `DBX_POSTGRES_IMAGE='postgres:N-alpine'` to the source version and recreate.
 - The extension allowlist is intentionally narrow (3 known images). For anything else (`pg_partman`, `pg_cron`, Citus, `pgaudit`, etc.), use `DBX_POSTGRES_IMAGE`.
 
+## Migrating between versions
+
+`dbx migrate` takes a database on version X to version Y, keeping the source
+backup as a rollback artifact.
+
+```bash
+# In-place: upgrade postgres-dbx from whatever it's on to PG 17
+dbx migrate local-pg --to-version 17
+
+# Use a specific image
+dbx migrate local-pg --to-image pgvector/pgvector:pg17
+
+# Re-attempt using an existing backup (skip the dump step)
+dbx migrate local-pg --to-version 17 --from-backup ~/dbx-data/local-pg/myapp/myapp_20260517.sql.zst
+
+# Preview the plan
+dbx migrate local-pg --to-version 17 --dry-run
+
+# Persist the new image to config after a successful migration
+dbx migrate local-pg --to-version 17 --update-config
+```
+
+### Safety guarantees
+
+- The source is **always backed up first**, and the backup path is printed loudly. On any subsequent failure, that backup is the rollback (`dbx restore <path>`).
+- **No auto-rollback.** If restore fails halfway, dbx leaves the target as-is and prints the rollback command — auto-rolling-back would be another destructive op against an unknown-state target.
+- **Same-version migration is refused** (use `dbx restore` instead).
+- **Downgrade is refused** unless `--force-downgrade` is passed (newer dumps may emit syntax older servers reject).
+- **Cross-flavor migration (mysql ↔ mariadb) is refused.** Their dump grammars differ enough that calling it "migrate" misleads. Use `dbx backup` + `dbx restore` manually if needed.
+- **Verification is on by default.** Row counts and extensions are checked post-restore; mismatches exit non-zero. Use `--skip-verify` to opt out.
+
+### Limitations
+
+- Multi-database hosts: verification currently inspects only the first database listed in the host config. Multi-database verification is a follow-up.
+- Cross-host migrations work if `dbx backup` can reach the source and `dbx restore` can write to the target. No new transport is added.
+- `--keep-source` is accepted but currently has no effect on in-place migrate (the dbx-managed container is always recreated to swap images). The backup file remains the primary safety net.
+
 ## Verification & Audit
 
 Every backup writes a sibling `.meta.json` with size, timestamp, encryption mode, and SHA-256 checksum:
