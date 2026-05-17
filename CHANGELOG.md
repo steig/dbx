@@ -4,6 +4,9 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+- `dbx migrate <host> --to-version N` — upgrade a database to a different major version with the source backup retained as a rollback artifact. Refuses same-version (use `restore`), downgrade (unless `--force-downgrade`), and cross-flavor (mysql ↔ mariadb) operations by default. Verifies row counts and extensions post-restore. Supports `--dry-run`, `--from-backup <file>` (re-attempt without re-dumping), `--skip-verify`, `--keep-source`, and `--update-config` to persist the target image to host config. (#31)
+
 ## [0.8.0] - 2026-05-17
 
 Two-feature minor release: version-aware Docker images for backup and restore (#28 / PR #29), and a fix for `dbx clean --older-than` being a no-op against the default `--keep` (#22 / PR #30).
