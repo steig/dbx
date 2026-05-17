@@ -98,3 +98,37 @@ teardown() {
   [[ "$output" == *"downgrade"* ]]
   [[ "$output" == *"--force-downgrade"* ]]
 }
+
+@test "migrate: --from-backup uses existing artifact and skips backup step" {
+  # Seed source
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -c "DROP DATABASE IF EXISTS migtest;" >/dev/null
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -c "CREATE DATABASE migtest;" >/dev/null
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -d migtest -c "CREATE TABLE t (id int); INSERT INTO t SELECT generate_series(1,7);" >/dev/null
+
+  # First, take a backup using the matching client version (so the dump is
+  # readable by both old and new servers). Easiest way: do a regular dbx
+  # backup with postgres-dbx already on postgres:13-alpine (matches source).
+  source_dbx_libs
+  ensure_container_image postgres-dbx postgres:13-alpine true
+  dbx_run backup pg13-src migtest
+  [ "$status" -eq 0 ]
+  local backup_file
+  backup_file=$(find "$DBX_DATA_DIR/pg13-src" -name "*.sql.zst" | head -1)
+  [ -f "$backup_file" ]
+
+  # Count backups before
+  local before
+  before=$(find "$DBX_DATA_DIR/pg13-src" -name "*.sql.zst" | wc -l)
+
+  # Now migrate using that file — should NOT create a new backup
+  dbx_run migrate pg13-src --to-version 15 --from-backup "$backup_file"
+  echo "$output"
+  [ "$status" -eq 0 ]
+
+  local after
+  after=$(find "$DBX_DATA_DIR/pg13-src" -name "*.sql.zst" | wc -l)
+  [ "$before" = "$after" ]
+}
