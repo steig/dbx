@@ -356,6 +356,81 @@ cmd_restore() {
   notify_restore_success "$backup_file" "$target_name"
 }
 
+cmd_migrate() {
+  local source_host="" target_host=""
+  local to_version="" to_image=""
+  local from_backup=""
+  local keep_source="false"
+  local skip_verify="false"
+  local update_config="false"
+  local dry_run="false"
+  local force_downgrade="false"
+
+  # Positional args first (one or two), then options.
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --to-version)
+        to_version="$2"; shift 2;;
+      --to-image)
+        to_image="$2"; shift 2;;
+      --from-backup)
+        from_backup="$2"; shift 2;;
+      --keep-source)
+        keep_source="true"; shift;;
+      --skip-verify)
+        skip_verify="true"; shift;;
+      --update-config)
+        update_config="true"; shift;;
+      --dry-run)
+        dry_run="true"; shift;;
+      --force-downgrade)
+        force_downgrade="true"; shift;;
+      --help|-h)
+        cat <<'EOF'
+Usage: dbx migrate <host> --to-version N [options]
+       dbx migrate <source-host> <target-host> [options]
+       dbx migrate --from-backup <file> <target-host> [options]
+
+Options:
+  --to-version N       Target major version (in-place form)
+  --to-image IMAGE     Override auto-image pick
+  --from-backup FILE   Use an existing backup; skip the dump step
+  --keep-source        Retain old container's data volume (default: delete after success)
+  --skip-verify        Skip post-restore row-count and extension verification
+  --update-config      Rewrite hosts.<host>.image in config after success
+  --dry-run            Print the plan without executing
+  --force-downgrade    Allow source major > target major (refused by default)
+EOF
+        return 0
+        ;;
+      -*)
+        die "Unknown option: $1 (run 'dbx migrate --help')"
+        ;;
+      *)
+        if [[ -z "$source_host" ]]; then
+          source_host="$1"
+        elif [[ -z "$target_host" ]]; then
+          target_host="$1"
+        else
+          die "Too many positional arguments: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$source_host" && -z "$from_backup" ]]; then
+    die "Usage: dbx migrate <host> --to-version N (run 'dbx migrate --help')"
+  fi
+
+  require_config
+  require_jq
+  require_docker
+
+  log_info "dbx migrate — full safety gates, refusals, flow added in Task 11"
+  return 0
+}
+
 cmd_list() {
   local host="${1:-}"
   local database="${2:-}"
@@ -1343,6 +1418,9 @@ main() {
       ;;
     restore)
       cmd_restore "$@"
+      ;;
+    migrate)
+      cmd_migrate "$@"
       ;;
     verify)
       cmd_verify "$@"

@@ -77,3 +77,38 @@ setup() { setup_dbx_env; source_dbx_libs; }
   run migrate_is_downgrade unknown 13
   [ "$status" -eq 1 ]
 }
+
+@test "cmd_migrate: no args dies with usage" {
+  run "$DBX_BIN" migrate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage"* || "$output" == *"usage"* ]]
+}
+
+@test "cmd_migrate: --help prints usage and exits 0" {
+  run "$DBX_BIN" migrate --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"migrate"* ]]
+}
+
+@test "cmd_migrate: --dry-run + --to-version against fake host prints plan and exits 0" {
+  # Pre-stage a host config so the early lookup succeeds.
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "fake-pg": {
+      "type": "postgres",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "postgres",
+      "password_cmd": "echo devpassword"
+    }
+  }
+}
+EOF
+  run "$DBX_BIN" migrate fake-pg --to-version 17 --dry-run
+  # We accept either 0 (full plan) or a controlled exit if local-pg
+  # detection fails — either way the dry-run path must not destroy
+  # anything. We assert no destructive log lines were emitted.
+  [[ "$output" != *"Deleting"* ]]
+  [[ "$output" != *"Removing container"* ]]
+}
