@@ -154,6 +154,29 @@ ensure_pg13_source() {
   fi
 }
 
+# Spin up a Postgres 13 source on an alt port for migrate tests.
+# Idempotent. Container name: pg13-alt-dbx. Echoes the container name.
+# No host-port mapping needed; callers should use docker inspect IP.
+ensure_pg13_alt_container() {
+  local name="pg13-alt-dbx"
+  if ! docker ps --format '{{.Names}}' | grep -q "^${name}$"; then
+    if docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
+      docker start "$name" >/dev/null
+    else
+      docker run -d --name "$name" \
+        -e POSTGRES_PASSWORD=devpassword \
+        postgres:13-alpine >/dev/null
+    fi
+    for _ in $(seq 1 30); do
+      docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 && { echo "$name"; return 0; }
+      sleep 1
+    done
+    docker logs "$name" >&2
+    return 1
+  fi
+  echo "$name"
+}
+
 # Spin up a Postgres 16 + pgvector source for extension-aware-restore tests.
 # Idempotent. Container name: dbx-pgvector-source.
 ensure_pgvector_source() {

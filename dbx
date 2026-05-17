@@ -550,11 +550,44 @@ EOF
     esac
   fi
 
+  # Detect in-place vs cross-container migration. In-place means the source
+  # IS the dbx-managed target container itself (e.g. local-pg pointing at
+  # postgres-dbx). In that case we MUST dump before recreating, since
+  # recreate destroys the source. For cross-container migrations the source
+  # is a separate container/host, so we recreate first (to give pg_dump a
+  # client version that matches the target dump format), then dump, then
+  # restore.
+  local in_place="false"
+  local tgt_container_ip
+  tgt_container_ip=$(docker inspect "$target_container" \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "")
+  if [[ -n "$tgt_container_ip" && "$src_host" == "$tgt_container_ip" ]]; then
+    in_place="true"
+  fi
+  # Also treat host=container-name as in-place.
+  if [[ "$src_host" == "$target_container" ]]; then
+    in_place="true"
+  fi
+
   # === DESTRUCTIVE PATH BEGINS ===
+
+  # For cross-container migrations: recreate the dbx target container on
+  # the target image FIRST. This ensures pg_dump/pg_restore use a client
+  # whose version matches the desired dump format, avoiding the v17→v15
+  # incompatibility ("unsupported version in file header"). Backup is
+  # taken next; source data is untouched because source is a different
+  # container.
+  if [[ "$in_place" != "true" ]]; then
+    log_info "Step 1/5: ensuring target container ($target_container) on image $target_image"
+    if ! ensure_container_image "$target_container" "$target_image" "true"; then
+      die "Could not prepare target container on $target_image; source untouched"
+    fi
+    require_container "$target_container"
+  fi
 
   # Step A: take backup (unless --from-backup)
   if [[ -z "$from_backup" ]]; then
-    log_info "Step 1/5: backing up $source_host (rollback artifact)…"
+    log_info "Step 2/5: backing up $source_host (rollback artifact)…"
     cmd_backup "$source_host" || die "Backup failed; nothing destroyed yet"
     # Locate the most recent backup for this host.
     backup_path=$(find "$DATA_DIR/$source_host" -type f \
@@ -563,26 +596,28 @@ EOF
     [[ -z "$backup_path" || ! -f "$backup_path" ]] && die "Backup completed but artifact not found in $DATA_DIR/$source_host"
     log_info "Backup created: $backup_path"
   else
-    log_info "Step 1/5: using existing backup: $backup_path"
+    log_info "Step 2/5: using existing backup: $backup_path"
   fi
 
-  # Step B: ensure target container has the right image. We pass recreate=true
-  # because this IS the destructive-recreate flow the user opted into via
-  # 'dbx migrate'.
-  log_info "Step 2/5: ensuring target container ($target_container) on image $target_image"
-  if ! ensure_container_image "$target_container" "$target_image" "true"; then
-    log_error "Could not prepare target container on $target_image"
-    log_info "ROLLBACK: dbx restore $backup_path"
-    exit 1
+  # For in-place migration: now that the backup is on disk, swap the
+  # target container to the new image. This is the order that satisfies
+  # safety constraint #1 (backup before destroy) when source == target.
+  if [[ "$in_place" == "true" ]]; then
+    log_info "Step 3/5: ensuring target container ($target_container) on image $target_image"
+    if ! ensure_container_image "$target_container" "$target_image" "true"; then
+      log_error "Could not swap target to $target_image"
+      log_info "ROLLBACK: dbx restore $backup_path"
+      exit 1
+    fi
+    require_container "$target_container"
   fi
-  # ensure_container_image only exports DBX_FORCE_IMAGE if the container
-  # was missing. For an existing-but-wrong-image case, _recreate_container
-  # already handled it. Either way, make sure it's running before restore.
-  require_container "$target_container"
 
-  # Step C: restore into target
+  # Step C: restore into target. Force the target image so cmd_restore's
+  # metadata-driven image picker doesn't undo our swap by re-selecting the
+  # SOURCE image (which is the wrong server version for our target).
   log_info "Step 3/5: restoring backup into target"
-  if ! cmd_restore "$backup_path" --name "$first_db" --recreate-container; then
+  if ! DBX_POSTGRES_IMAGE="$target_image" DBX_MYSQL_IMAGE="$target_image" \
+       cmd_restore "$backup_path" --name "$first_db" --recreate-container; then
     log_error "Restore failed"
     log_info "ROLLBACK: dbx restore $backup_path  (target may be in partial state)"
     exit 1
