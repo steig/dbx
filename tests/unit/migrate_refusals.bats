@@ -47,3 +47,33 @@ setup() { setup_dbx_env; source_dbx_libs; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"engine"* || "$output" == *"flavor"* ]]
 }
+
+@test "migrate_is_downgrade: 15 → 13 returns 0 (is a downgrade)" {
+  run migrate_is_downgrade 15 13
+  [ "$status" -eq 0 ]
+}
+
+@test "migrate_is_downgrade: 13 → 15 returns 1 (upgrade, not downgrade)" {
+  run migrate_is_downgrade 13 15
+  [ "$status" -eq 1 ]
+}
+
+@test "migrate_is_downgrade: 15 → 15 returns 1 (same, not downgrade)" {
+  run migrate_is_downgrade 15 15
+  [ "$status" -eq 1 ]
+}
+
+@test "migrate_is_downgrade: 10 → 11 (MariaDB-style two-digit majors) returns 1" {
+  run migrate_is_downgrade 10 11
+  [ "$status" -eq 1 ]
+}
+
+@test "migrate_is_downgrade: 11 → 10 returns 0" {
+  run migrate_is_downgrade 11 10
+  [ "$status" -eq 0 ]
+}
+
+@test "migrate_is_downgrade: unknown source returns 1 (cannot conclude downgrade)" {
+  run migrate_is_downgrade unknown 13
+  [ "$status" -eq 1 ]
+}

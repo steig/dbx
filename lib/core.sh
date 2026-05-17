@@ -1177,3 +1177,18 @@ migrate_refuse_cross_flavor() {
   echo "Refusing cross-engine migration ($src → $tgt). Different database engines require schema translation, which dbx does not provide."
   return 1
 }
+
+# Return 0 if target_major < source_major (i.e., this is a downgrade).
+# Return 1 otherwise (upgrade, same, or unknown source).
+# Args: $1 = source_major, $2 = target_major
+migrate_is_downgrade() {
+  local src="$1"
+  local tgt="$2"
+  # Numeric guard — if either is non-numeric, we can't conclude downgrade.
+  [[ ! "$src" =~ ^[0-9]+$ ]] && return 1
+  [[ ! "$tgt" =~ ^[0-9]+$ ]] && return 1
+  if (( tgt < src )); then
+    return 0
+  fi
+  return 1
+}
