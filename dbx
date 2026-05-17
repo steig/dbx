@@ -1556,6 +1556,9 @@ ${BOLD}COMMANDS:${NC}
   tui                          Interactive TUI mode (requires gum)
   backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
   restore <source> [--name N]  Restore a backup to local container
+  migrate <host> --to-version N    Upgrade a database to a different version
+                                   (--dry-run to preview, --force-downgrade
+                                   for older targets, --update-config to persist)
   verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker
