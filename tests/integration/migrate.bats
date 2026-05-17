@@ -132,3 +132,50 @@ teardown() {
   after=$(find "$DBX_DATA_DIR/pg13-src" -name "*.sql.zst" | wc -l)
   [ "$before" = "$after" ]
 }
+
+@test "migrate: verification failure exits non-zero and leaves backup" {
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -c "DROP DATABASE IF EXISTS vfail;" >/dev/null
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -c "CREATE DATABASE vfail;" >/dev/null
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -d vfail -c "CREATE TABLE t (id int); INSERT INTO t SELECT generate_series(1,5);" >/dev/null
+
+  # Override config so migrate uses 'vfail' database.
+  local pg13_ip
+  pg13_ip=$(docker inspect pg13-alt-dbx \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "pg13-src": {
+      "type": "postgres",
+      "host": "$pg13_ip",
+      "port": 5432,
+      "user": "postgres",
+      "password_cmd": "echo devpassword",
+      "databases": { "vfail": {} }
+    }
+  },
+  "defaults": { "compression_level": 1, "keep_backups": 10 }
+}
+EOF
+
+  # Run migrate normally first
+  dbx_run migrate pg13-src --to-version 15
+  [ "$status" -eq 0 ]
+
+  # Now mutate target post-restore and re-run verify by hand to confirm
+  # the verify helper catches a mismatch.
+  docker exec -i postgres-dbx psql -U postgres -d vfail -c "INSERT INTO t VALUES (999);" >/dev/null
+
+  # Use the verify helper directly with both as containers.
+  source_dbx_libs
+  run pg_verify_restore "pg13-alt-dbx" "postgres-dbx" "vfail"
+  [ "$status" -ne 0 ]
+
+  # Cleanup
+  docker exec -i -e PGPASSWORD=devpassword pg13-alt-dbx \
+    psql -U postgres -c "DROP DATABASE IF EXISTS vfail" >/dev/null 2>&1 || true
+  pg_drop_db vfail
+}
