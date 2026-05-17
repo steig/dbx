@@ -19,3 +19,31 @@ setup() { setup_dbx_env; source_dbx_libs; }
   run migrate_refuse_same_version unknown 15
   [ "$status" -eq 0 ]
 }
+
+@test "migrate_refuse_cross_flavor: mysql → mariadb returns 1" {
+  run migrate_refuse_cross_flavor mysql mariadb
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"flavor"* ]]
+  [[ "$output" == *"dbx backup"* ]]
+}
+
+@test "migrate_refuse_cross_flavor: mariadb → mysql returns 1" {
+  run migrate_refuse_cross_flavor mariadb mysql
+  [ "$status" -eq 1 ]
+}
+
+@test "migrate_refuse_cross_flavor: mysql → mysql returns 0" {
+  run migrate_refuse_cross_flavor mysql mysql
+  [ "$status" -eq 0 ]
+}
+
+@test "migrate_refuse_cross_flavor: postgres → postgres returns 0" {
+  run migrate_refuse_cross_flavor postgres postgres
+  [ "$status" -eq 0 ]
+}
+
+@test "migrate_refuse_cross_flavor: postgres → mysql returns 1 (cross-engine)" {
+  run migrate_refuse_cross_flavor postgres mysql
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"engine"* || "$output" == *"flavor"* ]]
+}

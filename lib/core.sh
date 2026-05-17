@@ -1156,3 +1156,24 @@ migrate_refuse_same_version() {
   fi
   return 0
 }
+
+# Refuse a migration where source and target flavors differ.
+# mysql ↔ mariadb is refused (different dump grammars).
+# postgres ↔ mysql is refused (cross-engine, unsupported).
+# Args: $1 = source_flavor, $2 = target_flavor
+# Returns: 0 (proceed) or 1 (refuse, with message)
+migrate_refuse_cross_flavor() {
+  local src="$1"
+  local tgt="$2"
+  if [[ "$src" == "$tgt" ]]; then
+    return 0
+  fi
+  # Same-engine but different flavor (mysql ↔ mariadb)
+  if { [[ "$src" == "mysql" || "$src" == "mariadb" ]] && [[ "$tgt" == "mysql" || "$tgt" == "mariadb" ]]; }; then
+    echo "Refusing cross-flavor migration ($src → $tgt). MySQL and MariaDB dump grammars differ enough that this is not a safe migrate operation. Use 'dbx backup' + 'dbx restore' manually if you really mean it."
+    return 1
+  fi
+  # Cross-engine (postgres ↔ mysql/mariadb)
+  echo "Refusing cross-engine migration ($src → $tgt). Different database engines require schema translation, which dbx does not provide."
+  return 1
+}
