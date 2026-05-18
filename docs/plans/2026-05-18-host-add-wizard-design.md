@@ -3,23 +3,38 @@
 **Status:** Design (pre-implementation). The implementation plan is written
 separately by `superpowers:writing-plans` and lives next to this doc.
 
-**Goal:** Replace the manual "edit `config.json` by hand" path for adding a
-new database host with a single interactive command, `dbx host add`, that
-collects every field needed to back up and restore a database, validates the
-connection end-to-end before committing, and only writes to `config.json`
-once the user has a working host.
+**Goal:** Replace the manual "edit `config.json` by hand" path for two
+related setup tasks with interactive wizards that validate end-to-end
+before committing:
+
+1. **`dbx host add`** — collects every field needed to back up and restore
+   a database, runs the existing `cmd_test` against the provisional
+   config, and (on success) lets the user pick which databases to back up.
+2. **`dbx storage add`** — collects the S3 / S3-compatible endpoint,
+   bucket, prefix, and credentials, then proves the config works with a
+   real upload-list-delete round-trip before writing.
+
+The two compose: at the end of a successful `dbx host add`, the wizard
+checks `is_storage_configured`. If no storage is configured, it offers
+to run the storage wizard inline. If storage IS already configured, it
+offers to flip `auto_upload: true` for the freshly added host. Either
+way, only one extra prompt — the storage flow can also be invoked
+standalone via `dbx storage add` at any time.
 
 **Non-goals:**
 
-- A general-purpose host CRUD surface. Only `add` ships now. `remove`,
-  `list`, and `edit` are *reserved* under a `cmd_host` dispatcher but
-  unimplemented (`die "not yet implemented"`). This keeps the future
-  surface stable without scope creep.
-- Replacing or restructuring `dbx test`, `dbx vault set`, or any existing
-  command. The wizard *uses* them but doesn't reshape them.
-- A non-interactive add-host (`--from-file` / flags) mode. The user
-  explicitly asked for "interactive". Non-interactive callers can still
-  edit `config.json` and run `dbx test`.
+- A general-purpose host or storage CRUD surface. Only `add` ships now
+  for both. `remove`, `list`, and `edit` are *reserved* under the
+  respective dispatchers but unimplemented (`die "not yet implemented"`).
+  This keeps the future surface stable without scope creep.
+- Replacing or restructuring `dbx test`, `dbx vault set`, `dbx storage
+  info`, or any existing command. The wizards *use* them but don't
+  reshape them.
+- A non-interactive add-host / add-storage mode (`--from-file` / flags).
+  The user explicitly asked for "interactive". Non-interactive callers
+  can still edit `config.json` and run `dbx test` / `dbx storage info`.
+- Supporting non-S3 storage backends (rsync, rclone, etc.). The
+  underlying `lib/storage.sh` is S3-only today and that stays.
 
 ---
 
@@ -34,8 +49,12 @@ No arguments. Everything is collected via `gum` prompts. The command:
 1. `require_config` (run `dbx config init` first if missing — the wizard
    errors with that hint, it does not silently init).
 2. `require_jq`, `require_docker`, `require_gum` (mirrors `cmd_tui`).
-3. Requires a TTY on stdin. Fails fast with a clear error if not — no
-   silent half-runs in CI.
+3. Does not strictly enforce TTY-on-stdin. `gum` reads from `/dev/tty`
+   when available and from stdin otherwise, which is the behavior the
+   integration tests rely on (they drive the wizard via piped stdin —
+   see Testing). The downside — a user piping into the wizard by
+   accident gets garbage output — is the same risk `dbx tui` runs
+   today.
 
 The existing TUI menu entry `tui_config_add_host` (`lib/tui.sh:673`) is
 replaced by a one-line shell-out to `dbx host add`, matching how that file
@@ -142,10 +161,92 @@ string values the config consumer expects: yes → `"strip"`, no → `"keep"`
 (see `lib/core.sh::get_definer_handling`). For postgres hosts the prompt
 is skipped and no key is written.
 
-### Step 7 — Commit + summary
+### Step 7 — Storage chain (conditional)
 
-After all per-database loops, the wizard prints a short summary
-(host alias, type, network mode, database count) and exits 0.
+Storage is global config (`.storage.*`), not per-host. The wizard
+checks `is_storage_configured` and branches:
+
+- **Storage not yet configured:** `gum confirm "Configure remote
+  storage for these backups now?"`. If yes, the wizard delegates to
+  `dbx storage add` (see "`dbx storage add` flow" below) by calling
+  the `storage_add` function directly (it's in the same `dbx`
+  binary). If no, skip.
+- **Storage already configured:** `gum confirm "Enable auto-upload
+  to remote storage for '$alias' backups?"`. If yes, set
+  `.hosts[$alias].auto_upload = true` via jq+temp-file. If no, skip.
+  (The existing `defaults.auto_upload` global flag still applies if
+  set; this is a per-host override.)
+
+### Step 8 — Commit + summary
+
+After the optional storage chain, the wizard prints a short summary
+(host alias, type, network mode, database count, storage state) and
+exits 0.
+
+---
+
+## `dbx storage add` flow
+
+Parallel to `dbx host add` — its own dispatcher slot, same
+`cmd_*` / `*_add` inline-function pattern. Standalone command users can
+invoke any time; also called from Step 7 of `dbx host add`.
+
+### Step 1 — Provider branch
+
+`gum choose`:
+
+- **AWS S3** — no endpoint URL; `region` is required.
+- **S3-compatible (MinIO, R2, Backblaze B2, …)** — `endpoint` URL
+  required; `region` optional (some backends ignore it).
+
+### Step 2 — Bucket + prefix
+
+| Prompt           | Type        | Required | Notes                         |
+| ---------------- | ----------- | -------- | ----------------------------- |
+| Bucket           | `gum input` | Yes      | No defaults.                  |
+| Prefix (path)    | `gum input` | No       | Default: empty (root of bucket). |
+
+### Step 3 — Credentials
+
+| Prompt              | Type                  | Required | Storage              |
+| ------------------- | --------------------- | -------- | -------------------- |
+| Access key          | `gum input`           | Yes      | Plaintext in config (`.storage.s3.access_key`) — matches existing schema. |
+| Secret key          | `gum input --password`| Yes      | Vault under key `s3-secret-key` (existing convention, see `lib/storage.sh:66`). |
+
+### Step 4 — Provisional write + round-trip test
+
+1. Write `.storage` block to `$CONFIG_FILE` via jq+temp-file.
+2. Store the secret in the vault.
+3. Run `storage_test_roundtrip` — a new helper that:
+   - Creates a 1-byte temp file
+   - Uploads it to `.dbx-test/<timestamp>` under the configured prefix
+   - Lists the prefix, asserts the file appears
+   - Downloads it, asserts byte-identical
+   - Deletes it from the bucket
+   - Returns 0 on full success; non-zero on any failure with the
+     failing step logged
+
+On success → Step 5.
+On failure → `gum choose`:
+
+- **Re-enter credentials and retry** — back to Step 3, then retest.
+- **Re-enter all fields and retry** — back to Step 1.
+- **Save anyway** — leave the broken storage config in place with a
+  warning.
+- **Abort and roll back** — delete `.storage` block, `vault_delete
+  s3-secret-key`, exit 1.
+
+### Step 5 — Summary
+
+Print endpoint (or "AWS S3"), bucket, prefix, and exit 0.
+
+### Why a real round-trip (not just creds check)
+
+Bucket-list permissions don't imply write permissions. A user with a
+working alias but a read-only IAM policy would pass a "list bucket"
+check and then fail later during the first real backup upload. The
+round-trip catches this at config time, in front of the user, while
+they still remember which secret key they pasted.
 
 ---
 
@@ -184,10 +285,16 @@ is ~200 lines; that's comparable to `cmd_config`'s 175.
 | `host_alias_valid <name>` | `lib/core.sh` | Reusable, single regex check |
 | `host_exists <name>` | `lib/core.sh` | Wraps `get_host_config` truthiness check |
 | `list_remote_databases <host>` | `lib/core.sh` | Used by wizard and reusable for any future "pick db" UX. Extracted from the docker-exec block at `dbx:1180-1195`. |
+| `storage_test_roundtrip` | `lib/storage.sh` | New. Upload → list → download → delete a 1-byte test object under `.dbx-test/<timestamp>`. Used by `dbx storage add`, available standalone for future `dbx storage test` command. |
 | `host_add` | `dbx` | Wizard. Not extracted to lib — single caller, matches inline-dispatcher convention. |
+| `storage_add` | `dbx` | Wizard. Same reasoning. |
 
 `cmd_test` is **reused as-is** — the wizard calls `cmd_test "$alias"`
 after the provisional write. No changes to `cmd_test`.
+
+`cmd_storage` is **extended** with a new `add` action that calls
+`storage_add`. The existing actions (`upload`, `download`, `list`,
+`delete`, `sync`, `info`) are unchanged.
 
 ### TUI hook
 
@@ -298,15 +405,19 @@ Shellcheck and bash syntax check cover the new code automatically.
 
 ## Out of scope (deferred)
 
-- **`dbx host remove` / `list` / `edit`.** Dispatcher slot is reserved
-  but unimplemented. When asked, fail with `not yet implemented`.
-- **Non-interactive add** (e.g., `dbx host add --from-file foo.json`).
-- **Cloud-storage and notification setup** inside the wizard. Stays in
-  `dbx config edit` for now — the wizard scope is "make one host work".
-- **Migrating existing TUI add-database flow** (`tui_config_add_database`)
-  to a `dbx host add-database` command. Out of scope; the new wizard
-  *does* invoke the per-database prompts during initial add, but managing
-  databases on an existing host stays in the TUI for now.
-- **Editing an existing host.** Re-running `dbx host add <existing>` is
-  rejected (alias collision). Editing is `dbx config edit` until a real
-  `dbx host edit` exists.
+- **`dbx host remove` / `list` / `edit`** and **`dbx storage remove` /
+  `edit`.** Dispatcher slots reserved but unimplemented. When asked,
+  fail with `not yet implemented`.
+- **Non-interactive add** for either wizard.
+- **Notification (Slack/email/desktop) setup.** Stays in
+  `dbx config edit` for now.
+- **Non-S3 storage backends** (rsync, rclone, sftp). `lib/storage.sh`
+  doesn't support them, so the wizard doesn't either.
+- **Editing an existing host or storage config.** Re-running `dbx host
+  add <existing>` is rejected; re-running `dbx storage add` with
+  storage already configured prompts `Replace existing storage config?`
+  and routes to the same flow with the old block deleted on confirm.
+- **Migrating existing TUI add-database flow** to a `dbx host
+  add-database` command. The new wizard *does* invoke the per-database
+  prompts during initial add, but managing databases on an existing
+  host stays in the TUI for now.
