@@ -1096,6 +1096,11 @@ storage_add() {
         fi
         bucket=$(gum input --header "Bucket:" --value "${bucket:-}")
         prefix=$(gum input --header "Prefix:" --value "${prefix:-}")
+        # Access key is a non-secret "field" (lives plaintext in config), so
+        # users picking "all storage fields" reasonably expect to re-enter it.
+        # Secret key stays in the vault — use "Re-enter credentials" for that.
+        access_key=$(gum input --header "Access key:" --value "${access_key:-}")
+        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
         continue
         ;;
       "Save anyway (broken storage kept in config)")
