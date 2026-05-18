@@ -53,3 +53,25 @@ setup() { setup_dbx_env; source_dbx_libs; }
   run host_alias_valid 'prod`x`'
   [ "$status" -ne 0 ]
 }
+
+@test "host_exists: false when config has no such host" {
+  cat > "$CONFIG_FILE" <<'JSON'
+{"hosts": {"alpha": {"type": "postgres", "user": "u"}}}
+JSON
+  run host_exists "beta"
+  [ "$status" -ne 0 ]
+}
+
+@test "host_exists: true when host is present" {
+  cat > "$CONFIG_FILE" <<'JSON'
+{"hosts": {"alpha": {"type": "postgres", "user": "u"}}}
+JSON
+  run host_exists "alpha"
+  [ "$status" -eq 0 ]
+}
+
+@test "host_exists: false when hosts key missing entirely" {
+  echo '{}' > "$CONFIG_FILE"
+  run host_exists "alpha"
+  [ "$status" -ne 0 ]
+}

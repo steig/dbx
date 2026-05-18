@@ -190,6 +190,15 @@ host_alias_valid() {
   [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]
 }
 
+# Return 0 if the given host alias exists in the config, 1 otherwise.
+host_exists() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && return 1
+  local found
+  found=$(jq -r --arg h "$name" '.hosts | has($h)' "$CONFIG_FILE" 2>/dev/null || echo "false")
+  [[ "$found" == "true" ]]
+}
+
 # ============================================================================
 # Keychain/Vault Functions (cross-platform credential storage)
 # ============================================================================
