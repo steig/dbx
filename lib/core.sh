@@ -182,6 +182,14 @@ get_definer_handling() {
   echo "${handling:-strip}"  # Default to strip for safety
 }
 
+# Validate a host alias string. Allowed: alphanumeric start, then
+# alphanumerics / underscore / dash. Keeps the alias safe to pass through
+# `dbx test "$alias"`, jq paths, vault keys, etc. without quoting hazards.
+host_alias_valid() {
+  local alias="${1:-}"
+  [[ "$alias" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]
+}
+
 # ============================================================================
 # Keychain/Vault Functions (cross-platform credential storage)
 # ============================================================================
