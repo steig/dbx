@@ -672,7 +672,10 @@ tui_action_config() {
 
 tui_config_add_host() {
   echo
-  dbx host add
+  # `dbx host add` returns non-zero on user abort or validation failure;
+  # under set -euo pipefail that would kill the TUI menu loop. Same pattern
+  # as the count pipelines fixed in PR #27.
+  dbx host add || true
   sleep 1
 }
 
