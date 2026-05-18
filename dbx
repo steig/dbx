@@ -1380,8 +1380,58 @@ host_add() {
     fi
   fi
 
-  log_warn "Wizard incomplete — per-database options + summary land in the next commit."
-  # TODO(Task 11): per-database exclude + definer; write databases block; print summary.
+  # Per-database exclude tables.
+  if [[ -n "$picked" ]]; then
+    while IFS= read -r db; do
+      [[ -z "$db" ]] && continue
+      local excl
+      excl=$(gum input --header "Tables to exclude data from in '$db' (comma-separated, blank for none):")
+      local tmp; tmp=$(mktemp)
+      if [[ -n "$excl" ]]; then
+        local excl_json
+        excl_json=$(printf '%s' "$excl" | tr ',' '\n' \
+          | awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print }' \
+          | jq -R . | jq -s .)
+        jq --arg a "$alias" --arg d "$db" --argjson e "$excl_json" \
+           '.hosts[$a].databases[$d] = {exclude_data: $e}' \
+           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      else
+        jq --arg a "$alias" --arg d "$db" \
+           '.hosts[$a].databases[$d] = {}' \
+           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      fi
+      secure_file "$CONFIG_FILE"
+    done <<< "$picked"
+  fi
+
+  # MySQL-only: strip DEFINER clauses? Default yes.
+  if [[ "$new_type" == "mysql" ]]; then
+    local definer_value
+    if gum confirm --default=true "Strip DEFINER clauses from MySQL dumps?"; then
+      definer_value="strip"
+    else
+      definer_value="keep"
+    fi
+    local tmp; tmp=$(mktemp)
+    jq --arg a "$alias" --arg dh "$definer_value" \
+       '.hosts[$a].definer_handling = $dh' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+    secure_file "$CONFIG_FILE"
+  fi
+
+  # Summary.
+  local db_count
+  db_count=$(printf '%s' "$picked" | grep -c . || true)
+  echo
+  log_success "Host '$alias' added."
+  log_info "  Type:      $new_type"
+  if [[ "$network_mode" == "Direct connection" ]]; then
+    log_info "  Network:   direct ($direct_host:$direct_port)"
+  else
+    log_info "  Network:   ssh tunnel via $tunnel_jump to $tunnel_target:$tunnel_port"
+  fi
+  log_info "  Databases: ${db_count:-0}"
+  log_info "Try: dbx backup $alias"
 }
 
 cmd_host() {
