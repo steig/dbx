@@ -1155,3 +1155,39 @@ _list_user_dbs() {
       ;;
   esac
 }
+
+# Query the remote server (via existing docker container + already-up
+# tunnel) and print the user-visible database names, one per line.
+# Filters out system / template databases so the output is a clean list
+# for a "pick which to back up" prompt.
+#
+# Preconditions: the host exists in config, credentials resolve via
+# get_password, the relevant docker container is up, and (if configured)
+# the SSH tunnel is already established.
+list_remote_databases() {
+  local host="$1"
+  local db_type db_host db_port db_user db_pass
+  db_type=$(get_db_type "$host")
+  db_host=$(get_effective_host "$host")
+  db_port=$(get_effective_port "$host")
+  db_user=$(get_config_value ".hosts[\"$host\"].user")
+  db_pass=$(get_password "$host")
+
+  case "$db_type" in
+    postgres|postgresql)
+      docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -t -A -c \
+        "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname" \
+        2>/dev/null
+      ;;
+    mysql|mariadb)
+      docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+        mysql -h "$db_host" -P "$db_port" -u "$db_user" -N -e "SHOW DATABASES" \
+        2>/dev/null \
+        | grep -v -E "^(information_schema|performance_schema|mysql|sys)$" || true
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}

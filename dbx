@@ -1179,20 +1179,9 @@ cmd_test() {
 
   # Test 5: List available databases
   log_info "Available databases:"
-  case "$db_type" in
-    postgres|postgresql)
-      docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-        psql -h "$db_host" -p "$db_port" -U "$db_user" -t -A -c \
-        "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname" 2>/dev/null | \
-        while read -r dbname; do echo "  - $dbname"; done
-      ;;
-    mysql|mariadb)
-      docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
-        mysql -h "$db_host" -P "$db_port" -u "$db_user" -N -e "SHOW DATABASES" 2>/dev/null | \
-        grep -v -E "^(information_schema|performance_schema|mysql|sys)$" | \
-        while read -r dbname; do echo "  - $dbname"; done
-      ;;
-  esac
+  list_remote_databases "$host" 2>/dev/null | while read -r dbname; do
+    [[ -n "$dbname" ]] && echo "  - $dbname"
+  done
 
   echo ""
   log_success "All connection tests passed for: $host"
