@@ -165,10 +165,13 @@ cmd_backup() {
   completed_size=$(stat -f%z "$completed_file" 2>/dev/null || stat -c%s "$completed_file" 2>/dev/null || echo "0")
   notify_backup_success "$host" "$database" "$completed_file" "$completed_size"
 
-  # Upload to cloud storage if requested or configured
-  local auto_upload
+  # Upload to cloud storage if requested or configured. Per-host
+  # `.hosts[$host].auto_upload` overrides the global `.defaults.auto_upload`
+  # — both honor the explicit `--upload` flag.
+  local auto_upload host_auto_upload
   auto_upload=$(get_config_value ".defaults.auto_upload" 2>/dev/null || echo "")
-  if [[ "$upload" == "true" || "$auto_upload" == "true" ]]; then
+  host_auto_upload=$(get_config_value ".hosts[\"$host\"].auto_upload" 2>/dev/null || echo "")
+  if [[ "$upload" == "true" || "$auto_upload" == "true" || "$host_auto_upload" == "true" ]]; then
     if is_storage_configured; then
       storage_upload "$completed_file" "$host/$database/$(basename "$completed_file")"
     else
