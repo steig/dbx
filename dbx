@@ -1358,6 +1358,22 @@ cmd_update() {
   curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
 }
 
+# Prompt for a TCP port and validate it's numeric. Re-prompts on
+# non-numeric input. Empty input returns non-zero so callers can abort.
+# Args: $1 prompt header, $2 default value. Prints the validated port.
+host_prompt_port() {
+  local header="$1" default="$2" port
+  while :; do
+    port=$(gum input --header "$header" --value "$default")
+    [[ -z "$port" ]] && return 1
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      echo "$port"
+      return 0
+    fi
+    log_warn "Port must be a number (got: $port)"
+  done
+}
+
 # Write a host block to $CONFIG_FILE atomically via jq + temp-file.
 # Args: alias, type, user, then either:
 #   "direct" <host> <port>
@@ -1431,8 +1447,8 @@ host_add() {
   if [[ "$network_mode" == "Direct connection" ]]; then
     direct_host=$(gum input --header "Host address:" --value "localhost")
     [[ -z "$direct_host" ]] && { log_info "Aborted."; return 0; }
-    direct_port=$(gum input --header "Port:" --value "$default_port")
-    [[ -z "$direct_port" ]] && { log_info "Aborted."; return 0; }
+    direct_port=$(host_prompt_port "Port:" "$default_port") \
+      || { log_info "Aborted."; return 0; }
   else
     tunnel_jump=$(gum input --header "SSH jump host (from your ~/.ssh/config):" \
                             --placeholder "bastion")
@@ -1440,9 +1456,8 @@ host_add() {
     tunnel_target=$(gum input --header "Database hostname (as seen from the jump host):" \
                               --placeholder "db.internal")
     [[ -z "$tunnel_target" ]] && { log_info "Aborted."; return 0; }
-    tunnel_port=$(gum input --header "Database port (on the jump-side network):" \
-                            --value "$default_port")
-    [[ -z "$tunnel_port" ]] && { log_info "Aborted."; return 0; }
+    tunnel_port=$(host_prompt_port "Database port (on the jump-side network):" "$default_port") \
+      || { log_info "Aborted."; return 0; }
   fi
 
   # Credentials. keychain_set persists via the active backend (Keychain on
@@ -1507,11 +1522,13 @@ host_add() {
         [[ -z "$network_mode" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
         if [[ "$network_mode" == "Direct connection" ]]; then
           direct_host=$(gum input --header "Host address:" --value "${direct_host:-localhost}")
-          direct_port=$(gum input --header "Port:" --value "${direct_port:-$default_port}")
+          direct_port=$(host_prompt_port "Port:" "${direct_port:-$default_port}") \
+            || { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
         else
           tunnel_jump=$(gum input --header "SSH jump host:" --value "${tunnel_jump:-}")
           tunnel_target=$(gum input --header "Database hostname:" --value "${tunnel_target:-}")
-          tunnel_port=$(gum input --header "Database port:" --value "${tunnel_port:-$default_port}")
+          tunnel_port=$(host_prompt_port "Database port:" "${tunnel_port:-$default_port}") \
+            || { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
         fi
         continue
         ;;
