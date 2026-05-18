@@ -672,29 +672,10 @@ tui_action_config() {
 
 tui_config_add_host() {
   echo
-  local new_host new_type new_user new_hostaddr new_port
-  new_host=$(gum input --header "Host alias (e.g., production):" --placeholder "production")
-  [[ -z "$new_host" ]] && return 0
-  new_type=$(gum choose --header "Database type:" "postgres" "mysql")
-  [[ -z "$new_type" ]] && return 0
-  new_user=$(gum input --header "Database user:" --placeholder "postgres")
-  [[ -z "$new_user" ]] && return 0
-  new_hostaddr=$(gum input --header "Host address:" --placeholder "localhost or db.internal")
-  [[ -z "$new_hostaddr" ]] && return 0
-  local default_port
-  default_port=$([[ "$new_type" == "postgres" ]] && echo "5432" || echo "3306")
-  new_port=$(gum input --header "Port:" --value "$default_port")
-
-  local tmp_config
-  tmp_config=$(mktemp)
-  jq ".hosts[\"$new_host\"] = {type: \"$new_type\", host: \"$new_hostaddr\", port: $new_port, user: \"$new_user\", databases: {}}" \
-    "$CONFIG_FILE" > "$tmp_config" && mv "$tmp_config" "$CONFIG_FILE"
-
-  gum style --foreground "$TUI_OK" --bold "  ✓ Host '$new_host' added"
-
-  if gum confirm "Set password for '$new_host' now?"; then
-    dbx vault set "$new_host"
-  fi
+  # `dbx host add` returns non-zero on user abort or validation failure;
+  # under set -euo pipefail that would kill the TUI menu loop. Same pattern
+  # as the count pipelines fixed in PR #27.
+  dbx host add || true
   sleep 1
 }
 
