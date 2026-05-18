@@ -66,12 +66,13 @@ main() {
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$lib" -o "$LIB_DIR/$lib"
   done
 
-  # Update lib path in main script to use installed location
-  if [[ "$(uname)" == "Darwin" ]]; then
-    sed -i '' "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"$LIB_DIR\"|" "$INSTALL_DIR/dbx"
-  else
-    sed -i "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"$LIB_DIR\"|" "$INSTALL_DIR/dbx"
-  fi
+  # Update lib path in main script to use installed location.
+  # Avoid `sed -i` — its argument shape differs between BSD and GNU sed, and
+  # `uname` can't tell us which is actually first in PATH (e.g. GNU sed via
+  # Nix or Homebrew on macOS). A temp-file rewrite works with either.
+  sed "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"$LIB_DIR\"|" "$INSTALL_DIR/dbx" > "$INSTALL_DIR/dbx.tmp"
+  mv "$INSTALL_DIR/dbx.tmp" "$INSTALL_DIR/dbx"
+  chmod +x "$INSTALL_DIR/dbx"
 
   # Extract and show version
   local version
