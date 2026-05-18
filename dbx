@@ -1194,11 +1194,46 @@ cmd_update() {
   curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
 }
 
+host_add() {
+  require_config
+  require_jq
+  require_docker
+  require_gum
+
+  local alias new_type new_user
+  while :; do
+    alias=$(gum input --header "Host alias:" --placeholder "production")
+    [[ -z "$alias" ]] && { log_info "Aborted."; return 0; }
+    if ! host_alias_valid "$alias"; then
+      log_warn "Alias must start with a letter or digit and use only letters, digits, '_', or '-'."
+      continue
+    fi
+    if host_exists "$alias"; then
+      local existing_type existing_user
+      existing_type=$(get_config_value ".hosts[\"$alias\"].type")
+      existing_user=$(get_config_value ".hosts[\"$alias\"].user")
+      log_warn "Host '$alias' already exists (type=$existing_type, user=$existing_user)."
+      continue
+    fi
+    break
+  done
+
+  new_type=$(gum choose --header "Database type:" "postgres" "mysql")
+  [[ -z "$new_type" ]] && { log_info "Aborted."; return 0; }
+
+  new_user=$(gum input --header "Database user:" --placeholder "postgres")
+  [[ -z "$new_user" ]] && { log_info "Aborted."; return 0; }
+
+  log_info "Identity collected: alias=$alias type=$new_type user=$new_user"
+  log_warn "Wizard incomplete — network/credentials/validation land in follow-up commits."
+  # TODO(Task 6): continue into network step.
+}
+
 cmd_host() {
   local action="${1:-}"; shift || true
   case "$action" in
     add)
-      die "host add: not yet implemented"
+      host_add "$@"
       ;;
     remove|rm|delete|list|ls|test|edit)
       die "host $action: not yet implemented"

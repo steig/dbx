@@ -94,10 +94,12 @@ JSON
   [[ "$output" =~ "not yet implemented" ]]
 }
 
-@test "dbx host add errors with not-yet-implemented (placeholder)" {
-  run "$DBX_BIN" host add
-  [ "$status" -ne 0 ]
-  [[ "$output" =~ "not yet implemented" ]]
+@test "dbx host add: empty alias aborts cleanly" {
+  command -v gum >/dev/null 2>&1 || skip "gum not installed"
+  echo '{"hosts":{}}' > "$CONFIG_FILE"
+  run bash -c "echo '' | '$DBX_BIN' host add"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "Aborted" ]]
 }
 
 @test "dbx help mentions host add" {
