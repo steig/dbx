@@ -10,6 +10,8 @@ VERSION="0.8.0"
 #   dbx backup [-v] [--upload] <host> [database]
 #   dbx restore <host>/<database>/latest [--name <name>]
 #   dbx restore <backup-file> [--name <name>]
+#   dbx restore --from-remote <host>/<database>/latest [--name N] [--keep-download]
+#   dbx restore s3://<host>/<database>/latest [--name N]
 #   dbx test <host>
 #   dbx list [host] [database]
 #   dbx clean [--keep N] [--dry-run] [--older-than D]
@@ -178,12 +180,14 @@ cmd_backup() {
 }
 
 cmd_restore() {
-  local source="${1:-}"
+  local source=""
   local target_name=""
+  local from_remote=""
+  local keep_download=false
 
-  shift || true
-
-  # Parse options
+  # Mixed flag/positional parse: `source` is the only positional and
+  # may appear before or after flags (or be absent entirely when the
+  # user uses --from-remote).
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name|-n)
@@ -194,15 +198,55 @@ cmd_restore() {
         export DBX_RECREATE_CONTAINER=true
         shift
         ;;
-      *)
+      --from-remote)
+        from_remote="$2"
+        shift 2
+        ;;
+      --keep-download)
+        keep_download=true
+        shift
+        ;;
+      --*|-*)
         die "Unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$source" ]]; then
+          source="$1"
+        else
+          die "Unexpected extra argument: $1"
+        fi
+        shift
         ;;
     esac
   done
 
+  # `s3://prod/users/latest` URI is shorthand for `--from-remote prod/users/latest`.
+  if [[ -z "$from_remote" && "$source" == s3://* ]]; then
+    from_remote="${source#s3://}"
+    source=""
+  fi
+
   require_config
   require_jq
   require_docker
+
+  # Remote-fetch path: download into a tempdir under $DATA_DIR/.remote/
+  # then fall through to the normal local-file restore code below.
+  # On success the file is deleted unless --keep-download was passed.
+  # On failure we deliberately leave it so the user can retry.
+  local remote_local_file=""
+  if [[ -n "$from_remote" ]]; then
+    if ! is_storage_configured; then
+      die "Cloud storage is not configured. Run 'dbx storage info' for setup help."
+    fi
+    local resolved
+    resolved=$(storage_resolve_remote_path "$from_remote") \
+      || die "Could not resolve remote backup: $from_remote"
+    log_step "Fetching remote backup: $resolved"
+    remote_local_file=$(storage_fetch_remote_backup "$resolved") \
+      || die "Failed to fetch remote backup: $resolved"
+    source="$remote_local_file"
+  fi
 
   local backup_file=""
   local host=""
@@ -354,6 +398,20 @@ cmd_restore() {
   echo ""
   log_success "Database restored as: $target_name"
   notify_restore_success "$backup_file" "$target_name"
+
+  # Clean up the downloaded file from --from-remote unless the user
+  # asked to keep it. Only reached on a successful restore — failure
+  # paths above all `die`, so the temp file is preserved for retry.
+  if [[ -n "$remote_local_file" && "$keep_download" != "true" ]]; then
+    local meta="${remote_local_file}.meta.json"
+    local parent_dir
+    parent_dir=$(dirname "$remote_local_file")
+    rm -f "$remote_local_file" "$meta"
+    # Remove the mktemp dir if it's now empty (it's under $DATA_DIR/.remote/dl.XXXXXX).
+    rmdir "$parent_dir" 2>/dev/null || true
+  elif [[ -n "$remote_local_file" && "$keep_download" == "true" ]]; then
+    log_info "Downloaded backup kept at: $remote_local_file"
+  fi
 }
 
 cmd_list() {
@@ -1216,6 +1274,8 @@ ${BOLD}COMMANDS:${NC}
   tui                          Interactive TUI mode (requires gum)
   backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
   restore <source> [--name N]  Restore a backup to local container
+                               <source> can be a local file, host/db/latest,
+                               s3://host/db/latest, or use --from-remote PATH
   verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker
@@ -1257,6 +1317,11 @@ ${BOLD}EXAMPLES:${NC}
   # Restore to local container
   dbx restore production/myapp/latest
   dbx restore staging/myapp/latest --name myapp_copy
+
+  # Restore directly from S3/MinIO (no separate `storage download` step)
+  dbx restore --from-remote production/myapp/latest
+  dbx restore s3://production/myapp/latest --name myapp_copy
+  dbx restore --from-remote prod/db/db_20260510_120000.sql.zst.age --keep-download
 
   # Schedule backups
   dbx schedule add production myapp daily   # Run daily at 2am
@@ -1397,4 +1462,8 @@ main() {
   maybe_notify_update
 }
 
-main "$@"
+# Tests source this file to access cmd_* functions without executing
+# the full CLI dispatch; set DBX_NO_AUTO_MAIN=1 to skip the top-level run.
+if [[ -z "${DBX_NO_AUTO_MAIN:-}" ]]; then
+  main "$@"
+fi

@@ -389,6 +389,112 @@ storage_list() {
   esac
 }
 
+# storage_resolve_remote_path — translate a user-facing remote path
+# (which may end in `/latest`) into a concrete `<host>/<db>/<filename>`.
+#
+# Args: $1 = "<host>/<db>/<filename-or-latest>"
+# Echoes: the resolved "<host>/<db>/<filename>"
+# Exits non-zero on malformed input or when /latest finds no backups.
+#
+# Resolution rules for /latest:
+#  - List entries under "<host>/<db>" via storage_list_raw.
+#  - Filter to candidates whose filename ends in .sql.zst, .sql.zst.age,
+#    or .sql.zst.gpg.
+#  - Pick the lex-max filename. Backup names embed a zero-padded
+#    YYYYMMDD_HHMMSS timestamp, so lex order == chronological order.
+storage_resolve_remote_path() {
+  local remote_path="$1"
+
+  # Validate shape: must have at least host/db/something.
+  local host db tail
+  host="${remote_path%%/*}"
+  local rest="${remote_path#*/}"
+  if [[ "$rest" == "$remote_path" || -z "$host" ]]; then
+    log_error "Invalid remote path: '$remote_path' (expected <host>/<db>/<file_or_latest>)"
+    return 1
+  fi
+  db="${rest%%/*}"
+  tail="${rest#*/}"
+  if [[ "$tail" == "$rest" || -z "$db" || -z "$tail" ]]; then
+    log_error "Invalid remote path: '$remote_path' (expected <host>/<db>/<file_or_latest>)"
+    return 1
+  fi
+
+  if [[ "$tail" != "latest" ]]; then
+    # Already a concrete filename — pass through.
+    echo "$remote_path"
+    return 0
+  fi
+
+  # /latest — list the directory and pick the newest backup. We use
+  # the unified storage_list (which adds a header banner) and just
+  # filter to lines whose last token matches a backup filename — the
+  # header lines don't match and get dropped naturally.
+  local listing
+  listing=$(storage_list "$host/$db" 2>/dev/null || true)
+
+  # Extract bare filenames. `mc ls` and `aws s3 ls` both print the
+  # filename as the last whitespace-separated token on each line.
+  local best=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local fname
+    fname=$(awk '{print $NF}' <<< "$line")
+    # Skip directories ("PRE foo/" in aws output, "x/" with trailing slash in mc).
+    [[ "$fname" == */ ]] && continue
+    case "$fname" in
+      *.sql.zst|*.sql.zst.age|*.sql.zst.gpg) ;;
+      *) continue ;;
+    esac
+    if [[ -z "$best" || "$fname" > "$best" ]]; then
+      best="$fname"
+    fi
+  done <<< "$listing"
+
+  if [[ -z "$best" ]]; then
+    log_error "No backups found at remote path: $host/$db"
+    return 1
+  fi
+
+  echo "$host/$db/$best"
+}
+
+# storage_fetch_remote_backup — download a remote backup into a
+# temp area under $DATA_DIR/.remote/ and echo the local file path.
+#
+# Args: $1 = resolved "<host>/<db>/<filename>"
+# Echoes (to stdout): the absolute local path to the downloaded file.
+# Returns non-zero if download fails or the file ends up empty.
+storage_fetch_remote_backup() {
+  local remote_path="$1"
+
+  local base
+  base=$(basename "$remote_path")
+  local tmp_root="$DATA_DIR/.remote"
+  mkdir -p "$tmp_root"
+
+  # mktemp -d on the same filesystem as the eventual restore target so
+  # we don't end up moving files across mount points.
+  local tmp_dir
+  tmp_dir=$(mktemp -d "$tmp_root/dl.XXXXXX")
+  local local_file="$tmp_dir/$base"
+
+  # Run storage_download but route its informational/log chatter to
+  # stderr so the resolved local path (echoed last) isn't intermingled
+  # when callers capture stdout.
+  if ! storage_download "$remote_path" "$local_file" >&2; then
+    log_error "Download failed: $remote_path"
+    return 1
+  fi
+
+  if [[ ! -s "$local_file" ]]; then
+    log_error "Downloaded file is empty: $local_file"
+    return 1
+  fi
+
+  echo "$local_file"
+}
+
 storage_delete() {
   local remote_path="$1"
 

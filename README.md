@@ -102,7 +102,7 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 |---------|-------------|
 | `dbx tui` | Interactive menu mode (requires `gum`) |
 | `dbx backup [-v] [--upload] <host> [database]` | Back up one DB or every DB on a host |
-| `dbx restore <source> [--name N] [--recreate-container]` | Restore to a local container; recreate the container if its version differs |
+| `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download]` | Restore to a local container; `--from-remote` (or `s3://...`) pulls straight from cloud storage |
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
 | `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
 | `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
@@ -307,6 +307,24 @@ dbx restore production/myapp/latest
 # → connect:    psql -h 127.0.0.1 -p 5432 -U postgres myapp_v1_20260508
 #               (default password: devpassword — see env vars below)
 ```
+
+### Restoring directly from S3 / MinIO
+
+To skip the explicit `dbx storage download` step, pass `--from-remote` (or use the `s3://` URI shorthand). The remote object is staged under `~/.data/dbx/.remote/dl.<rand>/` and removed after a successful restore. Pass `--keep-download` to keep the local copy.
+
+```bash
+# Latest backup for production/myapp from S3/MinIO
+dbx restore --from-remote production/myapp/latest
+
+# Equivalent URI form
+dbx restore s3://production/myapp/latest --name myapp_review
+
+# An exact filename, and keep the downloaded archive afterwards
+dbx restore --from-remote prod/db/db_20260510_120000.sql.zst.age --keep-download
+```
+
+`latest` resolves to the lex-max filename returned by `storage list <host>/<db>` — since backups embed a zero-padded `YYYYMMDD_HHMMSS` timestamp, that's the newest one. Encrypted backups (`.age`, `.gpg`) are decrypted by the same code path as local restores. On download failure the file is left in place so you can retry without re-fetching.
+
 
 | Container | Image | Default port |
 |-----------|-------|--------------|
