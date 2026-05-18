@@ -1007,9 +1007,34 @@ storage_add() {
   prefix=$(gum input --header "Prefix / path (blank for bucket root):")
   # blank prefix OK
 
-  log_info "Collected: provider=$provider bucket=$bucket prefix='${prefix}' region='${region}' endpoint='${endpoint}'"
-  log_warn "Wizard incomplete — credentials + validation land in follow-up commits."
-  # TODO(Task 17): credentials step
+  local access_key
+  access_key=$(gum input --header "Access key:" --placeholder "AKIA…")
+  [[ -z "$access_key" ]] && { log_info "Aborted."; return 0; }
+
+  # Vault may already contain a secret from a prior run.
+  local existing_secret
+  existing_secret=$(keychain_get "s3-secret-key" 2>/dev/null || true)
+  if [[ -n "$existing_secret" ]]; then
+    local secret_choice
+    secret_choice=$(gum choose --header "Vault already has an S3 secret key." \
+                               "Use existing" "Replace")
+    [[ -z "$secret_choice" ]] && { log_info "Aborted."; return 0; }
+    if [[ "$secret_choice" == "Replace" ]]; then
+      local new_secret
+      new_secret=$(gum input --password --header "New S3 secret key:")
+      [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
+      keychain_set "s3-secret-key" "$new_secret"
+    fi
+  else
+    local new_secret
+    new_secret=$(gum input --password --header "S3 secret key:")
+    [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
+    keychain_set "s3-secret-key" "$new_secret"
+  fi
+
+  log_info "Credentials collected (secret stored in vault)."
+  log_warn "Wizard incomplete — validation + write land in the next commit."
+  # TODO(Task 18): provisional write + round-trip test
 }
 
 cmd_storage() {
