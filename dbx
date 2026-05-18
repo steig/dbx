@@ -974,7 +974,42 @@ storage_add() {
   require_jq
   require_gum
   require_s3_client
-  die "storage add: not yet implemented"
+  # If storage is already configured, ask whether to replace.
+  if is_storage_configured; then
+    local existing
+    existing=$(get_config_value ".storage.s3.endpoint" 2>/dev/null || echo "AWS S3")
+    if ! gum confirm --default=false "Storage is already configured (${existing}). Replace?"; then
+      log_info "Keeping existing storage config."
+      return 0
+    fi
+  fi
+
+  # Provider branch
+  local provider endpoint region bucket prefix
+  provider=$(gum choose --header "Storage provider:" \
+    "AWS S3" "S3-compatible (MinIO, R2, B2, ...)")
+  [[ -z "$provider" ]] && { log_info "Aborted."; return 0; }
+
+  if [[ "$provider" == "AWS S3" ]]; then
+    endpoint=""   # signal "no endpoint" → aws CLI uses default
+    region=$(gum input --header "AWS region:" --placeholder "us-east-1")
+    [[ -z "$region" ]] && { log_info "Aborted."; return 0; }
+  else
+    endpoint=$(gum input --header "Endpoint URL:" --placeholder "https://minio.example.com")
+    [[ -z "$endpoint" ]] && { log_info "Aborted."; return 0; }
+    region=$(gum input --header "Region (optional, blank to skip):")
+    # blank region OK for S3-compatible
+  fi
+
+  bucket=$(gum input --header "Bucket:" --placeholder "backups")
+  [[ -z "$bucket" ]] && { log_info "Aborted."; return 0; }
+
+  prefix=$(gum input --header "Prefix / path (blank for bucket root):")
+  # blank prefix OK
+
+  log_info "Collected: provider=$provider bucket=$bucket prefix='${prefix}' region='${region}' endpoint='${endpoint}'"
+  log_warn "Wizard incomplete — credentials + validation land in follow-up commits."
+  # TODO(Task 17): credentials step
 }
 
 cmd_storage() {
