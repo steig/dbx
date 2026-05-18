@@ -609,13 +609,13 @@ Replace the network-step `log_info`/`log_warn`/TODO trailer with:
       local new_pass
       new_pass=$(gum input --password --header "New password for '$alias':")
       [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
-      printf '%s' "$new_pass" | keychain_set "$alias"
+      keychain_set "$alias" "$new_pass"
     fi
   else
     local new_pass
     new_pass=$(gum input --password --header "Password for '$alias':")
     [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
-    printf '%s' "$new_pass" | keychain_set "$alias"
+    keychain_set "$alias" "$new_pass"
   fi
 
   log_info "Credentials stored."
@@ -814,7 +814,7 @@ In `dbx`, replace the entire `log_step "Writing provisional host block..."` bloc
         local new_pass
         new_pass=$(gum input --password --header "New password for '$alias':")
         [[ -z "$new_pass" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
-        printf '%s' "$new_pass" | keychain_set "$alias"
+        keychain_set "$alias" "$new_pass"
         continue
         ;;
       "Re-enter host fields and retry")
@@ -1653,13 +1653,13 @@ Replace the trailing `log_info "Collected: ..."` / `log_warn` / TODO from Task 1
       local new_secret
       new_secret=$(gum input --password --header "New S3 secret key:")
       [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
-      printf '%s' "$new_secret" | keychain_set "s3-secret-key"
+      keychain_set "s3-secret-key" "$new_secret"
     fi
   else
     local new_secret
     new_secret=$(gum input --password --header "S3 secret key:")
     [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
-    printf '%s' "$new_secret" | keychain_set "s3-secret-key"
+    keychain_set "s3-secret-key" "$new_secret"
   fi
 
   log_info "Credentials collected (secret stored in vault)."
@@ -1754,7 +1754,7 @@ Replace the `log_info "Credentials collected..."` / `log_warn` / TODO from Task 
         local new_secret
         new_secret=$(gum input --password --header "S3 secret key:")
         [[ -z "$new_secret" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
-        printf '%s' "$new_secret" | keychain_set "s3-secret-key"
+        keychain_set "s3-secret-key" "$new_secret"
         continue
         ;;
       "Re-enter all storage fields and retry")
