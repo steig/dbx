@@ -1295,13 +1295,13 @@ host_add() {
       local new_pass
       new_pass=$(gum input --password --header "New password for '$alias':")
       [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
-      printf '%s' "$new_pass" | keychain_set "$alias"
+      keychain_set "$alias" "$new_pass"
     fi
   else
     local new_pass
     new_pass=$(gum input --password --header "Password for '$alias':")
     [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
-    printf '%s' "$new_pass" | keychain_set "$alias"
+    keychain_set "$alias" "$new_pass"
   fi
 
   log_info "Credentials stored."
@@ -1333,7 +1333,7 @@ host_add() {
         local new_pass
         new_pass=$(gum input --password --header "New password for '$alias':")
         [[ -z "$new_pass" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
-        printf '%s' "$new_pass" | keychain_set "$alias"
+        keychain_set "$alias" "$new_pass"
         continue
         ;;
       "Re-enter host fields and retry")
