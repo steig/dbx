@@ -108,3 +108,30 @@ run_wizard() {
   [[ "$output" =~ "already exists" ]]
   [[ "$output" =~ "Aborted" ]]
 }
+
+@test "host add: auto-upload prompt when storage already configured" {
+  # Pre-populate storage
+  jq '.storage = {type: "s3", s3: {endpoint: "http://127.0.0.1:9100", bucket: "x", access_key: "k", prefix: ""}}' \
+    "$DBX_CONFIG_DIR/config.json" > "$DBX_CONFIG_DIR/c" \
+    && mv "$DBX_CONFIG_DIR/c" "$DBX_CONFIG_DIR/config.json"
+
+  docker exec postgres-dbx createdb -U postgres chaindb1 >/dev/null 2>&1 || true
+  run run_wizard \
+    "chainalias1" \
+    "postgres" \
+    "postgres" \
+    "Direct connection" \
+    "127.0.0.1" \
+    "5432" \
+    "devpassword" \
+    "chaindb1" \
+    "" \
+    "y"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "auto-upload enabled for chainalias1" ]]
+
+  result=$(jq -r '.hosts.chainalias1.auto_upload' "$DBX_CONFIG_DIR/config.json")
+  [ "$result" = "true" ]
+
+  docker exec postgres-dbx dropdb -U postgres chaindb1 >/dev/null 2>&1 || true
+}

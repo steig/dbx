@@ -1584,6 +1584,26 @@ host_add() {
     log_info "  Network:   ssh tunnel via $tunnel_jump to $tunnel_target:$tunnel_port"
   fi
   log_info "  Databases: ${db_count:-0}"
+
+  # Storage chain (conditional). See spec: "Step 7 — Storage chain".
+  if is_storage_configured; then
+    if gum confirm --default=false "Enable auto-upload to remote storage for '$alias' backups?"; then
+      local tmp; tmp=$(mktemp)
+      jq --arg a "$alias" '.hosts[$a].auto_upload = true' \
+        "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      secure_file "$CONFIG_FILE"
+      log_info "  Storage:   auto-upload enabled for $alias"
+    else
+      log_info "  Storage:   configured globally (auto-upload off for $alias)"
+    fi
+  else
+    if gum confirm --default=true "Configure remote storage for these backups now?"; then
+      storage_add
+    else
+      log_info "  Storage:   not configured (skipped). Set up later with: dbx storage add"
+    fi
+  fi
+
   log_info "Try: dbx backup $alias"
 }
 
