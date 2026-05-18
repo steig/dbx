@@ -186,8 +186,8 @@ get_definer_handling() {
 # alphanumerics / underscore / dash. Keeps the alias safe to pass through
 # `dbx test "$alias"`, jq paths, vault keys, etc. without quoting hazards.
 host_alias_valid() {
-  local alias="${1:-}"
-  [[ "$alias" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]
+  local name="${1:-}"
+  [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]
 }
 
 # ============================================================================

@@ -10,6 +10,11 @@ setup() { setup_dbx_env; source_dbx_libs; }
   host_alias_valid "a"
 }
 
+@test "host_alias_valid: accepts trailing dash or underscore (documenting intent)" {
+  host_alias_valid "prod-"
+  host_alias_valid "prod_"
+}
+
 @test "host_alias_valid: rejects empty string" {
   run host_alias_valid ""
   [ "$status" -ne 0 ]
