@@ -83,3 +83,18 @@ stub_storage_ok() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "delete failed" ]]
 }
+
+@test "dbx storage add errors with not-yet-implemented (placeholder)" {
+  # Gum is required by storage_add, so skip if not installed
+  command -v gum >/dev/null 2>&1 || skip "gum not installed"
+  echo '{"storage": {}}' > "$CONFIG_FILE"
+  run "$DBX_BIN" storage add
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not yet implemented" ]]
+}
+
+@test "dbx help mentions storage add" {
+  run "$DBX_BIN" help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "storage add" ]]
+}

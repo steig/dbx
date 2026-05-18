@@ -969,6 +969,14 @@ cmd_schedule() {
   esac
 }
 
+storage_add() {
+  require_config
+  require_jq
+  require_gum
+  require_s3_client
+  die "storage add: not yet implemented"
+}
+
 cmd_storage() {
   local action="${1:-info}"
   shift || true
@@ -1026,12 +1034,16 @@ cmd_storage() {
       esac
       ;;
 
+    add)
+      storage_add "$@"
+      ;;
+
     info|"")
       storage_info
       ;;
 
     *)
-      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info)"
+      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info, add)"
       ;;
   esac
 }
@@ -1483,6 +1495,7 @@ ${BOLD}CREDENTIAL & ENCRYPTION:${NC}
 ${BOLD}SCHEDULING & STORAGE:${NC}
   schedule add|remove|list     Manage scheduled backups (launchd/systemd)
   storage upload|download|sync S3/MinIO cloud storage
+  storage add                  Interactively configure remote storage (S3/MinIO) + live test
   storage info                 Show storage configuration
   config init|edit|show|validate  Manage configuration
 
