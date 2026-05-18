@@ -498,6 +498,63 @@ storage_sync_download() {
   log_success "Synced backups from remote storage"
 }
 
+# End-to-end validation of the configured S3 storage. Uploads a 1-byte
+# probe file to .dbx-test/<timestamp>, lists the prefix to confirm,
+# downloads it and checks byte-identity, then deletes it. Returns 0
+# only if all four steps succeed; returns 1 with the failing step
+# logged. Side effects on the bucket are cleaned up unless delete fails.
+storage_test_roundtrip() {
+  is_storage_configured || { log_error "storage not configured"; return 1; }
+
+  local ts probe_src probe_local probe_remote
+  ts=$(date +%s)
+  probe_src=$(mktemp)
+  printf '.' > "$probe_src"   # 1-byte payload
+  probe_remote=".dbx-test/probe-${ts}"
+  probe_local=$(mktemp)
+
+  log_info "storage test: upload"
+  if ! storage_upload "$probe_src" "$probe_remote" >/dev/null 2>&1; then
+    log_error "storage test: upload failed"
+    rm -f "$probe_src" "$probe_local"
+    return 1
+  fi
+
+  log_info "storage test: list"
+  if ! storage_list ".dbx-test" 2>/dev/null | grep -q "probe-${ts}"; then
+    log_error "storage test: list did not contain the uploaded probe"
+    storage_delete "$probe_remote" >/dev/null 2>&1 || true
+    rm -f "$probe_src" "$probe_local"
+    return 1
+  fi
+
+  log_info "storage test: download"
+  if ! storage_download "$probe_remote" "$probe_local" >/dev/null 2>&1; then
+    log_error "storage test: download failed"
+    storage_delete "$probe_remote" >/dev/null 2>&1 || true
+    rm -f "$probe_src" "$probe_local"
+    return 1
+  fi
+
+  if ! cmp -s "$probe_src" "$probe_local"; then
+    log_error "storage test: downloaded bytes mismatch original"
+    storage_delete "$probe_remote" >/dev/null 2>&1 || true
+    rm -f "$probe_src" "$probe_local"
+    return 1
+  fi
+
+  log_info "storage test: delete"
+  if ! storage_delete "$probe_remote" >/dev/null 2>&1; then
+    log_error "storage test: delete failed (probe left in bucket)"
+    rm -f "$probe_src" "$probe_local"
+    return 1
+  fi
+
+  rm -f "$probe_src" "$probe_local"
+  log_success "storage test: round-trip OK"
+  return 0
+}
+
 # ============================================================================
 # Storage Info
 # ============================================================================
