@@ -1106,8 +1106,16 @@ storage_add() {
     esac
   done
 
-  log_warn "Wizard incomplete — summary lands in the next commit."
-  # TODO(Task 19): summary
+  echo
+  log_success "Remote storage configured."
+  if [[ "$provider" == "AWS S3" ]]; then
+    log_info "  Provider:  AWS S3 (region: $region)"
+  else
+    log_info "  Provider:  S3-compatible ($endpoint)"
+  fi
+  log_info "  Bucket:    $bucket"
+  log_info "  Prefix:    ${prefix:-(root)}"
+  log_info "Try: dbx storage list   (after your first backup uploads)"
 }
 
 cmd_storage() {
