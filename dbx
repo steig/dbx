@@ -1250,9 +1250,32 @@ host_add() {
     [[ -z "$tunnel_port" ]] && { log_info "Aborted."; return 0; }
   fi
 
-  log_info "Network collected: mode=$network_mode"
-  log_warn "Wizard incomplete — credentials/validation land in follow-up commits."
-  # TODO(Task 7): continue into credentials step.
+  # Credentials. keychain_set persists via the active backend (Keychain on
+  # macOS, pass on Linux, age fallback) so the password never lands in
+  # config.json.
+  local existing_pass
+  existing_pass=$(get_password "$alias" 2>/dev/null || true)
+  if [[ -n "$existing_pass" ]]; then
+    local creds_choice
+    creds_choice=$(gum choose --header "Vault already has a password for '$alias'." \
+                              "Use existing" "Replace")
+    [[ -z "$creds_choice" ]] && { log_info "Aborted."; return 0; }
+    if [[ "$creds_choice" == "Replace" ]]; then
+      local new_pass
+      new_pass=$(gum input --password --header "New password for '$alias':")
+      [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
+      printf '%s' "$new_pass" | keychain_set "$alias"
+    fi
+  else
+    local new_pass
+    new_pass=$(gum input --password --header "Password for '$alias':")
+    [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
+    printf '%s' "$new_pass" | keychain_set "$alias"
+  fi
+
+  log_info "Credentials stored."
+  log_warn "Wizard incomplete — validation lands in the next commit."
+  # TODO(Task 8): continue into provisional write + cmd_test.
 }
 
 cmd_host() {
