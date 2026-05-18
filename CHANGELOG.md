@@ -4,6 +4,19 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- `dbx host add` — interactive wizard for adding a backup host. Prompts
+  for connection details, validates against the live database, lets you
+  pick which databases to back up, and chains into storage setup if it
+  isn't already configured.
+- `dbx storage add` — interactive wizard for configuring S3 /
+  S3-compatible remote storage. Validates the config with a real
+  upload-list-download-delete round-trip before committing — catches the
+  read-but-no-write IAM case that a plain credentials check would miss.
+- TUI's **Config → Add host** menu now drives the same `dbx host add`
+  wizard.
+
 ## [0.8.0] - 2026-05-17
 
 Two-feature minor release: version-aware Docker images for backup and restore (#28 / PR #29), and a fix for `dbx clean --older-than` being a no-op against the default `--keep` (#22 / PR #30).

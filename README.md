@@ -203,6 +203,37 @@ Config lives at `~/.config/dbx/config.json`. Minimal example:
 Validate after edits with `dbx config validate`.
 </details>
 
+### Adding a host
+
+```bash
+dbx host add
+```
+
+Interactive wizard that walks through alias → database type → user →
+network (direct or SSH tunnel) → credentials → live connection test →
+pick databases → per-database options. On test failure you can re-enter
+credentials, re-enter host fields, save anyway, or abort (which rolls
+back the config and vault). If remote storage isn't configured yet, the
+wizard offers to set that up too; if it is, it offers to flip
+auto-upload on for the new host.
+
+Requires `gum`. The same flow runs from the TUI under
+**Config → Add host**.
+
+### Adding remote storage
+
+```bash
+dbx storage add
+```
+
+Interactive wizard for S3 / S3-compatible remote storage (MinIO, R2,
+Backblaze B2, etc.). Collects provider, endpoint, bucket, prefix, and
+credentials, then proves the config works with an upload → list →
+download → delete round-trip against the configured bucket. The
+secret key lives in the vault, never plaintext in `config.json`.
+Re-running the wizard with storage already configured asks before
+replacing.
+
 ## Encryption
 
 Two backends. **age** is the recommended default.

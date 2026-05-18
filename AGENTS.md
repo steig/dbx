@@ -7,7 +7,7 @@ encryption (age/GPG), S3 storage, scheduled backups, and a TUI mode.
 ## Project Structure
 
 ```
-dbx                    # Main entrypoint script (~1900 lines)
+dbx                    # Main entrypoint script (~2400 lines), houses cmd_* dispatchers (config, vault, schedule, storage, host)
 lib/
   core.sh              # Config, logging, vault, crypto, verification, utilities
   tunnel.sh            # SSH tunnel creation/cleanup
