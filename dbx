@@ -1224,9 +1224,35 @@ host_add() {
   new_user=$(gum input --header "Database user:" --placeholder "postgres")
   [[ -z "$new_user" ]] && { log_info "Aborted."; return 0; }
 
-  log_info "Identity collected: alias=$alias type=$new_type user=$new_user"
-  log_warn "Wizard incomplete — network/credentials/validation land in follow-up commits."
-  # TODO(Task 6): continue into network step.
+  local network_mode
+  network_mode=$(gum choose --header "How does dbx reach this database?" \
+    "Direct connection" "SSH tunnel (jump host)")
+  [[ -z "$network_mode" ]] && { log_info "Aborted."; return 0; }
+
+  local default_port direct_host direct_port
+  local tunnel_jump tunnel_target tunnel_port
+  default_port=$([[ "$new_type" == "postgres" ]] && echo "5432" || echo "3306")
+
+  if [[ "$network_mode" == "Direct connection" ]]; then
+    direct_host=$(gum input --header "Host address:" --value "localhost")
+    [[ -z "$direct_host" ]] && { log_info "Aborted."; return 0; }
+    direct_port=$(gum input --header "Port:" --value "$default_port")
+    [[ -z "$direct_port" ]] && { log_info "Aborted."; return 0; }
+  else
+    tunnel_jump=$(gum input --header "SSH jump host (from your ~/.ssh/config):" \
+                            --placeholder "bastion")
+    [[ -z "$tunnel_jump" ]] && { log_info "Aborted."; return 0; }
+    tunnel_target=$(gum input --header "Database hostname (as seen from the jump host):" \
+                              --placeholder "db.internal")
+    [[ -z "$tunnel_target" ]] && { log_info "Aborted."; return 0; }
+    tunnel_port=$(gum input --header "Database port (on the jump-side network):" \
+                            --value "$default_port")
+    [[ -z "$tunnel_port" ]] && { log_info "Aborted."; return 0; }
+  fi
+
+  log_info "Network collected: mode=$network_mode"
+  log_warn "Wizard incomplete — credentials/validation land in follow-up commits."
+  # TODO(Task 7): continue into credentials step.
 }
 
 cmd_host() {
