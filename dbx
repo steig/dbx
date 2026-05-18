@@ -1013,7 +1013,10 @@ storage_add() {
   [[ -z "$provider" ]] && { log_info "Aborted."; return 0; }
 
   if [[ "$provider" == "AWS S3" ]]; then
-    endpoint=""   # signal "no endpoint" → aws CLI uses default
+    # Canonical AWS endpoint. mc requires a non-empty endpoint; aws_get_endpoint_arg
+    # (lib/storage.sh) skips --endpoint-url when it sees exactly this value, so
+    # the aws path still uses its built-in regional resolution.
+    endpoint="https://s3.amazonaws.com"
     region=$(gum input --header "AWS region:" --placeholder "us-east-1")
     [[ -z "$region" ]] && { log_info "Aborted."; return 0; }
   else
@@ -1085,7 +1088,7 @@ storage_add() {
         # Re-run provider branch with previous values as defaults.
         provider=$(gum choose --header "Storage provider:" "AWS S3" "S3-compatible (MinIO, R2, B2, ...)")
         if [[ "$provider" == "AWS S3" ]]; then
-          endpoint=""
+          endpoint="https://s3.amazonaws.com"
           region=$(gum input --header "AWS region:" --value "${region:-us-east-1}")
         else
           endpoint=$(gum input --header "Endpoint URL:" --value "${endpoint:-}")
