@@ -1306,22 +1306,64 @@ host_add() {
 
   log_info "Credentials stored."
 
-  log_step "Writing provisional host block and validating..."
-  if [[ "$network_mode" == "Direct connection" ]]; then
-    host_write_block "$alias" "$new_type" "$new_user" direct "$direct_host" "$direct_port"
-  else
-    host_write_block "$alias" "$new_type" "$new_user" tunnel \
-      "$tunnel_jump" "$tunnel_target" "$tunnel_port"
-  fi
+  while :; do
+    log_step "Writing provisional host block and validating..."
+    if [[ "$network_mode" == "Direct connection" ]]; then
+      host_write_block "$alias" "$new_type" "$new_user" direct "$direct_host" "$direct_port"
+    else
+      host_write_block "$alias" "$new_type" "$new_user" tunnel \
+        "$tunnel_jump" "$tunnel_target" "$tunnel_port"
+    fi
 
-  if cmd_test "$alias"; then
-    log_success "Connection validated."
-  else
+    if cmd_test "$alias"; then
+      log_success "Connection validated."
+      break
+    fi
+
     log_error "Connection validation failed."
-    log_warn "Wizard incomplete — retry/abort flow lands in the next commit."
-    # TODO(Task 9): retry loop here.
-    return 1
-  fi
+    local recover
+    recover=$(gum choose --header "What now?" \
+      "Re-enter credentials and retry" \
+      "Re-enter host fields and retry" \
+      "Save anyway (broken host kept in config)" \
+      "Abort and roll back")
+
+    case "$recover" in
+      "Re-enter credentials and retry")
+        local new_pass
+        new_pass=$(gum input --password --header "New password for '$alias':")
+        [[ -z "$new_pass" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
+        printf '%s' "$new_pass" | keychain_set "$alias"
+        continue
+        ;;
+      "Re-enter host fields and retry")
+        # Re-collect network branch only; identity stays.
+        network_mode=$(gum choose --header "How does dbx reach this database?" \
+          "Direct connection" "SSH tunnel (jump host)")
+        [[ -z "$network_mode" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
+        if [[ "$network_mode" == "Direct connection" ]]; then
+          direct_host=$(gum input --header "Host address:" --value "${direct_host:-localhost}")
+          direct_port=$(gum input --header "Port:" --value "${direct_port:-$default_port}")
+        else
+          tunnel_jump=$(gum input --header "SSH jump host:" --value "${tunnel_jump:-}")
+          tunnel_target=$(gum input --header "Database hostname:" --value "${tunnel_target:-}")
+          tunnel_port=$(gum input --header "Database port:" --value "${tunnel_port:-$default_port}")
+        fi
+        continue
+        ;;
+      "Save anyway (broken host kept in config)")
+        log_warn "Host '$alias' saved with failing connection test. Fix it with: dbx config edit"
+        return 0
+        ;;
+      "Abort and roll back"|"")
+        log_info "Rolling back..."
+        host_delete_block "$alias"
+        keychain_delete "$alias" 2>/dev/null || true
+        log_info "Rolled back. Config and vault unchanged."
+        return 1
+        ;;
+    esac
+  done
 
   log_warn "Wizard incomplete — database picker lands in the next commit."
   # TODO(Task 10): continue into database picker.
