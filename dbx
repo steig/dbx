@@ -969,6 +969,25 @@ cmd_schedule() {
   esac
 }
 
+# Atomically write the .storage.s3 block to $CONFIG_FILE.
+# Args: provider ("AWS S3"|"S3-compatible"), endpoint, region, bucket, prefix, access_key
+storage_write_block() {
+  local provider="$1" endpoint="$2" region="$3" bucket="$4" prefix="$5" access_key="$6"
+  local tmp; tmp=$(mktemp)
+  jq --arg ep "$endpoint" --arg rg "$region" --arg bk "$bucket" \
+     --arg px "$prefix" --arg ak "$access_key" \
+     '.storage = {type: "s3", s3: ({endpoint: $ep, region: $rg, bucket: $bk, prefix: $px, access_key: $ak} | with_entries(select(.value != "")))}' \
+     "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
+# Delete the .storage block. Used by the rollback path.
+storage_delete_block() {
+  local tmp; tmp=$(mktemp)
+  jq 'del(.storage)' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
 storage_add() {
   require_config
   require_jq
@@ -1032,9 +1051,63 @@ storage_add() {
     keychain_set "s3-secret-key" "$new_secret"
   fi
 
-  log_info "Credentials collected (secret stored in vault)."
-  log_warn "Wizard incomplete — validation + write land in the next commit."
-  # TODO(Task 18): provisional write + round-trip test
+  while :; do
+    log_step "Writing provisional storage config and running round-trip test..."
+    storage_write_block "$provider" "$endpoint" "$region" "$bucket" "$prefix" "$access_key"
+
+    if storage_test_roundtrip; then
+      log_success "Storage validated."
+      break
+    fi
+
+    log_error "Storage validation failed."
+    local recover
+    recover=$(gum choose --header "What now?" \
+      "Re-enter credentials and retry" \
+      "Re-enter all storage fields and retry" \
+      "Save anyway (broken storage kept in config)" \
+      "Abort and roll back")
+
+    case "$recover" in
+      "Re-enter credentials and retry")
+        access_key=$(gum input --header "Access key:" --value "$access_key")
+        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        local new_secret
+        new_secret=$(gum input --password --header "S3 secret key:")
+        [[ -z "$new_secret" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        keychain_set "s3-secret-key" "$new_secret"
+        continue
+        ;;
+      "Re-enter all storage fields and retry")
+        # Re-run provider branch with previous values as defaults.
+        provider=$(gum choose --header "Storage provider:" "AWS S3" "S3-compatible (MinIO, R2, B2, ...)")
+        if [[ "$provider" == "AWS S3" ]]; then
+          endpoint=""
+          region=$(gum input --header "AWS region:" --value "${region:-us-east-1}")
+        else
+          endpoint=$(gum input --header "Endpoint URL:" --value "${endpoint:-}")
+          region=$(gum input --header "Region (optional):" --value "${region:-}")
+        fi
+        bucket=$(gum input --header "Bucket:" --value "${bucket:-}")
+        prefix=$(gum input --header "Prefix:" --value "${prefix:-}")
+        continue
+        ;;
+      "Save anyway (broken storage kept in config)")
+        log_warn "Storage saved with failing round-trip test. Fix it with: dbx config edit"
+        return 0
+        ;;
+      "Abort and roll back"|"")
+        log_info "Rolling back..."
+        storage_delete_block
+        keychain_delete "s3-secret-key" 2>/dev/null || true
+        log_info "Rolled back. Config and vault unchanged."
+        return 1
+        ;;
+    esac
+  done
+
+  log_warn "Wizard incomplete — summary lands in the next commit."
+  # TODO(Task 19): summary
 }
 
 cmd_storage() {
