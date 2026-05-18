@@ -1194,6 +1194,26 @@ cmd_update() {
   curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
 }
 
+cmd_host() {
+  local action="${1:-}"; shift || true
+  case "$action" in
+    add)
+      die "host add: not yet implemented"
+      ;;
+    remove|rm|delete|list|ls|test|edit)
+      die "host $action: not yet implemented"
+      ;;
+    ""|help)
+      die "Usage: dbx host <action>
+  Actions:
+    add        Interactively add a new backup host"
+      ;;
+    *)
+      die "Unknown host action: $action (use: add)"
+      ;;
+  esac
+}
+
 cmd_help() {
   cat <<EOF
 ${BOLD}dbx${NC} - Database backup and restore utility
@@ -1209,6 +1229,7 @@ ${BOLD}COMMANDS:${NC}
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker
   test <host>                  Test connection to a database host
+  host add                     Interactively add a host (alias, creds, validate, pick dbs)
   list [host] [database]       List available backups
   clean [--keep N] [--dry-run] [--older-than D]  Remove old backups
   update                       Re-run install.sh to upgrade to the latest release
@@ -1338,6 +1359,9 @@ main() {
       ;;
     test|ping)
       cmd_test "$@"
+      ;;
+    host)
+      cmd_host "$@"
       ;;
     analyze|stats)
       cmd_analyze "$@"

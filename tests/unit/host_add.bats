@@ -75,3 +75,33 @@ JSON
   run host_exists "alpha"
   [ "$status" -ne 0 ]
 }
+
+@test "dbx host (no action) prints usage" {
+  run "$DBX_BIN" host
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Usage: dbx host" ]]
+}
+
+@test "dbx host bogus errors with unknown-action" {
+  run "$DBX_BIN" host bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "Unknown host action: bogus" ]]
+}
+
+@test "dbx host remove errors with not-yet-implemented" {
+  run "$DBX_BIN" host remove
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not yet implemented" ]]
+}
+
+@test "dbx host add errors with not-yet-implemented (placeholder)" {
+  run "$DBX_BIN" host add
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "not yet implemented" ]]
+}
+
+@test "dbx help mentions host add" {
+  run "$DBX_BIN" help
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "host add" ]]
+}
