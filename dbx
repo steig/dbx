@@ -1365,8 +1365,23 @@ host_add() {
     esac
   done
 
-  log_warn "Wizard incomplete — database picker lands in the next commit."
-  # TODO(Task 10): continue into database picker.
+  local remote_dbs picked
+  remote_dbs=$(list_remote_databases "$alias" 2>/dev/null | grep -v '^$' || true)
+
+  if [[ -z "$remote_dbs" ]]; then
+    log_warn "No user databases found on '$alias' (or list query failed)."
+    log_info "Continuing with empty database list — add them later via the TUI."
+    picked=""
+  else
+    picked=$(echo "$remote_dbs" | gum choose --no-limit \
+      --header "Pick databases to back up (space to toggle, enter to confirm):")
+    if [[ -z "$picked" ]]; then
+      log_info "No databases selected."
+    fi
+  fi
+
+  log_warn "Wizard incomplete — per-database options + summary land in the next commit."
+  # TODO(Task 11): per-database exclude + definer; write databases block; print summary.
 }
 
 cmd_host() {
