@@ -1194,6 +1194,37 @@ cmd_update() {
   curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
 }
 
+# Write a host block to $CONFIG_FILE atomically via jq + temp-file.
+# Args: alias, type, user, then either:
+#   "direct" <host> <port>
+#   "tunnel" <jump_host> <target_host> <target_port>
+host_write_block() {
+  local alias="$1" type="$2" user="$3" mode="$4"
+  local tmp; tmp=$(mktemp)
+  if [[ "$mode" == "direct" ]]; then
+    local h="$5" p="$6"
+    jq --arg a "$alias" --arg t "$type" --arg u "$user" \
+       --arg h "$h" --argjson p "$p" \
+       '.hosts[$a] = {type: $t, host: $h, port: $p, user: $u, databases: {}}' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  else
+    local jh="$5" th="$6" tp="$7"
+    jq --arg a "$alias" --arg t "$type" --arg u "$user" \
+       --arg jh "$jh" --arg th "$th" --argjson tp "$tp" \
+       '.hosts[$a] = {type: $t, user: $u, ssh_tunnel: {jump_host: $jh, target_host: $th, target_port: $tp}, databases: {}}' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  fi
+  secure_file "$CONFIG_FILE"
+}
+
+# Delete a host block from $CONFIG_FILE. Used by the wizard's rollback path.
+host_delete_block() {
+  local alias="$1"
+  local tmp; tmp=$(mktemp)
+  jq --arg a "$alias" 'del(.hosts[$a])' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
 host_add() {
   require_config
   require_jq
@@ -1274,8 +1305,26 @@ host_add() {
   fi
 
   log_info "Credentials stored."
-  log_warn "Wizard incomplete — validation lands in the next commit."
-  # TODO(Task 8): continue into provisional write + cmd_test.
+
+  log_step "Writing provisional host block and validating..."
+  if [[ "$network_mode" == "Direct connection" ]]; then
+    host_write_block "$alias" "$new_type" "$new_user" direct "$direct_host" "$direct_port"
+  else
+    host_write_block "$alias" "$new_type" "$new_user" tunnel \
+      "$tunnel_jump" "$tunnel_target" "$tunnel_port"
+  fi
+
+  if cmd_test "$alias"; then
+    log_success "Connection validated."
+  else
+    log_error "Connection validation failed."
+    log_warn "Wizard incomplete — retry/abort flow lands in the next commit."
+    # TODO(Task 9): retry loop here.
+    return 1
+  fi
+
+  log_warn "Wizard incomplete — database picker lands in the next commit."
+  # TODO(Task 10): continue into database picker.
 }
 
 cmd_host() {
