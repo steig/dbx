@@ -279,19 +279,23 @@ cmd_restore() {
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
       docker start "$ho_container" >/dev/null || die "--hooks-only: failed to start container '$ho_container'"
     fi
+    # count(*) returns "0" or "1" — never empty — so we don't have to
+    # distinguish "DB missing" from "query produced no output for some
+    # reason". stderr is dropped on purpose; a non-zero exit code from
+    # docker/psql/mysql is the only failure signal we care about.
     case "$ho_dbtype" in
       postgres|postgresql)
         exists=$(docker exec "$ho_container" psql -U postgres -tA \
           -v dbname="$target_name" \
-          -c "SELECT 1 FROM pg_database WHERE datname = :'dbname'" 2>&1) \
-          || die "--hooks-only: could not query $ho_container: $exists"
+          -c "SELECT count(*) FROM pg_database WHERE datname = :'dbname'" 2>/dev/null) \
+          || die "--hooks-only: could not query $ho_container (psql failed)"
         [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
         ;;
       mysql|mariadb)
         local esc_name="${target_name//\'/\'\'}"
         exists=$(docker exec "$ho_container" mysql -u root -NB \
-          -e "SELECT 1 FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>&1) \
-          || die "--hooks-only: could not query $ho_container: $exists"
+          -e "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>/dev/null) \
+          || die "--hooks-only: could not query $ho_container (mysql failed)"
         [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
         ;;
     esac
