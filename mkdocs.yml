@@ -1,0 +1,84 @@
+site_name: dbx
+site_description: A pragmatic database backup and restore CLI for PostgreSQL and MySQL.
+site_url: https://steig.github.io/dbx/
+repo_url: https://github.com/steig/dbx
+repo_name: steig/dbx
+edit_uri: edit/main/docs/
+
+# Internal design plans live in docs/plans/ for working context but don't
+# belong on the public docs site.
+exclude_docs: |
+  plans/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - navigation.instant
+    - navigation.instant.progress
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install: install.md
+      - Quick start: quick-start.md
+      - Configuration: configuration.md
+      - Interactive wizards: wizards.md
+  - Using dbx:
+      - Backup: backup.md
+      - Restore: restore.md
+      - Post-restore hooks: post-restore-hooks.md
+      - Encryption: encryption.md
+      - Credential storage: credentials.md
+      - Cloud storage: storage.md
+      - Scheduled backups: scheduling.md
+      - Notifications: notifications.md
+  - Reference: reference.md
