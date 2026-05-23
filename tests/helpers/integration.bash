@@ -69,6 +69,37 @@ ensure_mysql_container() {
   fi
 }
 
+# Boot a minio-dbx container if it isn't running. Idempotent.
+# Exposes :9100 (S3 API) on 127.0.0.1. Root creds: minioadmin / minioadmin.
+ensure_minio_container() {
+  if ! docker ps --format '{{.Names}}' | grep -q '^minio-dbx$'; then
+    if docker ps -a --format '{{.Names}}' | grep -q '^minio-dbx$'; then
+      docker start minio-dbx >/dev/null
+    else
+      docker run -d --name minio-dbx \
+        -p 127.0.0.1:9100:9000 \
+        -e MINIO_ROOT_USER=minioadmin \
+        -e MINIO_ROOT_PASSWORD=minioadmin \
+        minio/minio:latest server /data >/dev/null
+    fi
+    # Wait for ready
+    for _ in $(seq 1 30); do
+      curl -fsS http://127.0.0.1:9100/minio/health/live >/dev/null 2>&1 && return 0
+      sleep 1
+    done
+    echo "minio-dbx failed to become ready" >&2
+    return 1
+  fi
+}
+
+# Create a bucket on the local MinIO via mc, idempotently.
+ensure_minio_bucket() {
+  local bucket="$1"
+  command -v mc >/dev/null 2>&1 || skip "mc not installed"
+  mc alias set dbxtest http://127.0.0.1:9100 minioadmin minioadmin --api S3v4 >/dev/null 2>&1
+  mc mb --ignore-existing "dbxtest/$bucket" >/dev/null 2>&1
+}
+
 # Drop and recreate a postgres database with given seed SQL.
 seed_postgres_db() {
   local db="$1" sql="${2:-CREATE TABLE t(id int);INSERT INTO t VALUES(1),(2),(3);}"

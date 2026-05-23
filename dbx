@@ -167,10 +167,13 @@ cmd_backup() {
   completed_size=$(stat -f%z "$completed_file" 2>/dev/null || stat -c%s "$completed_file" 2>/dev/null || echo "0")
   notify_backup_success "$host" "$database" "$completed_file" "$completed_size"
 
-  # Upload to cloud storage if requested or configured
-  local auto_upload
+  # Upload to cloud storage if requested or configured. Per-host
+  # `.hosts[$host].auto_upload` overrides the global `.defaults.auto_upload`
+  # — both honor the explicit `--upload` flag.
+  local auto_upload host_auto_upload
   auto_upload=$(get_config_value ".defaults.auto_upload" 2>/dev/null || echo "")
-  if [[ "$upload" == "true" || "$auto_upload" == "true" ]]; then
+  host_auto_upload=$(get_config_value ".hosts[\"$host\"].auto_upload" 2>/dev/null || echo "")
+  if [[ "$upload" == "true" || "$auto_upload" == "true" || "$host_auto_upload" == "true" ]]; then
     if is_storage_configured; then
       storage_upload "$completed_file" "$host/$database/$(basename "$completed_file")"
     else
@@ -1027,6 +1030,163 @@ cmd_schedule() {
   esac
 }
 
+# Atomically write the .storage.s3 block to $CONFIG_FILE.
+# Args: provider ("AWS S3"|"S3-compatible"), endpoint, region, bucket, prefix, access_key
+storage_write_block() {
+  local provider="$1" endpoint="$2" region="$3" bucket="$4" prefix="$5" access_key="$6"
+  local tmp; tmp=$(mktemp)
+  jq --arg ep "$endpoint" --arg rg "$region" --arg bk "$bucket" \
+     --arg px "$prefix" --arg ak "$access_key" \
+     '.storage = {type: "s3", s3: ({endpoint: $ep, region: $rg, bucket: $bk, prefix: $px, access_key: $ak} | with_entries(select(.value != "")))}' \
+     "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
+# Delete the .storage block. Used by the rollback path.
+storage_delete_block() {
+  local tmp; tmp=$(mktemp)
+  jq 'del(.storage)' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
+storage_add() {
+  require_config
+  require_jq
+  require_gum
+  require_s3_client
+  # If storage is already configured, ask whether to replace.
+  if is_storage_configured; then
+    local existing
+    existing=$(get_config_value ".storage.s3.endpoint" 2>/dev/null || echo "AWS S3")
+    if ! gum confirm --default=false "Storage is already configured (${existing}). Replace?"; then
+      log_info "Keeping existing storage config."
+      return 0
+    fi
+  fi
+
+  # Provider branch
+  local provider endpoint region bucket prefix
+  provider=$(gum choose --header "Storage provider:" \
+    "AWS S3" "S3-compatible (MinIO, R2, B2, ...)")
+  [[ -z "$provider" ]] && { log_info "Aborted."; return 0; }
+
+  if [[ "$provider" == "AWS S3" ]]; then
+    # Canonical AWS endpoint. mc requires a non-empty endpoint; aws_get_endpoint_arg
+    # (lib/storage.sh) skips --endpoint-url when it sees exactly this value, so
+    # the aws path still uses its built-in regional resolution.
+    endpoint="https://s3.amazonaws.com"
+    region=$(gum input --header "AWS region:" --placeholder "us-east-1")
+    [[ -z "$region" ]] && { log_info "Aborted."; return 0; }
+  else
+    endpoint=$(gum input --header "Endpoint URL:" --placeholder "https://minio.example.com")
+    [[ -z "$endpoint" ]] && { log_info "Aborted."; return 0; }
+    region=$(gum input --header "Region (optional, blank to skip):")
+    # blank region OK for S3-compatible
+  fi
+
+  bucket=$(gum input --header "Bucket:" --placeholder "backups")
+  [[ -z "$bucket" ]] && { log_info "Aborted."; return 0; }
+
+  prefix=$(gum input --header "Prefix / path (blank for bucket root):")
+  # blank prefix OK
+
+  local access_key
+  access_key=$(gum input --header "Access key:" --placeholder "AKIA…")
+  [[ -z "$access_key" ]] && { log_info "Aborted."; return 0; }
+
+  # Vault may already contain a secret from a prior run.
+  local existing_secret
+  existing_secret=$(keychain_get "s3-secret-key" 2>/dev/null || true)
+  if [[ -n "$existing_secret" ]]; then
+    local secret_choice
+    secret_choice=$(gum choose --header "Vault already has an S3 secret key." \
+                               "Use existing" "Replace")
+    [[ -z "$secret_choice" ]] && { log_info "Aborted."; return 0; }
+    if [[ "$secret_choice" == "Replace" ]]; then
+      local new_secret
+      new_secret=$(gum input --password --header "New S3 secret key:")
+      [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
+      keychain_set "s3-secret-key" "$new_secret"
+    fi
+  else
+    local new_secret
+    new_secret=$(gum input --password --header "S3 secret key:")
+    [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
+    keychain_set "s3-secret-key" "$new_secret"
+  fi
+
+  while :; do
+    log_step "Writing provisional storage config and running round-trip test..."
+    storage_write_block "$provider" "$endpoint" "$region" "$bucket" "$prefix" "$access_key"
+
+    if storage_test_roundtrip; then
+      log_success "Storage validated."
+      break
+    fi
+
+    log_error "Storage validation failed."
+    local recover
+    recover=$(gum choose --header "What now?" \
+      "Re-enter credentials and retry" \
+      "Re-enter all storage fields and retry" \
+      "Save anyway (broken storage kept in config)" \
+      "Abort and roll back")
+
+    case "$recover" in
+      "Re-enter credentials and retry")
+        access_key=$(gum input --header "Access key:" --value "$access_key")
+        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        local new_secret
+        new_secret=$(gum input --password --header "S3 secret key:")
+        [[ -z "$new_secret" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        keychain_set "s3-secret-key" "$new_secret"
+        continue
+        ;;
+      "Re-enter all storage fields and retry")
+        # Re-run provider branch with previous values as defaults.
+        provider=$(gum choose --header "Storage provider:" "AWS S3" "S3-compatible (MinIO, R2, B2, ...)")
+        if [[ "$provider" == "AWS S3" ]]; then
+          endpoint="https://s3.amazonaws.com"
+          region=$(gum input --header "AWS region:" --value "${region:-us-east-1}")
+        else
+          endpoint=$(gum input --header "Endpoint URL:" --value "${endpoint:-}")
+          region=$(gum input --header "Region (optional):" --value "${region:-}")
+        fi
+        bucket=$(gum input --header "Bucket:" --value "${bucket:-}")
+        prefix=$(gum input --header "Prefix:" --value "${prefix:-}")
+        # Access key is a non-secret "field" (lives plaintext in config), so
+        # users picking "all storage fields" reasonably expect to re-enter it.
+        # Secret key stays in the vault — use "Re-enter credentials" for that.
+        access_key=$(gum input --header "Access key:" --value "${access_key:-}")
+        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        continue
+        ;;
+      "Save anyway (broken storage kept in config)")
+        log_warn "Storage saved with failing round-trip test. Fix it with: dbx config edit"
+        return 0
+        ;;
+      "Abort and roll back"|"")
+        log_info "Rolling back..."
+        storage_delete_block
+        keychain_delete "s3-secret-key" 2>/dev/null || true
+        log_info "Rolled back. Config and vault unchanged."
+        return 1
+        ;;
+    esac
+  done
+
+  echo
+  log_success "Remote storage configured."
+  if [[ "$provider" == "AWS S3" ]]; then
+    log_info "  Provider:  AWS S3 (region: $region)"
+  else
+    log_info "  Provider:  S3-compatible ($endpoint)"
+  fi
+  log_info "  Bucket:    $bucket"
+  log_info "  Prefix:    ${prefix:-(root)}"
+  log_info "Try: dbx storage list   (after your first backup uploads)"
+}
+
 cmd_storage() {
   local action="${1:-info}"
   shift || true
@@ -1084,12 +1244,16 @@ cmd_storage() {
       esac
       ;;
 
+    add)
+      storage_add "$@"
+      ;;
+
     info|"")
       storage_info
       ;;
 
     *)
-      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info)"
+      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info, add)"
       ;;
   esac
 }
@@ -1237,20 +1401,9 @@ cmd_test() {
 
   # Test 5: List available databases
   log_info "Available databases:"
-  case "$db_type" in
-    postgres|postgresql)
-      docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-        psql -h "$db_host" -p "$db_port" -U "$db_user" -t -A -c \
-        "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname" 2>/dev/null | \
-        while read -r dbname; do echo "  - $dbname"; done
-      ;;
-    mysql|mariadb)
-      docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
-        mysql -h "$db_host" -P "$db_port" -u "$db_user" -N -e "SHOW DATABASES" 2>/dev/null | \
-        grep -v -E "^(information_schema|performance_schema|mysql|sys)$" | \
-        while read -r dbname; do echo "  - $dbname"; done
-      ;;
-  esac
+  list_remote_databases "$host" 2>/dev/null | while read -r dbname; do
+    [[ -n "$dbname" ]] && echo "  - $dbname"
+  done
 
   echo ""
   log_success "All connection tests passed for: $host"
@@ -1261,6 +1414,303 @@ cmd_update() {
   log_step "Updating dbx..."
   log_info "Re-running install.sh from ${DBX_REPO_SLUG}@main"
   curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
+}
+
+# Prompt for a TCP port and validate it's numeric. Re-prompts on
+# non-numeric input. Empty input returns non-zero so callers can abort.
+# Args: $1 prompt header, $2 default value. Prints the validated port.
+host_prompt_port() {
+  local header="$1" default="$2" port
+  while :; do
+    port=$(gum input --header "$header" --value "$default")
+    [[ -z "$port" ]] && return 1
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      echo "$port"
+      return 0
+    fi
+    log_warn "Port must be a number (got: $port)"
+  done
+}
+
+# Write a host block to $CONFIG_FILE atomically via jq + temp-file.
+# Args: alias, type, user, then either:
+#   "direct" <host> <port>
+#   "tunnel" <jump_host> <target_host> <target_port>
+host_write_block() {
+  local alias="$1" type="$2" user="$3" mode="$4"
+  local tmp; tmp=$(mktemp)
+  if [[ "$mode" == "direct" ]]; then
+    local h="$5" p="$6"
+    jq --arg a "$alias" --arg t "$type" --arg u "$user" \
+       --arg h "$h" --argjson p "$p" \
+       '.hosts[$a] = {type: $t, host: $h, port: $p, user: $u, databases: {}}' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  else
+    local jh="$5" th="$6" tp="$7"
+    jq --arg a "$alias" --arg t "$type" --arg u "$user" \
+       --arg jh "$jh" --arg th "$th" --argjson tp "$tp" \
+       '.hosts[$a] = {type: $t, user: $u, ssh_tunnel: {jump_host: $jh, target_host: $th, target_port: $tp}, databases: {}}' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  fi
+  secure_file "$CONFIG_FILE"
+}
+
+# Delete a host block from $CONFIG_FILE. Used by the wizard's rollback path.
+host_delete_block() {
+  local alias="$1"
+  local tmp; tmp=$(mktemp)
+  jq --arg a "$alias" 'del(.hosts[$a])' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
+host_add() {
+  require_config
+  require_jq
+  require_docker
+  require_gum
+
+  local alias new_type new_user
+  while :; do
+    alias=$(gum input --header "Host alias:" --placeholder "production")
+    [[ -z "$alias" ]] && { log_info "Aborted."; return 0; }
+    if ! host_alias_valid "$alias"; then
+      log_warn "Alias must start with a letter or digit and use only letters, digits, '_', or '-'."
+      continue
+    fi
+    if host_exists "$alias"; then
+      local existing_type existing_user
+      existing_type=$(get_config_value ".hosts[\"$alias\"].type")
+      existing_user=$(get_config_value ".hosts[\"$alias\"].user")
+      log_warn "Host '$alias' already exists (type=$existing_type, user=$existing_user)."
+      continue
+    fi
+    break
+  done
+
+  new_type=$(gum choose --header "Database type:" "postgres" "mysql")
+  [[ -z "$new_type" ]] && { log_info "Aborted."; return 0; }
+
+  new_user=$(gum input --header "Database user:" --placeholder "postgres")
+  [[ -z "$new_user" ]] && { log_info "Aborted."; return 0; }
+
+  local network_mode
+  network_mode=$(gum choose --header "How does dbx reach this database?" \
+    "Direct connection" "SSH tunnel (jump host)")
+  [[ -z "$network_mode" ]] && { log_info "Aborted."; return 0; }
+
+  local default_port direct_host direct_port
+  local tunnel_jump tunnel_target tunnel_port
+  default_port=$([[ "$new_type" == "postgres" ]] && echo "5432" || echo "3306")
+
+  if [[ "$network_mode" == "Direct connection" ]]; then
+    direct_host=$(gum input --header "Host address:" --value "localhost")
+    [[ -z "$direct_host" ]] && { log_info "Aborted."; return 0; }
+    direct_port=$(host_prompt_port "Port:" "$default_port") \
+      || { log_info "Aborted."; return 0; }
+  else
+    tunnel_jump=$(gum input --header "SSH jump host (from your ~/.ssh/config):" \
+                            --placeholder "bastion")
+    [[ -z "$tunnel_jump" ]] && { log_info "Aborted."; return 0; }
+    tunnel_target=$(gum input --header "Database hostname (as seen from the jump host):" \
+                              --placeholder "db.internal")
+    [[ -z "$tunnel_target" ]] && { log_info "Aborted."; return 0; }
+    tunnel_port=$(host_prompt_port "Database port (on the jump-side network):" "$default_port") \
+      || { log_info "Aborted."; return 0; }
+  fi
+
+  # Credentials. keychain_set persists via the active backend (Keychain on
+  # macOS, pass on Linux, age fallback) so the password never lands in
+  # config.json.
+  local existing_pass
+  existing_pass=$(get_password "$alias" 2>/dev/null || true)
+  if [[ -n "$existing_pass" ]]; then
+    local creds_choice
+    creds_choice=$(gum choose --header "Vault already has a password for '$alias'." \
+                              "Use existing" "Replace")
+    [[ -z "$creds_choice" ]] && { log_info "Aborted."; return 0; }
+    if [[ "$creds_choice" == "Replace" ]]; then
+      local new_pass
+      new_pass=$(gum input --password --header "New password for '$alias':")
+      [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
+      keychain_set "$alias" "$new_pass"
+    fi
+  else
+    local new_pass
+    new_pass=$(gum input --password --header "Password for '$alias':")
+    [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
+    keychain_set "$alias" "$new_pass"
+  fi
+
+  log_info "Credentials stored."
+
+  while :; do
+    log_step "Writing provisional host block and validating..."
+    if [[ "$network_mode" == "Direct connection" ]]; then
+      host_write_block "$alias" "$new_type" "$new_user" direct "$direct_host" "$direct_port"
+    else
+      host_write_block "$alias" "$new_type" "$new_user" tunnel \
+        "$tunnel_jump" "$tunnel_target" "$tunnel_port"
+    fi
+
+    if cmd_test "$alias"; then
+      log_success "Connection validated."
+      break
+    fi
+
+    log_error "Connection validation failed."
+    local recover
+    recover=$(gum choose --header "What now?" \
+      "Re-enter credentials and retry" \
+      "Re-enter host fields and retry" \
+      "Save anyway (broken host kept in config)" \
+      "Abort and roll back")
+
+    case "$recover" in
+      "Re-enter credentials and retry")
+        local new_pass
+        new_pass=$(gum input --password --header "New password for '$alias':")
+        [[ -z "$new_pass" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
+        keychain_set "$alias" "$new_pass"
+        continue
+        ;;
+      "Re-enter host fields and retry")
+        # Re-collect network branch only; identity stays.
+        network_mode=$(gum choose --header "How does dbx reach this database?" \
+          "Direct connection" "SSH tunnel (jump host)")
+        [[ -z "$network_mode" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
+        if [[ "$network_mode" == "Direct connection" ]]; then
+          direct_host=$(gum input --header "Host address:" --value "${direct_host:-localhost}")
+          direct_port=$(host_prompt_port "Port:" "${direct_port:-$default_port}") \
+            || { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
+        else
+          tunnel_jump=$(gum input --header "SSH jump host:" --value "${tunnel_jump:-}")
+          tunnel_target=$(gum input --header "Database hostname:" --value "${tunnel_target:-}")
+          tunnel_port=$(host_prompt_port "Database port:" "${tunnel_port:-$default_port}") \
+            || { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
+        fi
+        continue
+        ;;
+      "Save anyway (broken host kept in config)")
+        log_warn "Host '$alias' saved with failing connection test. Fix it with: dbx config edit"
+        return 0
+        ;;
+      "Abort and roll back"|"")
+        log_info "Rolling back..."
+        host_delete_block "$alias"
+        keychain_delete "$alias" 2>/dev/null || true
+        log_info "Rolled back. Config and vault unchanged."
+        return 1
+        ;;
+    esac
+  done
+
+  local remote_dbs picked
+  remote_dbs=$(list_remote_databases "$alias" 2>/dev/null | grep -v '^$' || true)
+
+  if [[ -z "$remote_dbs" ]]; then
+    log_warn "No user databases found on '$alias' (or list query failed)."
+    log_info "Continuing with empty database list — add them later via the TUI."
+    picked=""
+  else
+    picked=$(echo "$remote_dbs" | gum choose --no-limit \
+      --header "Pick databases to back up (space to toggle, enter to confirm):")
+    if [[ -z "$picked" ]]; then
+      log_info "No databases selected."
+    fi
+  fi
+
+  # Per-database exclude tables.
+  if [[ -n "$picked" ]]; then
+    while IFS= read -r db; do
+      [[ -z "$db" ]] && continue
+      local excl
+      excl=$(gum input --header "Tables to exclude data from in '$db' (comma-separated, blank for none):")
+      local tmp; tmp=$(mktemp)
+      if [[ -n "$excl" ]]; then
+        local excl_json
+        excl_json=$(printf '%s' "$excl" | tr ',' '\n' \
+          | awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print }' \
+          | jq -R . | jq -s .)
+        jq --arg a "$alias" --arg d "$db" --argjson e "$excl_json" \
+           '.hosts[$a].databases[$d] = {exclude_data: $e}' \
+           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      else
+        jq --arg a "$alias" --arg d "$db" \
+           '.hosts[$a].databases[$d] = {}' \
+           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      fi
+      secure_file "$CONFIG_FILE"
+    done <<< "$picked"
+  fi
+
+  # MySQL-only: strip DEFINER clauses? Default yes.
+  if [[ "$new_type" == "mysql" ]]; then
+    local definer_value
+    if gum confirm --default=true "Strip DEFINER clauses from MySQL dumps?"; then
+      definer_value="strip"
+    else
+      definer_value="keep"
+    fi
+    local tmp; tmp=$(mktemp)
+    jq --arg a "$alias" --arg dh "$definer_value" \
+       '.hosts[$a].definer_handling = $dh' \
+       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+    secure_file "$CONFIG_FILE"
+  fi
+
+  # Summary.
+  local db_count
+  db_count=$(printf '%s' "$picked" | grep -c . || true)
+  echo
+  log_success "Host '$alias' added."
+  log_info "  Type:      $new_type"
+  if [[ "$network_mode" == "Direct connection" ]]; then
+    log_info "  Network:   direct ($direct_host:$direct_port)"
+  else
+    log_info "  Network:   ssh tunnel via $tunnel_jump to $tunnel_target:$tunnel_port"
+  fi
+  log_info "  Databases: ${db_count:-0}"
+
+  # Storage chain (conditional). See spec: "Step 7 — Storage chain".
+  if is_storage_configured; then
+    if gum confirm --default=false "Enable auto-upload to remote storage for '$alias' backups?"; then
+      local tmp; tmp=$(mktemp)
+      jq --arg a "$alias" '.hosts[$a].auto_upload = true' \
+        "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+      secure_file "$CONFIG_FILE"
+      log_info "  Storage:   auto-upload enabled for $alias"
+    else
+      log_info "  Storage:   configured globally (auto-upload off for $alias)"
+    fi
+  else
+    if gum confirm --default=true "Configure remote storage for these backups now?"; then
+      storage_add
+    else
+      log_info "  Storage:   not configured (skipped). Set up later with: dbx storage add"
+    fi
+  fi
+
+  log_info "Try: dbx backup $alias"
+}
+
+cmd_host() {
+  local action="${1:-}"; shift || true
+  case "$action" in
+    add)
+      host_add "$@"
+      ;;
+    remove|rm|delete|list|ls|test|edit)
+      die "host $action: not yet implemented"
+      ;;
+    ""|help)
+      die "Usage: dbx host <action>
+  Actions:
+    add        Interactively add a new backup host"
+      ;;
+    *)
+      die "Unknown host action: $action (use: add)"
+      ;;
+  esac
 }
 
 cmd_help() {
@@ -1280,6 +1730,7 @@ ${BOLD}COMMANDS:${NC}
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker
   test <host>                  Test connection to a database host
+  host add                     Interactively add a host (alias, creds, validate, pick dbs)
   list [host] [database]       List available backups
   clean [--keep N] [--dry-run] [--older-than D]  Remove old backups
   update                       Re-run install.sh to upgrade to the latest release
@@ -1293,6 +1744,7 @@ ${BOLD}CREDENTIAL & ENCRYPTION:${NC}
 ${BOLD}SCHEDULING & STORAGE:${NC}
   schedule add|remove|list     Manage scheduled backups (launchd/systemd)
   storage upload|download|sync S3/MinIO cloud storage
+  storage add                  Interactively configure remote storage (S3/MinIO) + live test
   storage info                 Show storage configuration
   config init|edit|show|validate  Manage configuration
 
@@ -1414,6 +1866,9 @@ main() {
       ;;
     test|ping)
       cmd_test "$@"
+      ;;
+    host)
+      cmd_host "$@"
       ;;
     analyze|stats)
       cmd_analyze "$@"
