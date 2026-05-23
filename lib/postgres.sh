@@ -190,9 +190,6 @@ pg_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
 
-  local start_time
-  start_time=$(date +%s)
-
   log_step "Restoring PostgreSQL backup to: $target_db"
 
   # Determine the right container image based on backup metadata. Legacy
@@ -290,13 +287,42 @@ pg_restore_backup() {
     docker exec "$POSTGRES_CONTAINER" rm -f /tmp/restore.dump
   fi
 
-  # Calculate duration and audit
-  local end_time duration
-  end_time=$(date +%s)
-  duration=$((end_time - start_time))
-  audit_restore "$backup_file" "$target_db" "success" "$duration"
-
+  # Audit is recorded by cmd_restore (after post-restore hooks complete) so we
+  # don't claim success before user-visible mutations have actually run.
   log_success "Restore complete: $target_db"
+}
+
+# ============================================================================
+# PostgreSQL: run a SQL stream against an existing database
+# ============================================================================
+
+# Pure helper: turn `key=value` args into a newline-separated list of psql
+# `-v key=value` flags. One flag (two args) per kv pair, in input order.
+# Entries without `=` are silently skipped. Output is printed one flag-arg
+# per line so callers can `read` into an array.
+pg_build_psql_var_flags() {
+  local kv
+  for kv in "$@"; do
+    [[ "$kv" == *=* ]] || continue
+    printf -- '-v\n%s\n' "$kv"
+  done
+}
+
+# Pipe SQL from stdin into psql against $target_db inside POSTGRES_CONTAINER.
+# Uses ON_ERROR_STOP=1 + -1 (single transaction): the whole stream commits
+# as one unit or rolls back on the first error.
+#
+# Trailing args are `key=value` pairs passed as `-v` flags to psql; reference
+# via :'key' / :"key" / :key in the SQL.
+pg_run_sql_stream() {
+  local target_db="$1"
+  shift
+  require_container "$POSTGRES_CONTAINER"
+  local -a var_flags=()
+  local line
+  while IFS= read -r line; do var_flags+=("$line"); done < <(pg_build_psql_var_flags "$@")
+  docker exec -i "$POSTGRES_CONTAINER" \
+    psql -U postgres -d "$target_db" -v ON_ERROR_STOP=1 -q -1 "${var_flags[@]+"${var_flags[@]}"}"
 }
 
 # ============================================================================

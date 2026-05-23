@@ -14,8 +14,13 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
   S3-compatible remote storage. Validates the config with a real
   upload-list-download-delete round-trip before committing — catches the
   read-but-no-write IAM case that a plain credentials check would miss.
-- TUI's **Config → Add host** menu now drives the same `dbx host add`
-  wizard.
+- **Post-restore hooks** on `dbx restore`: per-database (and inherited per-host) SQL run automatically after every restore, in single-transaction wraps with fail-fast semantics. Supports `.sql` files and inline `sql` entries; six interpolation variables (`target_db`, `source_host`, `source_db`, `backup_file`, `backup_timestamp`, `restored_at`). New flags: `--no-post-restore`, `--hooks-only --name <existing-db>`. `dbx config validate` checks hook paths and entry shapes.
+
+### Changed
+- `audit_restore` runs from `cmd_restore` after hooks complete, so the audit log no longer reports `success` for a restore whose post-restore hooks failed.
+
+### Removed
+- Experimental TUI (`dbx tui` command and `lib/tui.sh`) — incomplete, confused the surface area. The `dbx host add` / `dbx storage add` wizards (from PR #35) remain fully available as standalone CLI commands.
 
 ## [0.8.0] - 2026-05-17
 

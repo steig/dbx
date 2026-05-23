@@ -62,3 +62,67 @@ setup() {
   should_notify_on failure
   ! should_notify_on success
 }
+
+# ----------------------------------------------------------------------------
+# notify_restore_failure — convenience wrapper around notify()
+# ----------------------------------------------------------------------------
+
+@test "notify_restore_failure returns 0 silently when notifications disabled" {
+  write_config '{}'
+  run notify_restore_failure "/var/backups/db.sql.gz" "mydb" "boom"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "notify_restore_failure returns 0 silently when no backends configured and on=success" {
+  # enabled, but filter excludes failure events
+  write_config '{"notifications":{"enabled":true,"on":"success"}}'
+  run notify_restore_failure "/var/backups/db.sql.gz" "mydb" "boom"
+  [ "$status" -eq 0 ]
+}
+
+@test "notify_restore_failure command backend receives title, message, status" {
+  local sink="$BATS_TEST_TMPDIR/notify.out"
+  write_config "$(jq -n --arg sink "$sink" '{
+    notifications: {
+      enabled: true,
+      on: "failure",
+      backends: ["command"],
+      command: {
+        on_failure: ("printf \"%s|%s|%s\\n\" \"{title}\" \"{message}\" \"{status}\" >> " + $sink)
+      }
+    }
+  }')"
+
+  run notify_restore_failure "/var/backups/2026-05-23/payments.sql.gz" "payments" "permission denied"
+  [ "$status" -eq 0 ]
+  [ -f "$sink" ]
+
+  local line
+  line=$(cat "$sink")
+  [[ "$line" == *"dbx restore failed"* ]]
+  [[ "$line" == *"payments"* ]]
+  [[ "$line" == *"payments.sql.gz"* ]]
+  # full path should NOT leak — only basename
+  [[ "$line" != *"/var/backups/2026-05-23/"* ]]
+  [[ "$line" == *"permission denied"* ]]
+  [[ "$line" == *"|failure"* ]]
+}
+
+@test "notify_restore_failure uses 'Unknown error' default when error_msg omitted" {
+  local sink="$BATS_TEST_TMPDIR/notify.out"
+  write_config "$(jq -n --arg sink "$sink" '{
+    notifications: {
+      enabled: true,
+      on: "failure",
+      backends: ["command"],
+      command: {
+        on_failure: ("printf \"%s\\n\" \"{message}\" >> " + $sink)
+      }
+    }
+  }')"
+
+  run notify_restore_failure "/tmp/db.sql" "mydb"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$sink")" == *"Unknown error"* ]]
+}

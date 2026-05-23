@@ -2,7 +2,7 @@
 
 Database backup and restore CLI utility written entirely in Bash. Uses Docker
 for pg_dump/mysqldump (no local DB install needed). Supports SSH tunnels,
-encryption (age/GPG), S3 storage, scheduled backups, and a TUI mode.
+encryption (age/GPG), S3 storage, and scheduled backups.
 
 ## Project Structure
 
@@ -18,7 +18,6 @@ lib/
   schedule.sh          # Scheduled backups (launchd on macOS, systemd on Linux)
   storage.sh           # Cloud storage (S3/MinIO via mc or aws CLI)
   update.sh            # GitHub Releases API check + caching
-  tui.sh               # Interactive menu UI (gum-driven)
 install.sh             # Curl-based installer script
 tests/
   helpers/             # Shared bats helpers

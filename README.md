@@ -67,7 +67,6 @@ Once installed, `dbx update` upgrades in place when a new release is out.
 | `age` | Recommended modern backup encryption |
 | `gpg` | Alternative encryption + headless vault fallback |
 | `mc` or `aws` CLI | S3 / MinIO upload |
-| `gum` | Interactive TUI mode (`dbx tui`) |
 | `fzf` | Interactive backup picker for restore / verify |
 | `pv` | Progress bar during MySQL restore |
 
@@ -100,9 +99,8 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 
 | Command | Description |
 |---------|-------------|
-| `dbx tui` | Interactive menu mode (requires `gum`) |
 | `dbx backup [-v] [--upload] <host> [database]` | Back up one DB or every DB on a host |
-| `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download]` | Restore to a local container; `--from-remote` (or `s3://...`) pulls straight from cloud storage |
+| `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download] [--no-post-restore \| --hooks-only]` | Restore to a local container; `--from-remote` (or `s3://...`) pulls straight from cloud storage; `--no-post-restore` skips configured hooks; `--hooks-only --name X` re-runs hooks against an existing DB |
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
 | `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
 | `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
@@ -217,8 +215,7 @@ back the config and vault). If remote storage isn't configured yet, the
 wizard offers to set that up too; if it is, it offers to flip
 auto-upload on for the new host.
 
-Requires `gum`. The same flow runs from the TUI under
-**Config → Add host**.
+Requires `gum`.
 
 ### Adding remote storage
 
@@ -363,6 +360,42 @@ dbx restore --from-remote prod/db/db_20260510_120000.sql.zst.age --keep-download
 | `mysql-dbx` | `mysql:8.0` | 3306 |
 
 Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
+
+## Post-restore hooks
+
+Declare SQL to run after every restore — scrub PII, repoint webhooks, reset feature flags. Per database, optionally inherited per host:
+
+```jsonc
+{
+  "hosts": {
+    "production": {
+      "type": "postgres",
+      "post_restore": [
+        { "file": "hooks/scrub-pii.sql" }              // runs for every DB on production
+      ],
+      "databases": {
+        "myapp": {
+          "post_restore": [
+            { "sql": "UPDATE config SET base_url = 'http://localhost';" },
+            { "file": "hooks/disable-cron.sql" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+Each hook runs in its own transaction (psql `-1`; MySQL `START TRANSACTION; … COMMIT;`). The first failure aborts the restore and leaves the partial DB in place. Host hooks run before per-database hooks; file paths are absolute or relative to the config file. MySQL DDL implicitly commits — keep DDL hooks small.
+
+`dbx config validate` checks hook paths and entry shape before you ship.
+
+```bash
+dbx restore prod/myapp/latest --no-post-restore             # skip hooks once
+dbx restore prod/myapp/latest --hooks-only --name myapp_v1  # re-run hooks against an existing DB
+```
+
+Inside every hook, `target_db` is bound to the freshly-restored DB name — `:target_db` in PG, `@target_db` in MySQL. Additional vars (`source_host`, `source_db`, `backup_file`, `backup_timestamp`, `restored_at`) are also bound; useful for stamping provenance rows.
 
 ## Image Selection
 

@@ -39,6 +39,8 @@ source_dbx_libs() {
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/mysql.sh"
   # shellcheck source=/dev/null
+  source "$DBX_REPO_ROOT/lib/post_restore.sh"
+  # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/notify.sh"
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/schedule.sh"
@@ -46,8 +48,6 @@ source_dbx_libs() {
   source "$DBX_REPO_ROOT/lib/storage.sh"
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/update.sh"
-  # shellcheck source=/dev/null
-  source "$DBX_REPO_ROOT/lib/tui.sh"
 }
 
 # Write a config.json with the given content.

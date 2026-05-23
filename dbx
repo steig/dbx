@@ -38,11 +38,11 @@ source "$LIB_DIR/tunnel.sh"
 source "$LIB_DIR/encrypt.sh"
 source "$LIB_DIR/postgres.sh"
 source "$LIB_DIR/mysql.sh"
+source "$LIB_DIR/post_restore.sh"
 source "$LIB_DIR/notify.sh"
 source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/storage.sh"
 source "$LIB_DIR/update.sh"
-source "$LIB_DIR/tui.sh"
 
 # Install the EXIT/INT/TERM cleanup trap. Defined in core.sh but called
 # here so that sourcing libs in tests doesn't clobber the test runner's
@@ -187,6 +187,8 @@ cmd_restore() {
   local target_name=""
   local from_remote=""
   local keep_download=false
+  local skip_hooks=false
+  local hooks_only=false
 
   # Mixed flag/positional parse: `source` is the only positional and
   # may appear before or after flags (or be absent entirely when the
@@ -209,6 +211,14 @@ cmd_restore() {
         keep_download=true
         shift
         ;;
+      --no-post-restore)
+        skip_hooks=true
+        shift
+        ;;
+      --hooks-only)
+        hooks_only=true
+        shift
+        ;;
       --*|-*)
         die "Unknown option: $1"
         ;;
@@ -229,9 +239,78 @@ cmd_restore() {
     source=""
   fi
 
+  # Flag-combination guards.
+  if [[ "$hooks_only" == "true" && "$skip_hooks" == "true" ]]; then
+    die "--hooks-only and --no-post-restore are mutually exclusive"
+  fi
+  if [[ "$hooks_only" == "true" && -n "$from_remote" ]]; then
+    die "--hooks-only and --from-remote are mutually exclusive (no backup is fetched in hooks-only mode)"
+  fi
+
   require_config
   require_jq
   require_docker
+
+  # ---- --hooks-only: run only the configured hooks against an existing DB --
+  if [[ "$hooks_only" == "true" ]]; then
+    [[ -z "$target_name" ]] && die "--hooks-only requires --name <existing-db>"
+    [[ -z "$source" || "$source" != */* ]] && \
+      die "--hooks-only requires a <host>/<database> source path so dbx knows which hooks to run"
+
+    local ho_host ho_db ho_dbtype
+    ho_host=$(echo "$source" | cut -d'/' -f1)
+    ho_db=$(echo "$source" | cut -d'/' -f2)
+    [[ -z "$ho_host" || -z "$ho_db" ]] && \
+      die "--hooks-only: could not parse host/database from '$source'"
+
+    ho_dbtype=$(get_db_type "$ho_host")
+    [[ -z "$ho_dbtype" ]] && die "--hooks-only: host '$ho_host' not found in config (or missing 'type')"
+
+    # --hooks-only is a validation flow — never auto-provision a container.
+    local ho_container exists
+    case "$ho_dbtype" in
+      postgres|postgresql) ho_container="$POSTGRES_CONTAINER" ;;
+      mysql|mariadb)       ho_container="$MYSQL_CONTAINER" ;;
+      *) die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype" ;;
+    esac
+    if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
+      die "--hooks-only: container '$ho_container' does not exist. Run a real restore first to create it."
+    fi
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
+      docker start "$ho_container" >/dev/null || die "--hooks-only: failed to start container '$ho_container'"
+    fi
+    # count(*) returns "0" or "1" — never empty — so we don't have to
+    # distinguish "DB missing" from "query produced no output for some
+    # reason". stderr is dropped on purpose; a non-zero exit code from
+    # docker/psql/mysql is the only failure signal we care about.
+    # Use inline SQL with shell-side quote-doubling. We control $target_name
+    # (it comes from --name); psql `-v` substitution was unreliable across
+    # versions, so we just escape and interpolate directly.
+    local sq=\'
+    local esc_name="${target_name//$sq/$sq$sq}"
+    case "$ho_dbtype" in
+      postgres|postgresql)
+        exists=$(docker exec "$ho_container" psql -U postgres -tA \
+          -c "SELECT count(*) FROM pg_database WHERE datname = '$esc_name'" 2>/dev/null) \
+          || die "--hooks-only: could not query $ho_container (psql failed)"
+        [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
+        ;;
+      mysql|mariadb)
+        exists=$(docker exec "$ho_container" mysql -u root -NB \
+          -e "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>/dev/null) \
+          || die "--hooks-only: could not query $ho_container (mysql failed)"
+        [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
+        ;;
+    esac
+
+    log_step "Running post-restore hooks against $target_name (--hooks-only)"
+    if ! run_post_restore_hooks "$ho_host" "$ho_db" "$target_name" "$ho_dbtype" \
+                                 "$ho_host" "$ho_db" "" ""; then
+      die "Post-restore hooks failed against '$target_name'."
+    fi
+    log_success "Post-restore hooks complete against $target_name"
+    return 0
+  fi
 
   # Remote-fetch path: download into a tempdir under $DATA_DIR/.remote/
   # then fall through to the normal local-file restore code below.
@@ -386,6 +465,9 @@ cmd_restore() {
   log_info "Restoring: $(basename "$backup_file")"
   log_info "Target database: $target_name"
 
+  local restore_start
+  restore_start=$(date +%s)
+
   case "$db_type" in
     postgres|postgresql)
       pg_restore_backup "$backup_file" "$target_name"
@@ -397,6 +479,28 @@ cmd_restore() {
       die "Unknown database type: $db_type"
       ;;
   esac
+
+  # Hooks skipped for ad-hoc file restores (no host/db in path).
+  if [[ "$skip_hooks" == "false" && -n "$host" && -n "$database" ]]; then
+    local backup_basename backup_ts
+    backup_basename=$(basename "$backup_file")
+    backup_ts=$(parse_backup_timestamp "$backup_basename")
+    if ! run_post_restore_hooks "$host" "$database" "$target_name" "$db_type" \
+                                 "$host" "$database" "$backup_basename" "$backup_ts"; then
+      local fail_dur=$(($(date +%s) - restore_start))
+      audit_restore "$backup_file" "$target_name" "failure" "$fail_dur"
+      notify_restore_failure "$backup_file" "$target_name" "post-restore hooks failed"
+      die "Post-restore hooks failed. Database '$target_name' is in a partial state and was left in place for inspection."
+    fi
+  elif [[ "$skip_hooks" == "false" && -z "$host" ]]; then
+    # Ad-hoc file restore: tell the user explicitly that any configured
+    # hooks won't run, so they don't assume PII scrub / config rewrites
+    # already happened.
+    log_warn "Ad-hoc file restore: any configured post_restore hooks are skipped (no host/db context in the source path)."
+  fi
+
+  local restore_dur=$(($(date +%s) - restore_start))
+  audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
 
   echo ""
   log_success "Database restored as: $target_name"
@@ -871,6 +975,34 @@ EOF
         has_plain=$(get_config_value ".hosts[\"$h\"].password" 2>/dev/null || true)
         if [[ -z "$has_vault" && -z "$has_cmd" && -z "$has_plain" ]]; then
           log_warn "Host '$h': no password source found (vault, password_cmd, or config)"
+        fi
+      done <<< "$hosts"
+
+      # Validate post_restore hook entries (host-level and per-DB). Catches
+      # broken file paths and malformed entries before a 2am scheduled run
+      # would hit them.
+      local cfg_dir
+      cfg_dir=$(dirname "$CONFIG_FILE")
+      while IFS= read -r h; do
+        local hlen
+        hlen=$(jq ".hosts[\"$h\"].post_restore // [] | length" "$CONFIG_FILE")
+        local i=0
+        while [[ "$i" -lt "$hlen" ]]; do
+          validate_hook_entry "$h" "" "$i" "host" "$cfg_dir" || ((errors++)) || true
+          i=$((i + 1))
+        done
+        local dbs
+        dbs=$(jq -r ".hosts[\"$h\"].databases | keys[]?" "$CONFIG_FILE" 2>/dev/null || true)
+        if [[ -n "$dbs" ]]; then
+          while IFS= read -r d; do
+            local dlen
+            dlen=$(jq ".hosts[\"$h\"].databases[\"$d\"].post_restore // [] | length" "$CONFIG_FILE")
+            local j=0
+            while [[ "$j" -lt "$dlen" ]]; do
+              validate_hook_entry "$h" "$d" "$j" "db" "$cfg_dir" || ((errors++)) || true
+              j=$((j + 1))
+            done
+          done <<< "$dbs"
         fi
       done <<< "$hosts"
 
@@ -1609,7 +1741,7 @@ host_add() {
 
   if [[ -z "$remote_dbs" ]]; then
     log_warn "No user databases found on '$alias' (or list query failed)."
-    log_info "Continuing with empty database list — add them later via the TUI."
+    log_info "Continuing with empty database list — edit them later via 'dbx config edit'."
     picked=""
   else
     picked=$(echo "$remote_dbs" | gum choose --no-limit \
@@ -1721,9 +1853,8 @@ ${BOLD}USAGE:${NC}
   dbx <command> [options]
 
 ${BOLD}COMMANDS:${NC}
-  tui                          Interactive TUI mode (requires gum)
   backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
-  restore <source> [--name N]  Restore a backup to local container
+  restore <source> [--name N] [--no-post-restore | --hooks-only]  Restore a backup to local container
                                <source> can be a local file, host/db/latest,
                                s3://host/db/latest, or use --from-remote PATH
   verify [backup-file]         Verify backup integrity (checksum)
@@ -1893,9 +2024,6 @@ main() {
       ;;
     storage|s3)
       cmd_storage "$@"
-      ;;
-    tui|menu)
-      cmd_tui
       ;;
     help|--help|-h)
       cmd_help

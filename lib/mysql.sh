@@ -221,9 +221,6 @@ mysql_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
 
-  local start_time
-  start_time=$(date +%s)
-
   log_step "Restoring MySQL backup to: $target_db"
 
   # Get file size for progress
@@ -312,13 +309,64 @@ mysql_restore_backup() {
     docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
   fi
 
-  # Calculate duration and audit
-  local end_time duration
-  end_time=$(date +%s)
-  duration=$((end_time - start_time))
-  audit_restore "$backup_file" "$target_db" "success" "$duration"
-
+  # Audit is recorded by cmd_restore (after post-restore hooks complete) so we
+  # don't claim success before user-visible mutations have actually run.
   log_success "Restore complete: $target_db"
+}
+
+# ============================================================================
+# MySQL: run a SQL stream against an existing database
+# ============================================================================
+
+# Pure helper: turn `key=value` args into a newline-separated `SET @key :=
+# 'value';` prelude. Single quotes in values are doubled (SQL standard
+# escape). Entries without `=` are silently skipped. Output ends with a
+# trailing newline only if there was at least one valid kv pair.
+mysql_build_var_prelude() {
+  # bash 3.2 oddity: `${var//$x/$x$x}` does NOT match a literal backslash
+  # held in $x (the pattern engine fails to expand the var to a glob char),
+  # AND `${var//\'/\'\'}` keeps the backslashes in the replacement instead
+  # of stripping them. So: use the literal escape for the backslash
+  # substitution, and a variable for the single-quote substitution.
+  local sq=\'
+  local kv key val
+  for kv in "$@"; do
+    [[ "$kv" == *=* ]] || continue
+    key="${kv%%=*}"
+    val="${kv#*=}"
+    # Escape backslashes BEFORE doubling single quotes — otherwise the
+    # second pass would also touch our newly-added backslashes. MySQL with
+    # default NO_BACKSLASH_ESCAPES=OFF interprets \n, \t, \\ inside strings.
+    val="${val//\\/\\\\}"
+    val="${val//$sq/$sq$sq}"
+    printf "SET @%s := '%s';\n" "$key" "$val"
+  done
+}
+
+# Pipe SQL from stdin into mysql against $target_db inside MYSQL_CONTAINER,
+# wrapped in `START TRANSACTION;` … `COMMIT;` so a failing hook rolls back.
+# NOTE: MySQL DDL implicitly commits — the wrap only protects pure-DML hooks.
+#
+# Trailing args are `key=value` pairs; emitted as `SET @key := 'value';` lines
+# before the transaction so the stream can reference them via @key.
+mysql_run_sql_stream() {
+  local target_db="$1"
+  shift
+  require_container "$MYSQL_CONTAINER"
+
+  local root_pass prelude
+  root_pass=$(docker exec "$MYSQL_CONTAINER" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
+  prelude=$(mysql_build_var_prelude "$@")
+
+  local -a exec_args=(docker exec -i)
+  [[ -n "$root_pass" ]] && exec_args+=(-e "MYSQL_PWD=$root_pass")
+  exec_args+=("$MYSQL_CONTAINER" mysql -u root "$target_db")
+
+  { [[ -n "$prelude" ]] && printf '%s\n' "$prelude"
+    printf 'START TRANSACTION;\n'
+    cat
+    printf 'COMMIT;\n'
+  } | "${exec_args[@]}"
 }
 
 # ============================================================================
