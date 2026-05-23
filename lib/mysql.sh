@@ -323,16 +323,22 @@ mysql_restore_backup() {
 # escape). Entries without `=` are silently skipped. Output ends with a
 # trailing newline only if there was at least one valid kv pair.
 mysql_build_var_prelude() {
+  # bash 3.2 oddity: `${var//$x/$x$x}` does NOT match a literal backslash
+  # held in $x (the pattern engine fails to expand the var to a glob char),
+  # AND `${var//\'/\'\'}` keeps the backslashes in the replacement instead
+  # of stripping them. So: use the literal escape for the backslash
+  # substitution, and a variable for the single-quote substitution.
+  local sq=\'
   local kv key val
   for kv in "$@"; do
     [[ "$kv" == *=* ]] || continue
     key="${kv%%=*}"
     val="${kv#*=}"
-    # Escape backslashes BEFORE doubling single quotes (otherwise the second
-    # pass would also touch our newly-added backslashes). MySQL with default
-    # NO_BACKSLASH_ESCAPES=OFF interprets \n, \t, \\ etc. inside strings.
+    # Escape backslashes BEFORE doubling single quotes — otherwise the
+    # second pass would also touch our newly-added backslashes. MySQL with
+    # default NO_BACKSLASH_ESCAPES=OFF interprets \n, \t, \\ inside strings.
     val="${val//\\/\\\\}"
-    val="${val//\'/\'\'}"
+    val="${val//$sq/$sq$sq}"
     printf "SET @%s := '%s';\n" "$key" "$val"
   done
 }

@@ -135,17 +135,12 @@ EOF
   dbx_run backup local-pg "$TEST_DB"
   [ "$status" -eq 0 ]
   dbx_run restore "local-pg/$TEST_DB/latest" --name "$RESTORE_DB"
-  echo "# restore status=$status" >&3
-  echo "# restore output: $output" >&3
   [ "$status" -ne 0 ]
   echo "$output" | grep -qi "post-restore hooks failed"
-  # The restored DB IS left in place (the engine restore succeeded, only
-  # the hook failed); confirm it exists. Use a SQL existence query so
-  # we don't depend on `psql -lqt` formatting.
+  # Engine restore succeeded; only the hook failed. The DB must remain.
   local dbcount
   dbcount=$(docker exec postgres-dbx psql -U postgres -tA \
     -c "SELECT count(*) FROM pg_database WHERE datname = '$RESTORE_DB'" 2>/dev/null)
-  echo "# dbcount for $RESTORE_DB: '$dbcount'" >&3
   [ "$dbcount" = "1" ]
 }
 
@@ -216,8 +211,6 @@ EOF
   # Now add a hook to the config and re-run with --hooks-only.
   _write_pg_hook_config '[{"sql":"UPDATE secrets SET val = '\''hooks_only_ran'\'';"}]'
   dbx_run restore "local-pg/$TEST_DB/latest" --hooks-only --name "$RESTORE_DB"
-  echo "# hooks-only status=$status" >&3
-  echo "# hooks-only output: $output" >&3
   [ "$status" -eq 0 ]
   [ "$(_pg_secret_val "$RESTORE_DB")" = "hooks_only_ran" ]
 }
@@ -232,8 +225,6 @@ EOF
 @test "postgres: --hooks-only errors when target DB doesn't exist" {
   _write_pg_hook_config '[{"sql":"SELECT 1;"}]'
   dbx_run restore "local-pg/$TEST_DB/latest" --hooks-only --name "nonexistent_db_xyz"
-  echo "# nonexistent status=$status" >&3
-  echo "# nonexistent output: $output" >&3
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "not found in"
 }
