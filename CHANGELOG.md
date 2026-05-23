@@ -4,23 +4,28 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-23
+
+Three-feature minor release: restore directly from S3/MinIO (#33), interactive `dbx host add` / `dbx storage add` wizards (#35), and post-restore SQL hooks on `dbx restore` (#36). Removes the experimental TUI.
+
 ### Added
 
+- `dbx restore --from-remote <host>/<db>/<file>` (and `s3://<host>/<db>/...` URI shorthand) pulls a backup straight from cloud storage instead of requiring a prior `dbx storage download`. `--keep-download` preserves the staged temp file after success. (#33)
 - `dbx host add` — interactive wizard for adding a backup host. Prompts
   for connection details, validates against the live database, lets you
   pick which databases to back up, and chains into storage setup if it
-  isn't already configured.
+  isn't already configured. (#35)
 - `dbx storage add` — interactive wizard for configuring S3 /
   S3-compatible remote storage. Validates the config with a real
   upload-list-download-delete round-trip before committing — catches the
-  read-but-no-write IAM case that a plain credentials check would miss.
-- **Post-restore hooks** on `dbx restore`: per-database (and inherited per-host) SQL run automatically after every restore, in single-transaction wraps with fail-fast semantics. Supports `.sql` files and inline `sql` entries; six interpolation variables (`target_db`, `source_host`, `source_db`, `backup_file`, `backup_timestamp`, `restored_at`). New flags: `--no-post-restore`, `--hooks-only --name <existing-db>`. `dbx config validate` checks hook paths and entry shapes.
+  read-but-no-write IAM case that a plain credentials check would miss. (#35)
+- **Post-restore hooks** on `dbx restore`: per-database (and inherited per-host) SQL run automatically after every restore, in single-transaction wraps with fail-fast semantics. Supports `.sql` files and inline `sql` entries; six interpolation variables (`target_db`, `source_host`, `source_db`, `backup_file`, `backup_timestamp`, `restored_at`). New flags: `--no-post-restore`, `--hooks-only --name <existing-db>`. `dbx config validate` checks hook paths and entry shapes. (#36)
 
 ### Changed
 - `audit_restore` runs from `cmd_restore` after hooks complete, so the audit log no longer reports `success` for a restore whose post-restore hooks failed.
 
 ### Removed
-- Experimental TUI (`dbx tui` command and `lib/tui.sh`) — incomplete, confused the surface area. The `dbx host add` / `dbx storage add` wizards (from PR #35) remain fully available as standalone CLI commands.
+- Experimental TUI (`dbx tui` command and `lib/tui.sh`) — incomplete, confused the surface area. The `dbx host add` / `dbx storage add` wizards remain fully available as standalone CLI commands.
 
 ## [0.8.0] - 2026-05-17
 
