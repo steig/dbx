@@ -55,6 +55,21 @@ bats tests/integration/
 bats tests/unit/ tests/integration/
 ```
 
+### Docs site
+
+The public docs at https://steig.github.io/dbx are built from `docs/` + `mkdocs.yml` by `.github/workflows/docs.yml` on every push to `main` that touches those paths. Internal design plans live in `docs/plans/` and are excluded from the build via the `exclude_docs:` config — they're for working context, not the public site.
+
+```bash
+# Local preview (auto-reloads on file change)
+python3 -m venv /tmp/mkdocs-venv && /tmp/mkdocs-venv/bin/pip install mkdocs-material
+/tmp/mkdocs-venv/bin/mkdocs serve     # http://127.0.0.1:8000
+
+# Strict build (same as CI — fails on broken internal links)
+/tmp/mkdocs-venv/bin/mkdocs build --strict --site-dir _site
+```
+
+When adding a new public page, drop it under `docs/` and add it to the `nav:` block in `mkdocs.yml` so it appears in the sidebar.
+
 CI (`.github/workflows/ci.yml`, push/PR to `main`) runs:
 1. **Shellcheck** (severity: error) on all `.sh` files and `dbx`
 2. **Bash syntax** (`bash -n`) on all scripts

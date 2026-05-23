@@ -3,9 +3,12 @@
 > A pragmatic database backup and restore CLI for PostgreSQL and MySQL. No local DB install. SSH tunnels for remote production. Encryption at rest. S3-compatible cloud storage. Scheduled backups via launchd or systemd. macOS and Linux.
 
 [![CI](https://github.com/steig/dbx/actions/workflows/ci.yml/badge.svg)](https://github.com/steig/dbx/actions/workflows/ci.yml)
+[![Docs](https://github.com/steig/dbx/actions/workflows/docs.yml/badge.svg)](https://steig.github.io/dbx/)
 [![Release](https://img.shields.io/github/v/release/steig/dbx)](https://github.com/steig/dbx/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-97%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-220%2B%20passing-brightgreen)](tests/)
+
+> 📖 **Full documentation:** **<https://steig.github.io/dbx>**
 
 ```text
 $ dbx backup production myapp
