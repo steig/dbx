@@ -344,12 +344,15 @@ notify_restore_success() {
 }
 
 notify_restore_failure() {
-  local file="$1"
+  local backup_file="$1"
   local target_db="$2"
-  local error="${3:-Unknown error}"
+  local error_msg="${3:-Unknown error}"
+
+  local file_basename
+  file_basename=$(basename "$backup_file")
 
   notify \
-    "Restore Failed: $target_db" \
-    "Failed to restore $target_db from $file: $error" \
+    "dbx restore failed" \
+    "Failed to restore $target_db from $file_basename: $error_msg" \
     "failure"
 }
