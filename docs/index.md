@@ -1,6 +1,24 @@
+---
+hide:
+  - navigation
+  - toc
+---
+
+<div class="dbx-hero" markdown>
+
 # dbx
 
-> A pragmatic database backup and restore CLI for PostgreSQL and MySQL. No local DB install. SSH tunnels for remote production. Encryption at rest. S3-compatible cloud storage. Scheduled backups via launchd or systemd. macOS and Linux.
+<p class="dbx-hero__tagline">
+A pragmatic database backup and restore CLI for PostgreSQL and MySQL.<br>
+No local DB install. SSH tunnels. Encryption at rest. S3-compatible storage. Scheduled backups.
+</p>
+
+<div class="dbx-hero__buttons" markdown>
+[Get started :material-arrow-right:](install.md){ .md-button .md-button--primary }
+[View on GitHub :material-github:](https://github.com/steig/dbx){ .md-button }
+</div>
+
+</div>
 
 ```text
 $ dbx backup production myapp
@@ -15,28 +33,75 @@ $ dbx backup production myapp
 
 ## Why dbx?
 
-Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them with the operational glue you'd otherwise build yourself:
+Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them with the operational glue you'd otherwise build yourself.
 
-- **No local Postgres or MySQL** — dump and restore happen inside official Docker images. Your laptop stays clean.
-- **SSH tunnels handled** — remote DBs in private VPCs (RDS, EC2 internal hosts) just work. Tunnels are reused across runs and torn down on exit.
-- **Restore to a fresh local DB by default** — `dbx restore prod/myapp/latest` creates a versioned, sandboxed copy in a managed Docker container. Production stays untouched.
-- **Encryption at rest** — backups can be `age`-encrypted with one command. Keys live in your sops directory.
-- **Credentials in the system vault** — no plaintext passwords in shell history or config files. macOS Keychain, GNOME libsecret, `pass`, or a GPG-encrypted file as fallback.
-- **Post-restore hooks** — declare SQL to scrub PII or repoint webhooks; dbx runs it automatically after every restore, in a transaction.
-- **One config file, JSON** — version-controllable, tab-completable, no surprises.
+<div class="grid cards" markdown>
 
-Not for you if: you need streaming/PITR replication, point-in-time recovery from WAL, or anything beyond logical dumps.
+-   :fontawesome-brands-docker:{ .lg .middle } **No local Postgres or MySQL**
 
-## Get started
+    ---
 
-1. [Install](install.md) dbx and its few dependencies
-2. Run through the [quick start](quick-start.md)
-3. Read about [configuration](configuration.md), or just use the [interactive wizards](wizards.md)
+    Dumps and restores happen inside official Docker images. Your laptop stays clean.
+
+-   :material-vector-link:{ .lg .middle } **SSH tunnels handled**
+
+    ---
+
+    Remote DBs in private VPCs (RDS, EC2 internal hosts) just work. Tunnels are reused across runs and torn down on exit.
+
+-   :material-flask-outline:{ .lg .middle } **Restore to a fresh local DB**
+
+    ---
+
+    `dbx restore prod/myapp/latest` creates a versioned, sandboxed copy in a managed Docker container. Production stays untouched.
+
+-   :material-lock-outline:{ .lg .middle } **Encryption at rest**
+
+    ---
+
+    Backups can be `age`-encrypted with one command. Keys live in your sops directory.
+
+-   :material-key-chain:{ .lg .middle } **Credentials in the system vault**
+
+    ---
+
+    No plaintext passwords in shell history or config files. macOS Keychain, GNOME libsecret, `pass`, or a GPG-encrypted file as fallback.
+
+-   :material-database-cog:{ .lg .middle } **Post-restore hooks**
+
+    ---
+
+    Declare SQL to scrub PII or repoint webhooks; dbx runs it automatically after every restore, in a transaction.
+
+-   :material-cloud-upload-outline:{ .lg .middle } **S3 / MinIO / R2**
+
+    ---
+
+    Push every backup to cloud storage. Restore directly from S3 with `--from-remote` — no two-step download dance.
+
+-   :material-clock-outline:{ .lg .middle } **Scheduled backups**
+
+    ---
+
+    launchd on macOS, systemd timers on Linux. One command to schedule, log everything.
+
+</div>
+
+!!! info "Not for you if"
+    You need streaming/PITR replication, point-in-time recovery from WAL, or anything beyond logical dumps.
 
 ## What's new in v0.9.0
 
-- [Restore directly from S3 / MinIO](restore.md#restoring-from-cloud-storage) with `--from-remote` or `s3://`
-- [Interactive `dbx host add` and `dbx storage add`](wizards.md) wizards
-- [Post-restore SQL hooks](post-restore-hooks.md) — scrub PII, repoint webhooks automatically
+-   **[Restore directly from S3 / MinIO](restore.md#restoring-from-cloud-storage)** with `--from-remote` or `s3://`
+-   **[Interactive wizards](wizards.md)** for adding hosts and configuring cloud storage
+-   **[Post-restore SQL hooks](post-restore-hooks.md)** — scrub PII, repoint webhooks, fail-fast on errors
 
 See the full [changelog](https://github.com/steig/dbx/blob/main/CHANGELOG.md) on GitHub.
+
+## Quick install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash
+```
+
+Then walk through the [quick start](quick-start.md) — five commands to your first backup and restore.

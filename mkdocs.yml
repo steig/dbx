@@ -6,28 +6,33 @@ repo_name: steig/dbx
 edit_uri: edit/main/docs/
 
 # Internal design plans live in docs/plans/ for working context but don't
-# belong on the public docs site.
+# belong on the public docs site. requirements.txt is a build-time dep,
+# not docs content.
 exclude_docs: |
   plans/
+  requirements.txt
+
+copyright: Copyright &copy; 2026 Tom Steigerwald &middot; <a href="https://github.com/steig/dbx/blob/main/LICENSE">MIT</a>
 
 theme:
   name: material
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: indigo
-      accent: indigo
+      primary: black
+      accent: cyan
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: indigo
+      primary: black
+      accent: cyan
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
   features:
+    - announce.dismiss
     - navigation.sections
     - navigation.tabs
     - navigation.tabs.sticky
@@ -35,15 +40,28 @@ theme:
     - navigation.tracking
     - navigation.instant
     - navigation.instant.progress
+    - navigation.footer
     - search.suggest
     - search.highlight
+    - search.share
     - content.code.copy
     - content.code.annotate
     - content.action.edit
     - toc.follow
   icon:
+    logo: material/database-export
     repo: fontawesome/brands/github
     edit: material/pencil
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/steig/dbx
+      name: dbx on GitHub
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
 
 markdown_extensions:
   - admonition
@@ -53,6 +71,9 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span

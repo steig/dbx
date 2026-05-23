@@ -1,0 +1,69 @@
+/* ---------------------------------------------------------------------------
+ * dbx docs — small style overrides on top of mkdocs-material
+ * --------------------------------------------------------------------------- */
+
+/* Tighter hero block on the landing page. */
+.dbx-hero {
+  padding: 2rem 0 1.5rem;
+  text-align: center;
+}
+
+.dbx-hero h1 {
+  font-size: 3.5rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  margin: 0 0 0.5rem;
+  line-height: 1;
+}
+
+.dbx-hero .dbx-hero__tagline {
+  font-size: 1.25rem;
+  color: var(--md-default-fg-color--light);
+  max-width: 48rem;
+  margin: 0 auto 1.5rem;
+  line-height: 1.4;
+}
+
+.dbx-hero .dbx-hero__buttons {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+/* Hide the auto-generated H1 on the landing page when our hero is present —
+   the hero already says "dbx" much bigger. */
+.dbx-has-hero h1:not(.dbx-hero h1) {
+  display: none;
+}
+
+/* Slightly more breathing room for feature grid cards. */
+.md-typeset .grid.cards > :is(ul, ol) > li,
+.md-typeset .grid > .card {
+  padding: 1.25rem 1.5rem;
+  border-radius: 0.5rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.md-typeset .grid.cards > :is(ul, ol) > li:hover {
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.08);
+}
+
+/* Make material icons inside cards feel like proper feature icons. */
+.md-typeset .grid.cards .twemoji.lg {
+  font-size: 1.75rem;
+  color: var(--md-accent-fg-color);
+}
+
+/* Code blocks: slightly more contrast against the page background. */
+[data-md-color-scheme="slate"] .md-typeset pre > code {
+  background-color: #0d1117;
+}
+
+/* Tighten the lead paragraph on internal pages. */
+.md-typeset > p:first-of-type {
+  font-size: 1.05rem;
+  color: var(--md-default-fg-color--light);
+}
