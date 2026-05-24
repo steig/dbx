@@ -51,6 +51,8 @@ export PATH="$PWD/dbx:$PATH"
 
 Once installed, `dbx update` upgrades in place when a new release is out.
 
+> 💡 Prefer a browser-driven setup? After install, `dbx wizard` opens a form in your default browser. Or **try the form first without installing** at <https://steig.github.io/dbx/config-builder>.
+
 <details>
 <summary><b>Requirements</b></summary>
 

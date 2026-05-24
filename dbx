@@ -43,6 +43,7 @@ source "$LIB_DIR/notify.sh"
 source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/storage.sh"
 source "$LIB_DIR/update.sh"
+source "$LIB_DIR/wizard.sh"
 
 # Install the EXIT/INT/TERM cleanup trap. Defined in core.sh but called
 # here so that sourcing libs in tests doesn't clobber the test runner's
@@ -1862,6 +1863,7 @@ ${BOLD}COMMANDS:${NC}
   analyze <host> <database>    Interactive table analysis & exclusion picker
   test <host>                  Test connection to a database host
   host add                     Interactively add a host (alias, creds, validate, pick dbs)
+  wizard                       Browser-based config wizard (auto-falls back to gum if no GUI)
   list [host] [database]       List available backups
   clean [--keep N] [--dry-run] [--older-than D]  Remove old backups
   update                       Re-run install.sh to upgrade to the latest release
@@ -2000,6 +2002,9 @@ main() {
       ;;
     host)
       cmd_host "$@"
+      ;;
+    wizard)
+      cmd_wizard "$@"
       ;;
     analyze|stats)
       cmd_analyze "$@"

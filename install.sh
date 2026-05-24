@@ -62,8 +62,15 @@ main() {
   curl -fsSL "https://raw.githubusercontent.com/$REPO/main/dbx" -o "$INSTALL_DIR/dbx"
   chmod +x "$INSTALL_DIR/dbx"
 
-  for lib in core.sh tunnel.sh encrypt.sh postgres.sh mysql.sh post_restore.sh notify.sh schedule.sh storage.sh update.sh; do
+  for lib in core.sh tunnel.sh encrypt.sh postgres.sh mysql.sh post_restore.sh notify.sh schedule.sh storage.sh update.sh wizard.sh; do
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$lib" -o "$LIB_DIR/$lib"
+  done
+
+  # HTML assets for the browser-based `dbx wizard` config builder. Same
+  # form fragment also powers the static docs builder; downloading both
+  # gives offline-capable wizard mode.
+  for asset in wizard.html wizard-form.html; do
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$asset" -o "$LIB_DIR/$asset"
   done
 
   # Update lib path in main script to use installed location.

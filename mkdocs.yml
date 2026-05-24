@@ -118,7 +118,9 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      base_path: ['.', 'docs']
+      check_paths: true
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
@@ -131,6 +133,7 @@ nav:
       - Install: install.md
       - Quick start: quick-start.md
       - Configuration: configuration.md
+      - Config builder: config-builder.md
       - Interactive wizards: wizards.md
   - Using dbx:
       - Backup: backup.md
