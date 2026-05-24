@@ -6,6 +6,9 @@ on:
     paths:
       - docs/**
       - mkdocs.yml
+      # The config-builder page includes lib/wizard-form.html via
+      # pymdownx.snippets — changes there must also trigger a rebuild.
+      - lib/wizard-form.html
       - .github/workflows/docs.yml
   workflow_dispatch:
 
