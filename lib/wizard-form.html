@@ -79,8 +79,16 @@
     content: "🔒";
     flex: 0 0 auto;
     font-size: 1.1rem;
-    line-height: 1;
+    line-height: 1.5;
   }
+  .dbx-builder__trust-text {
+    /* Single text-flow child so the flex parent doesn't break <strong>,
+       <span>, and <code> into separate narrow columns. */
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .dbx-builder__trust-text > strong,
+  .dbx-builder__trust-text > span { display: inline; margin-right: 0.25em; }
   .dbx-builder__trust strong { color: var(--dbxb-fg); font-weight: 600; }
   .dbx-builder__trust code {
     background: var(--dbxb-bg);
@@ -88,6 +96,7 @@
     border-radius: var(--dbxb-radius-1);
     font-size: 0.85em;
     border: 1px solid var(--dbxb-border);
+    white-space: nowrap;
   }
 
   /* Section (fieldset) --------------------------------------------------- */
@@ -468,11 +477,13 @@
   <!-- Form column -->
   <div>
     <div class="dbx-builder__trust">
-      <strong>Runs entirely in your browser.</strong>
-      <span x-show="mode === 'static'">No fields are sent to any server.</span>
-      <span x-show="mode === 'cli'">The "Save & exit" button POSTs once to the local <code>dbx wizard</code> process on <code>127.0.0.1</code> and nothing else.</span>
-      Passwords are never collected — the generated config references
-      <code>dbx vault set &lt;alias&gt;</code> commands you run separately.
+      <div class="dbx-builder__trust-text">
+        <strong>Runs entirely in your browser.</strong>
+        <span x-show="mode === 'static'">No fields are sent to any server.</span>
+        <span x-show="mode === 'cli'">The "Save &amp; exit" button POSTs once to the local <code>dbx wizard</code> process on <code>127.0.0.1</code> and nothing else.</span>
+        Passwords are never collected — the generated config references
+        <code>dbx vault set &lt;alias&gt;</code> commands you run separately.
+      </div>
     </div>
 
     <!-- Hosts -->
