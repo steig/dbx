@@ -83,6 +83,10 @@ Useful when you want a raw clone for debugging — bypasses the mutation. The fl
 
 `dbx config validate` resolves every hook `file` path and stat's it, flagging missing files or entries that have both `file` and `sql` (or neither). Catch broken hooks before a 2am scheduled run does.
 
+## Shrinking the clone
+
+The hooks pattern is also the easiest way to make a dev clone smaller — `TRUNCATE` noisy tables, delete rows outside a recent time window, prune inactive users. See [Subsetting dev clones](subsetting.md) for the patterns and gotchas.
+
 ## Ad-hoc file restores
 
 When restoring a backup file directly (`dbx restore /tmp/backup.sql.zst --name foo`) without a `<host>/<db>` path, dbx doesn't know which host config to look at, so hooks are skipped with a `log_warn` line. If you need hooks to run on an ad-hoc restore, use `--hooks-only --name foo` afterwards.

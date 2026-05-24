@@ -97,6 +97,7 @@ nav:
       - Backup: backup.md
       - Restore: restore.md
       - Post-restore hooks: post-restore-hooks.md
+      - Subsetting dev clones: subsetting.md
       - Encryption: encryption.md
       - Credential storage: credentials.md
       - Cloud storage: storage.md
