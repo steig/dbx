@@ -194,6 +194,8 @@ cmd_restore() {
   local skip_hooks=false
   local hooks_only=false
   local skip_scrub=false
+  local transform_script=""
+  local into_container=""
 
   # Mixed flag/positional parse: `source` is the only positional and
   # may appear before or after flags (or be absent entirely when the
@@ -230,6 +232,27 @@ cmd_restore() {
         skip_scrub=true
         shift
         ;;
+      --transform)
+        # Streaming sanitization via a host-side script. Unsanitized
+        # bytes never touch disk on the target: decompress → optional
+        # plain-SQL emit → script → atomic restore.
+        transform_script="$2"
+        shift 2
+        ;;
+      --transform=*)
+        transform_script="${1#--transform=}"
+        shift
+        ;;
+      --into)
+        # Target an external running docker container (e.g. a compose
+        # sidecar) instead of dbx's managed postgres-dbx. Postgres-only.
+        into_container="$2"
+        shift 2
+        ;;
+      --into=*)
+        into_container="${1#--into=}"
+        shift
+        ;;
       --*|-*)
         die "Unknown option: $1"
         ;;
@@ -256,6 +279,18 @@ cmd_restore() {
   fi
   if [[ "$hooks_only" == "true" && -n "$from_remote" ]]; then
     die "--hooks-only and --from-remote are mutually exclusive (no backup is fetched in hooks-only mode)"
+  fi
+  if [[ "$hooks_only" == "true" && (-n "$transform_script" || -n "$into_container") ]]; then
+    die "--hooks-only is incompatible with --transform / --into (no engine restore happens in hooks-only mode)"
+  fi
+
+  # Validate --transform target is an executable.
+  if [[ -n "$transform_script" ]]; then
+    if [[ "$transform_script" = /* ]]; then
+      [[ -x "$transform_script" ]] || die "--transform: '$transform_script' is not an executable file"
+    else
+      command -v "$transform_script" >/dev/null 2>&1 || die "--transform: '$transform_script' is not on PATH and is not an absolute executable path"
+    fi
   fi
 
   require_config
@@ -502,17 +537,59 @@ cmd_restore() {
     fi
   fi
 
-  case "$db_type" in
-    postgres|postgresql)
-      pg_restore_backup "$backup_file" "$target_name"
-      ;;
-    mysql|mariadb)
-      mysql_restore_backup "$backup_file" "$target_name"
-      ;;
-    *)
-      die "Unknown database type: $db_type"
-      ;;
-  esac
+  # When --transform or --into is set, take the streaming code path.
+  # --into is postgres-only (boring's compose sidecars are postgres);
+  # MySQL --into errors out with a clear message.
+  if [[ -n "$transform_script" || -n "$into_container" ]]; then
+    local target_container="" target_user="postgres" target_pass=""
+    if [[ -n "$into_container" ]]; then
+      case "$db_type" in
+        postgres|postgresql) ;;
+        mysql|mariadb) die "--into is only supported for postgres restores (got db_type=$db_type)" ;;
+        *) die "--into: unsupported db_type '$db_type'" ;;
+      esac
+      local resolved
+      resolved=$(pg_resolve_into_container "$into_container")
+      target_container=$(printf '%s' "$resolved" | cut -f1)
+      target_user=$(printf '%s' "$resolved" | cut -f2)
+      target_pass=$(printf '%s' "$resolved" | cut -f3)
+      log_info "Resolved --into container: $target_container (user=$target_user)"
+      log_warn "================================================================"
+      log_warn "  --into: PII scrub gate BYPASSED for external container '$into_container'."
+      log_warn "  dbx cannot safely DROP a user-managed container's DB on failure,"
+      log_warn "  so the scrub gate does not run. The --transform script (if set)"
+      log_warn "  is the only sanitization layer. Operator owns correctness."
+      log_warn "================================================================"
+      audit_log "scrub_bypass" "into_external" \
+        "host" "$host" "database" "$database" "into_container" "$into_container"
+    fi
+    case "$db_type" in
+      postgres|postgresql)
+        [[ -z "$target_container" ]] && target_container="$POSTGRES_CONTAINER"
+        pg_restore_backup_streaming "$backup_file" "$target_name" \
+          "$target_container" "$target_user" "$target_pass" "$transform_script"
+        ;;
+      mysql|mariadb)
+        # MySQL --transform path (--into already rejected above).
+        mysql_restore_backup_streaming "$backup_file" "$target_name" "$transform_script"
+        ;;
+      *)
+        die "Unknown database type: $db_type"
+        ;;
+    esac
+  else
+    case "$db_type" in
+      postgres|postgresql)
+        pg_restore_backup "$backup_file" "$target_name"
+        ;;
+      mysql|mariadb)
+        mysql_restore_backup "$backup_file" "$target_name"
+        ;;
+      *)
+        die "Unknown database type: $db_type"
+        ;;
+    esac
+  fi
 
   # Hooks skipped for ad-hoc file restores (no host/db in path).
   if [[ "$skip_hooks" == "false" && -n "$host" && -n "$database" ]]; then
@@ -537,7 +614,11 @@ cmd_restore() {
   # gate is fail-closed: any drift / UPDATE error / sniff failure drops
   # the target DB rather than leaving it for inspection (a half-scrubbed
   # clone is more dangerous than no clone).
-  if [[ -n "$host" && -n "$database" ]]; then
+  #
+  # When --into <container> is set we ALREADY bypassed the gate above
+  # (with audit log) — see the streaming dispatch block. Skip the gate
+  # block entirely in that case so we don't double-log.
+  if [[ -n "$host" && -n "$database" && -z "$into_container" ]]; then
     if scrub_gate_active "$host"; then
       if [[ "$skip_scrub" == "true" ]]; then
         log_warn "================================================================"
@@ -2195,9 +2276,11 @@ ${BOLD}USAGE:${NC}
 
 ${BOLD}COMMANDS:${NC}
   backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
-  restore <source> [--name N] [--no-post-restore | --hooks-only] [--no-scrub]  Restore a backup to local container
+  restore <source> [--name N] [--no-post-restore | --hooks-only] [--no-scrub] [--transform=PATH] [--into NAME]  Restore a backup
                                <source> can be a local file, host/db/latest,
                                s3://host/db/latest, or use --from-remote PATH
+                               --transform pipes the restore through a host script (streaming sanitize, atomic on postgres)
+                               --into targets a named running container instead of the managed postgres-dbx (postgres only)
   verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database
   analyze <host> <database>    Interactive table analysis & exclusion picker

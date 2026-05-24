@@ -329,6 +329,64 @@ mysql_restore_backup() {
   log_success "Restore complete: $target_db"
 }
 
+# Streaming restore variant for `--transform`. mysqldump output is already
+# plain SQL, so the pipeline is simpler than the postgres equivalent:
+#
+#   decompress → filter_sql → [transform] → mysql in target
+#
+# Caveat (documented in docs/restore.md): MySQL DDL implicitly commits,
+# so atomicity is best-effort. A transform script that fails mid-stream
+# may leave the target DB in a partial state — we drop it post-failure
+# as cleanup. For atomic streaming sanitization, use postgres.
+#
+# Args: $1 backup_file, $2 target_db, $3 transform_script (may be empty)
+mysql_restore_backup_streaming() {
+  local backup_file="$1" target_db="$2" transform_script="$3"
+
+  log_step "Streaming restore (mysql) → $target_db"
+  require_container "$MYSQL_CONTAINER"
+
+  local root_pass
+  root_pass=$(docker exec "$MYSQL_CONTAINER" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
+
+  # Pre-create target DB outside the streamed import.
+  docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+    mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" >/dev/null
+
+  # filter_sql defined in mysql_restore_backup; redefine here so this
+  # function stays self-contained (callable independently for tests).
+  local filter_sql_cmd='(printf "SET foreign_key_checks=0; SET unique_checks=0;\n" &&
+    grep -v "^mysqldump: \[Warning\]" | grep -v "^Warning: Using a password" |
+    sed "s/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g")'
+
+  log_info "Streaming restore → transform → target..."
+  # set -e + pipefail: capture rc via `|| rc=$?` so cleanup can run.
+  local rc=0
+  if [[ -n "$transform_script" ]]; then
+    { decompress_backup "$backup_file" \
+        | bash -c "$filter_sql_cmd" \
+        | "$transform_script" \
+        | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+          mysql -u root "$target_db"
+    } || rc=$?
+  else
+    { decompress_backup "$backup_file" \
+        | bash -c "$filter_sql_cmd" \
+        | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+          mysql -u root "$target_db"
+    } || rc=$?
+  fi
+
+  if [[ "$rc" -ne 0 ]]; then
+    log_error "Streaming restore FAILED (exit $rc). Dropping target '$target_db' for cleanliness."
+    docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+      mysql -u root -e "DROP DATABASE IF EXISTS \`$target_db\`" >/dev/null 2>&1 || true
+    return $rc
+  fi
+
+  log_success "Streaming restore complete: $target_db"
+}
+
 # ============================================================================
 # MySQL: run a SQL stream against an existing database
 # ============================================================================

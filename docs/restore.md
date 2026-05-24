@@ -30,8 +30,10 @@ If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>`
 | `--keep-download` | Keep the locally-staged copy after a `--from-remote` restore succeeds (default: deleted). |
 | `--no-post-restore` | Skip configured [post-restore hooks](post-restore-hooks.md) for this run. |
 | `--hooks-only` | Skip the engine restore; only run configured hooks against the DB named by `--name`. Useful for iterating on hook scripts. |
+| `--transform PATH` | Pipe the restore byte-stream through a host-side executable before any write to the target. See [Streaming sanitization](#streaming-sanitization-with-transform) below. |
+| `--into NAME` | Restore into a named external docker container (e.g. a compose-managed postgres sidecar) instead of the managed `postgres-dbx`. Postgres only. See [Targeting an external container](#targeting-an-external-container-with-into) below. |
 
-`--hooks-only` requires `--name <existing-db>` and is mutually exclusive with `--no-post-restore` and `--from-remote`.
+`--hooks-only` requires `--name <existing-db>` and is mutually exclusive with `--no-post-restore`, `--from-remote`, `--transform`, and `--into`.
 
 ## Restoring from cloud storage
 
@@ -49,6 +51,69 @@ dbx restore --from-remote prod/db/db_20260510_120000.sql.zst.age --keep-download
 ```
 
 `latest` resolves to the lex-max filename returned by `storage list <host>/<db>` — since backups embed a zero-padded `YYYYMMDD_HHMMSS` timestamp, that's the newest one. Encrypted backups (`.age`, `.gpg`) are decrypted by the same code path as local restores. On download failure the file is left in place so you can retry without re-fetching.
+
+## Streaming sanitization with `--transform`
+
+When you need *unsanitized bytes never touch disk on the target* — for example, when handing a clone to a less-trusted environment that runs in a different container — pass `--transform=PATH` where PATH is any executable. The flow is:
+
+```text
+backup file → pg_restore -f - (emit plain SQL) → <your script> → psql -1 ON_ERROR_STOP=1
+```
+
+`<your script>` is run on the host with the raw plain-SQL byte stream on stdin and the sanitized stream on stdout. It can be a shell script, a small Go program, an awk one-liner — dbx doesn't care, it just `exec`'s it.
+
+```bash
+# A minimal sed-based sanitizer
+cat > sanitize.sh <<'EOF'
+#!/usr/bin/env bash
+sed -E \
+  -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/redacted@example.com/g' \
+  -e 's/\+1[0-9]{10}/+15550000000/g'
+EOF
+chmod +x sanitize.sh
+
+dbx restore production/myapp/latest --name myapp_review --transform=./sanitize.sh
+```
+
+**Atomicity (postgres):** the streamed input is wrapped in a single transaction (`psql -1 -v ON_ERROR_STOP=1`). If `sanitize.sh` exits non-zero mid-stream, psql sees EOF before COMMIT and rolls back. dbx then drops the target DB so no partial state remains. **MySQL is best-effort** — DDL implicitly commits in MySQL, so a transform script that fails partway through may leave the target DB in a partial state. dbx still drops it on failure, but the window of partial commit exists. Use postgres if you need atomicity.
+
+**No post-flight verification.** dbx does not inspect the sanitized stream to confirm your script did the right thing — operator owns correctness. For declarative manifest-driven scrubbing with sniff verification, see [PII scrub](scrub.md) (a different feature with a different threat model).
+
+**Constraints:** the source backup must be plain-SQL-readable (postgres custom-format dumps work — `pg_restore -f -` emits plain SQL). Binary formats incompatible with plain-SQL output will fail clearly.
+
+## Targeting an external container with `--into`
+
+By default, `dbx restore` lands data in dbx's managed `postgres-dbx` container. With `--into NAME` you can restore into a different running docker container — typically a compose sidecar that another tool (`boring`, `docker compose`, etc.) manages.
+
+```bash
+# Restore into a sidecar named `boring-content-infra-postgres-1`
+dbx restore production/myapp/latest \
+    --name myapp_review \
+    --into boring-content-infra-postgres-1
+```
+
+dbx looks up the container with `docker inspect` and reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` from its env. Waits up to 30s for `pg_isready` to succeed inside it before starting the restore. Errors clearly when:
+
+- The container isn't running
+- The container has no `POSTGRES_USER` env (i.e. isn't a postgres-shaped container)
+- Postgres in the container doesn't become ready within the timeout
+
+**`--into` bypasses the [PII scrub gate](scrub.md).** dbx can't safely DROP a user-managed container's DB on a sniff failure, so the gate doesn't run. A loud warning is logged and a `scrub_bypass` audit record is written. The expectation is that you combine `--into` with `--transform` (where your script is the sanitization layer) — see the next section.
+
+**Postgres only.** `--into` for MySQL is not supported yet. Use postgres if you need this.
+
+## The combined invocation: `--transform` + `--into`
+
+The boring v0.5 use case:
+
+```bash
+dbx restore production/myapp/latest \
+    --name myapp_review \
+    --transform=./sanitize.sh \
+    --into boring-content-infra-postgres-1
+```
+
+This pipes the backup through `sanitize.sh` and lands the sanitized rows in the named sidecar — no unsanitized bytes on disk, no temp file the operator could read mid-restore, no managed-container clutter. The two flags compose; failures of either step trigger atomic rollback + drop.
 
 ## Container version handling
 

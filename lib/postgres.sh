@@ -384,6 +384,160 @@ pg_detect_server_version() {
   pg_parse_server_version_num "$raw"
 }
 
+# Resolve an external container named by `dbx restore --into` and emit its
+# connection details as TSV (one line):
+#   container TAB user TAB password TAB db TAB pg_major
+#
+# Reads POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB from the container's
+# env. Waits up to 30s for the database to accept connections via pg_isready
+# inside the container. Errors clearly if:
+#   - container doesn't exist
+#   - container has no POSTGRES_USER env (not a postgres container)
+#   - pg_isready times out
+# Args: $1 container name
+pg_resolve_into_container() {
+  local container="$1"
+
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$container"; then
+    die "--into: container '$container' is not running (docker ps does not list it)"
+  fi
+
+  local user pass db
+  user=$(docker exec "$container" printenv POSTGRES_USER 2>/dev/null || true)
+  pass=$(docker exec "$container" printenv POSTGRES_PASSWORD 2>/dev/null || true)
+  db=$(docker exec "$container" printenv POSTGRES_DB 2>/dev/null || true)
+
+  if [[ -z "$user" ]]; then
+    die "--into: container '$container' has no POSTGRES_USER env — \`--into\` expects a postgres container (the standard postgres image sets these)"
+  fi
+  [[ -z "$db" ]] && db="$user"  # postgres image defaults POSTGRES_DB to POSTGRES_USER
+
+  # Wait for postgres inside the container to accept connections.
+  local i max_wait=30
+  for ((i=1; i<=max_wait; i++)); do
+    if docker exec -e PGPASSWORD="$pass" "$container" \
+        pg_isready -U "$user" -d "$db" >/dev/null 2>&1; then
+      break
+    fi
+    [[ $i -eq $max_wait ]] && die "--into: postgres in '$container' did not become ready within ${max_wait}s"
+    sleep 1
+  done
+
+  printf '%s\t%s\t%s\t%s\n' "$container" "$user" "$pass" "$db"
+}
+
+# Streaming restore variant. Used when `--transform` or `--into` is set on
+# `dbx restore`. Pipeline:
+#
+#   pg_restore -f - <backup>           # emit plain SQL on stdout
+#       | <transform>                  # optional user script
+#       | psql -1 ON_ERROR_STOP=1      # single transaction; atomic on failure
+#
+# The transform script runs on the host with the raw plain-SQL byte-stream
+# on stdin; it emits the sanitized stream on stdout. Non-zero exit aborts
+# the restore atomically (psql sees EOF mid-transaction → ROLLBACK).
+#
+# Args: $1 backup_file, $2 target_db, $3 target_container,
+#       $4 target_user, $5 target_pass (may be empty),
+#       $6 transform_script (may be empty)
+pg_restore_backup_streaming() {
+  local backup_file="$1" target_db="$2"
+  local target_container="$3" target_user="$4" target_pass="$5"
+  local transform_script="$6"
+
+  log_step "Streaming restore (postgres) → $target_container:$target_db"
+
+  # Decompress backup to a tempfile inside DATA_DIR (matches the existing
+  # pg_restore_backup pattern). pg_restore on the custom format needs
+  # random access, so we can't avoid the tempfile here. The transform
+  # script itself never sees the tempfile — it sees the plain-SQL stream
+  # emitted by pg_restore -f - downstream.
+  local tmp_dir tmpfile
+  tmp_dir="$DATA_DIR/.tmp"
+  mkdir -p "$tmp_dir" && chmod 700 "$tmp_dir"
+  tmpfile=$(mktemp -p "$tmp_dir")
+  trap "rm -f '$tmpfile'" RETURN
+
+  log_info "Decompressing backup..."
+  decompress_backup "$backup_file" > "$tmpfile"
+
+  # Source container must have pg_restore — we use postgres-dbx as the
+  # "emit plain SQL" worker. require_container picks an image; for the
+  # streaming path we just need pg_restore in the binary.
+  require_container "$POSTGRES_CONTAINER"
+  docker cp "$tmpfile" "$POSTGRES_CONTAINER:/tmp/restore-stream.dump"
+
+  # Pre-create the target database in the target container. Doing this
+  # outside the streamed transaction so the CREATE DATABASE itself isn't
+  # subject to the -1 wrap (it can't be). We connect to the `postgres`
+  # admin database — always present on a vanilla cluster — to issue
+  # the CREATE. Without `-d postgres`, psql would try to connect to a
+  # DB named after $target_user, which may not exist (especially in
+  # the --into case where the user is `sidecaruser` or similar).
+  log_info "Ensuring target database '$target_db' exists in $target_container..."
+  if [[ -n "$target_pass" ]]; then
+    docker exec -e PGPASSWORD="$target_pass" "$target_container" \
+      psql -U "$target_user" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$target_db'" \
+      | grep -q 1 || \
+    docker exec -e PGPASSWORD="$target_pass" "$target_container" \
+      psql -U "$target_user" -d postgres -c "CREATE DATABASE \"$target_db\"" >/dev/null
+  else
+    docker exec "$target_container" \
+      psql -U "$target_user" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$target_db'" \
+      | grep -q 1 || \
+    docker exec "$target_container" \
+      psql -U "$target_user" -d postgres -c "CREATE DATABASE \"$target_db\"" >/dev/null
+  fi
+
+  # The streaming pipeline. Atomicity: psql -1 wraps everything in a
+  # single transaction. If the transform script exits non-zero mid-stream,
+  # psql either hits a SQL error (ON_ERROR_STOP=1) or sees EOF mid-tx;
+  # either way the whole thing rolls back. set -o pipefail (set in dbx)
+  # propagates the first non-zero exit so the caller sees the failure.
+  log_info "Streaming restore → transform → target..."
+  local -a target_psql=(docker exec -i)
+  [[ -n "$target_pass" ]] && target_psql+=(-e PGPASSWORD="$target_pass")
+  target_psql+=("$target_container" psql -U "$target_user" -d "$target_db"
+                -v ON_ERROR_STOP=1 -1 -q)
+
+  # set -e + pipefail in dbx will exit the script on the first non-zero
+  # pipe step. We need to inspect $rc and run cleanup, so explicitly
+  # capture via `|| rc=$?` and reset to 0 first.
+  local rc=0
+  if [[ -n "$transform_script" ]]; then
+    { docker exec "$POSTGRES_CONTAINER" \
+        pg_restore --no-owner --no-privileges -f - /tmp/restore-stream.dump \
+        | "$transform_script" \
+        | "${target_psql[@]}"
+    } || rc=$?
+  else
+    { docker exec "$POSTGRES_CONTAINER" \
+        pg_restore --no-owner --no-privileges -f - /tmp/restore-stream.dump \
+        | "${target_psql[@]}"
+    } || rc=$?
+  fi
+
+  docker exec "$POSTGRES_CONTAINER" rm -f /tmp/restore-stream.dump 2>/dev/null || true
+
+  if [[ "$rc" -ne 0 ]]; then
+    # Best-effort cleanup of the partially-restored target. The -1
+    # rollback should have done this already, but if the transform
+    # script itself was killed (SIGPIPE) before psql saw any data,
+    # an empty DB might remain. Drop it to leave no trace.
+    log_error "Streaming restore FAILED (exit $rc). Dropping target '$target_db' for cleanliness."
+    if [[ -n "$target_pass" ]]; then
+      docker exec -e PGPASSWORD="$target_pass" "$target_container" \
+        psql -U "$target_user" -d postgres -c "DROP DATABASE IF EXISTS \"$target_db\"" >/dev/null 2>&1 || true
+    else
+      docker exec "$target_container" \
+        psql -U "$target_user" -d postgres -c "DROP DATABASE IF EXISTS \"$target_db\"" >/dev/null 2>&1 || true
+    fi
+    return $rc
+  fi
+
+  log_success "Streaming restore complete: $target_container:$target_db"
+}
+
 # Detect extensions installed in a specific database. Returns a space-separated
 # list with plpgsql filtered out. Empty string when none or on failure.
 # Args: $1=host $2=port $3=user $4=password $5=database
