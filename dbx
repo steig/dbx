@@ -554,8 +554,18 @@ cmd_restore() {
       log_warn "  so the scrub gate does not run. The --transform script (if set)"
       log_warn "  is the only sanitization layer. Operator owns correctness."
       log_warn "================================================================"
-      audit_log "scrub_bypass" "into_external" \
-        "host" "$host" "database" "$database" "into_container" "$into_container"
+      # Ad-hoc file restores (no host/db parsed from source) get a
+      # distinct audit tag — `scrub_bypass into_external` implies the
+      # gate would have run absent --into, which only applies when a
+      # gated host is in play. Empty host/db kv pairs are skipped to
+      # keep the audit grep-friendly.
+      if [[ -n "$host" && -n "$database" ]]; then
+        audit_log "scrub_bypass" "into_external" \
+          "host" "$host" "database" "$database" "into_container" "$into_container"
+      else
+        audit_log "restore_into" "adhoc_file" \
+          "backup_file" "$(basename "$backup_file")" "into_container" "$into_container"
+      fi
     fi
     case "$db_type" in
       postgres|postgresql)
