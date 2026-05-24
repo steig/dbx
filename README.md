@@ -124,7 +124,7 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 | `dbx storage upload\|download\|list\|sync\|info` | Cloud storage |
 | `dbx update` | Re-run install.sh to upgrade to the latest release |
 | `dbx version` | Print version |
-| `dbx help` | Full reference |
+| `dbx help` | One-screen reference (full docs: https://steig.github.io/dbx/) |
 
 ## Configuration
 

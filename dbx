@@ -2342,143 +2342,36 @@ cmd_help() {
   cat <<EOF
 ${BOLD}dbx${NC} - Database backup and restore utility
 
-${BOLD}USAGE:${NC}
+${BOLD}USAGE${NC}
   dbx <command> [options]
 
-${BOLD}COMMANDS:${NC}
-  backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
-  restore <source> [--name N] [--no-post-restore | --hooks-only] [--no-scrub] [--transform=PATH] [--into NAME]  Restore a backup
-                               <source> can be a local file, host/db/latest,
-                               s3://host/db/latest, or use --from-remote PATH
-                               --transform pipes the restore through a host script (runs under env -i; use --transform-inherit-env to opt out)
-                               --into targets a named running container instead of the managed postgres-dbx (postgres only)
-  verify [backup-file]         Verify backup integrity (checksum)
-  query <host> [database]      Open interactive shell to remote database
-  analyze <host> <database>    Interactive table analysis & exclusion picker
-  test <host>                  Test connection to a database host
-  host add                     Interactively add a host (alias, creds, validate, pick dbs)
-  wizard                       Browser-based config wizard (auto-falls back to gum if no GUI)
-  list [host] [database]       List available backups
-  clean [--keep N] [--dry-run] [--older-than D]  Remove old backups
-  update                       Re-run install.sh to upgrade to the latest release
+${BOLD}COMMANDS${NC}
+  ${CYAN}backup${NC} <host> [db]            Back up database(s) over SSH/local
+  ${CYAN}restore${NC} <source>              Restore a backup (local path, host/db/latest, or s3://...)
+  ${CYAN}verify${NC} [backup]               Verify backup checksum & integrity
+  ${CYAN}list${NC} [host] [db]              List available backups
+  ${CYAN}clean${NC} [--keep N|--older-than D]  Prune old backups
+  ${CYAN}query${NC} <host> [db]             Interactive DB shell
+  ${CYAN}analyze${NC} <host> <db>           Inspect tables & build exclusion list
+  ${CYAN}test${NC} <host>                   Test connection to a host
 
-${BOLD}CREDENTIAL & ENCRYPTION:${NC}
-  vault set|get|delete|list    Manage host credentials
-  vault info                   Show vault backend info
-  vault set-encryption-key     Set GPG encryption passphrase
-  vault init-age               Initialize age encryption
+  ${CYAN}vault${NC}                         Manage credentials & encryption keys
+  ${CYAN}schedule${NC}                      Manage scheduled backups (launchd/systemd)
+  ${CYAN}storage${NC}                       S3/MinIO upload, download, sync
+  ${CYAN}storage add${NC}                   Interactively configure remote storage
+  ${CYAN}scrub${NC}                         Manage PII scrub manifests
+  ${CYAN}config${NC}                        Manage configuration
+  ${CYAN}host add${NC}                      Interactively add a backup host
+  ${CYAN}wizard${NC}                        Browser-based config wizard
+  ${CYAN}update${NC}                        Upgrade dbx to the latest release
 
-${BOLD}SCHEDULING & STORAGE:${NC}
-  schedule add|remove|list|sync  Manage scheduled backups (launchd/systemd; sync reconciles config.schedules[])
-  storage upload|download|sync S3/MinIO cloud storage
-  storage add                  Interactively configure remote storage (S3/MinIO) + live test
-  storage info                 Show storage configuration
-  config init|edit|show|validate  Manage configuration
+${BOLD}QUICK START${NC}
+  ${GREEN}dbx config init && dbx host add${NC}            # one-time setup
+  ${GREEN}dbx backup production myapp${NC}                # back up
+  ${GREEN}dbx restore production/myapp/latest${NC}        # restore to local container
 
-${BOLD}PII SCRUB:${NC}
-  scrub init <host>/<db>       Walk live schema, emit draft scrub manifest
-  scrub check <host>/<db>      Drift check (CI-friendly: exit 2 on drift)
-  scrub validate <host>        Schema-validate the configured manifest
-
-${BOLD}EXAMPLES:${NC}
-  # Setup
-  dbx config init              # Create config template
-  dbx config edit              # Add your hosts
-  dbx vault set production     # Store password securely
-
-  # Enable encryption (optional - GPG or age)
-  dbx vault set-encryption-key # Set GPG encryption passphrase
-  dbx vault init-age           # Or use age encryption
-  # Then set "encryption_type": "gpg" or "age" in config
-
-  # Backup (auto SSH tunnel if configured)
-  dbx backup production myapp
-  dbx backup staging myapp
-
-  # Verify backup integrity
-  dbx verify production/myapp/latest
-
-  # Restore to local container
-  dbx restore production/myapp/latest
-  dbx restore staging/myapp/latest --name myapp_copy
-
-  # Restore directly from S3/MinIO (no separate \`storage download\` step)
-  dbx restore --from-remote production/myapp/latest
-  dbx restore s3://production/myapp/latest --name myapp_copy
-  dbx restore --from-remote prod/db/db_20260510_120000.sql.zst.age --keep-download
-
-  # Schedule backups
-  dbx schedule add production myapp daily   # Run daily at 2am
-  dbx schedule add prod db weekly@0:3       # Sunday at 3am
-  dbx schedule list                         # Show scheduled jobs
-  dbx schedule sync                         # Preview reconcile config.schedules[] vs installed (read-only)
-
-  # Cloud storage
-  dbx storage info                          # Show S3/MinIO config
-  dbx storage sync upload production        # Upload all backups for host
-  dbx storage list                          # List remote backups
-
-  # Interactive query session
-  dbx query production                  # Connect to host
-  dbx query production myapp            # Connect to specific database
-
-  # Manage
-  dbx list                     # Show all hosts
-  dbx list production          # Show databases for host
-  dbx clean --keep 5           # Keep only 5 latest per database
-  dbx clean --older-than 30    # Remove backups older than 30 days
-  dbx clean --keep 3 --older-than 30  # Keep 3 newest, remove older beyond
-
-${BOLD}CONFIG STRUCTURE:${NC}
-  {
-    "hosts": { ... },
-    "defaults": {
-      "encryption_type": "age",   // none, gpg, or age
-      "age_recipients": "~/.config/dbx/age-recipients.txt"
-    },
-    "vault": {
-      "backend": "auto"           // keychain, secret-tool, pass, gpg-file
-    },
-    "notifications": {
-      "enabled": true,
-      "on": "failure",            // failure, success, all
-      "backends": ["slack", "desktop"]
-    },
-    "storage": {
-      "type": "s3",
-      "s3": {
-        "bucket": "backups",
-        "endpoint": "http://minio:9000"
-      }
-    },
-    "schedules": [
-      { "host": "production", "database": "myapp", "when": "daily@5" }
-    ]
-  }
-
-${BOLD}FEATURES:${NC}
-  - SSH tunnels: Auto-creates tunnel for remote DBs, cleans up on exit
-  - Encryption: GPG or age encryption at rest
-  - Checksums: SHA256 verification for backup integrity
-  - DEFINER strip: MySQL views/triggers work locally
-  - Exclude tables: Dump schema but skip data for large/sensitive tables
-  - Credential storage: macOS Keychain, Linux secret-tool, pass, or GPG file
-  - Scheduled backups: launchd (macOS) or systemd timers (Linux)
-  - Cloud storage: S3/MinIO upload and sync
-  - Notifications: Slack, desktop, email on backup success/failure
-  - Audit logging: JSON audit trail at ~/.local/share/dbx/audit.log
-
-${BOLD}STORAGE:${NC}
-  Backups:  ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.age|.gpg]
-  Config:   ~/.config/dbx/config.json
-  Audit:    ~/.local/share/dbx/audit.log
-  Secrets:  macOS Keychain, Linux secret-tool, pass, or ~/.config/dbx/vault.gpg
-
-${BOLD}REQUIREMENTS:${NC}
-  - docker (for pg_dump/mysqldump containers)
-  - jq, zstd, ssh
-  - gpg or age (optional, for encryption)
-  - mc or aws CLI (optional, for S3 storage)
+${BOLD}DOCS${NC}
+  ${BLUE}https://steig.github.io/dbx/${NC}
 EOF
 }
 
