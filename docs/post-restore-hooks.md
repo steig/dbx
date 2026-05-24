@@ -2,6 +2,8 @@
 
 Declare SQL to run after every restore — scrub PII, repoint webhooks at localhost, disable cron rows, reset feature flags. Per database, optionally inherited per host.
 
+For PII scrubbing specifically, see [PII scrub](scrub.md) — a manifest-based feature with schema drift detection.
+
 ```jsonc
 {
   "hosts": {

@@ -7,13 +7,16 @@ encryption (age/GPG), S3 storage, and scheduled backups.
 ## Project Structure
 
 ```
-dbx                    # Main entrypoint script (~1800 lines), houses cmd_* dispatchers (config, vault, schedule, storage, host)
+dbx                    # Main entrypoint script (~2400 lines), houses cmd_* dispatchers (config, vault, schedule, storage, host, scrub)
 lib/
   core.sh              # Config, logging, vault, crypto, verification, utilities
   tunnel.sh            # SSH tunnel creation/cleanup
   encrypt.sh           # Age and GPG encryption (unified interface)
   postgres.sh          # PostgreSQL backup, restore, analysis
   mysql.sh             # MySQL/MariaDB backup, restore, analysis
+  post_restore.sh      # Post-restore SQL hooks runner
+  scrub.sh             # PII scrub: manifest schema, dictionary, drift detection, restore-time gate
+  scrub_strategies.sh  # Per-engine SQL emitters + sniff predicates (fake_email, redact, jsonb_scrub_paths, ...)
   notify.sh            # Notification backends (Slack, desktop, email, command)
   schedule.sh          # Scheduled backups (launchd on macOS, systemd on Linux)
   storage.sh           # Cloud storage (S3/MinIO via mc or aws CLI)

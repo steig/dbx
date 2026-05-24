@@ -139,6 +139,7 @@ nav:
       - Backup: backup.md
       - Restore: restore.md
       - Post-restore hooks: post-restore-hooks.md
+      - PII scrub: scrub.md
       - Subsetting dev clones: subsetting.md
       - Encryption: encryption.md
       - Credential storage: credentials.md

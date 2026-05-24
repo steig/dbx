@@ -402,6 +402,8 @@ dbx restore prod/myapp/latest --hooks-only --name myapp_v1  # re-run hooks again
 
 Inside every hook, `target_db` is bound to the freshly-restored DB name — `:target_db` in PG, `@target_db` in MySQL. Additional vars (`source_host`, `source_db`, `backup_file`, `backup_timestamp`, `restored_at`) are also bound; useful for stamping provenance rows.
 
+For PII masking specifically, prefer the declarative scrub manifest over hand-written `scrub-pii.sql` hooks — it ships with schema-drift detection and a pre-restore gate that aborts when the live schema has columns the manifest doesn't know about. See [docs/scrub.md](docs/scrub.md).
+
 ## Image Selection
 
 dbx auto-picks the Docker image for the restore container based on the source database's version and extensions, recorded in `.meta.json` at backup time:

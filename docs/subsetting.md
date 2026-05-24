@@ -75,17 +75,19 @@ Two shortcuts that avoid the manual ordering:
 
 ## Combining with PII scrub
 
-The natural pipeline is **subset first, mask second** — work on the smaller dataset. Hooks run in array order, so put the subset hook before the mask hook in `post_restore`:
+The natural pipeline is **subset first, mask second** — work on the smaller dataset. The recommended way to do the masking step is the declarative [PII scrub](scrub.md) manifest, which catches the schema-drift problem hand-written hook SQL silently has. Subset hooks run in array order before the manifest-driven scrub, so put the prune hooks first:
 
 ```json
 "post_restore": [
   { "file": "hooks/truncate-noise.sql" },
-  { "file": "hooks/keep-recent.sql" },
-  { "file": "hooks/scrub-pii.sql" }
+  { "file": "hooks/keep-recent.sql" }
 ]
 ```
 
-`scrub-pii.sql` then only has to rewrite rows that survived the prune.
+…with the scrub manifest wired in via the host's `scrub` block (see [PII scrub: Config](scrub.md#config)). The declarative scrub runs after `post_restore` finishes, so it only rewrites rows that survived the prune.
+
+!!! note "If you haven't migrated yet"
+    Hand-rolled `scrub-pii.sql` files still work as a third entry in `post_restore` — nothing forces you onto the manifest. But you give up drift detection and the sniff-verification gate, and you take on the silent-rot risk every time someone ships a new PII-bearing column. The manifest is the recommended path for new setups and the eventual migration target for existing ones.
 
 ## What this approach can't do
 

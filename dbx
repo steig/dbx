@@ -22,6 +22,7 @@ VERSION="0.9.0"
 #   dbx vault set|get|list|delete <host>
 #   dbx schedule add|remove|list|run
 #   dbx storage upload|download|sync|info
+#   dbx scrub init|check|validate <host>/<database>
 #
 
 set -euo pipefail
@@ -39,6 +40,8 @@ source "$LIB_DIR/encrypt.sh"
 source "$LIB_DIR/postgres.sh"
 source "$LIB_DIR/mysql.sh"
 source "$LIB_DIR/post_restore.sh"
+source "$LIB_DIR/scrub.sh"
+source "$LIB_DIR/scrub_strategies.sh"
 source "$LIB_DIR/notify.sh"
 source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/storage.sh"
@@ -190,6 +193,7 @@ cmd_restore() {
   local keep_download=false
   local skip_hooks=false
   local hooks_only=false
+  local skip_scrub=false
 
   # Mixed flag/positional parse: `source` is the only positional and
   # may appear before or after flags (or be absent entirely when the
@@ -218,6 +222,12 @@ cmd_restore() {
         ;;
       --hooks-only)
         hooks_only=true
+        shift
+        ;;
+      --no-scrub)
+        # Break-glass: bypass the PII scrub gate (debugging only).
+        # Loud warning emitted below where the gate would have fired.
+        skip_scrub=true
         shift
         ;;
       --*|-*)
@@ -469,6 +479,29 @@ cmd_restore() {
   local restore_start
   restore_start=$(date +%s)
 
+  # Pre-restore PII scrub drift check. Reads schema captured in the
+  # backup's meta.json (added at backup time) and diffs against the
+  # host's manifest. On drift: abort BEFORE the engine restore so no
+  # data ever lands in the local container. Older backups (no
+  # captured schema) fall through and get checked by the post-restore
+  # gate. Bypassed by --no-scrub or when no gate is configured.
+  if [[ "$skip_scrub" == "false" && -n "$host" ]] && scrub_gate_active "$host"; then
+    local pre_meta="${backup_file}.meta.json"
+    [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.zst}.meta.json"
+    [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.age}.meta.json"
+    [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.gpg}.meta.json"
+    # Suppress set -e so we can branch on the specific exit code; the
+    # preflight returns 2 specifically for drift (vs 1 for error / 0
+    # for clean-or-legacy-backup).
+    local pre_rc=0
+    scrub_preflight_drift_check "$host" "$pre_meta" || pre_rc=$?
+    if [[ "$pre_rc" -eq 2 ]]; then
+      audit_restore "$backup_file" "$target_name" "failure" 0
+      notify_restore_failure "$backup_file" "$target_name" "scrub preflight drift check failed"
+      die "scrub: pre-restore drift check failed. No data was restored."
+    fi
+  fi
+
   case "$db_type" in
     postgres|postgresql)
       pg_restore_backup "$backup_file" "$target_name"
@@ -498,6 +531,39 @@ cmd_restore() {
     # hooks won't run, so they don't assume PII scrub / config rewrites
     # already happened.
     log_warn "Ad-hoc file restore: any configured post_restore hooks are skipped (no host/db context in the source path)."
+  fi
+
+  # PII scrub gate. Fires when hosts.<host>.scrub.required is true. The
+  # gate is fail-closed: any drift / UPDATE error / sniff failure drops
+  # the target DB rather than leaving it for inspection (a half-scrubbed
+  # clone is more dangerous than no clone).
+  if [[ -n "$host" && -n "$database" ]]; then
+    if scrub_gate_active "$host"; then
+      if [[ "$skip_scrub" == "true" ]]; then
+        log_warn "================================================================"
+        log_warn "  --no-scrub: PII scrub gate BYPASSED for $host/$database"
+        log_warn "  The restored DB '$target_name' contains UNSCRUBBED prod data."
+        log_warn "  Do NOT hand this clone to anyone. Drop it when done debugging."
+        log_warn "================================================================"
+        # Separate audit entry so compliance review can grep `scrub_bypass`.
+        # The default audit_restore("success") line still records the restore
+        # itself; this row is the marker that the gate did not run.
+        audit_log "scrub_bypass" "bypassed" \
+          "host" "$host" "database" "$database" "target" "$target_name"
+      else
+        local scrub_report_dir="$DATA_DIR/$host/$database"
+        if ! scrub_run_gate "$host" "$database" "$target_name" "$db_type" "$scrub_report_dir"; then
+          local fail_dur=$(($(date +%s) - restore_start))
+          audit_restore "$backup_file" "$target_name" "failure" "$fail_dur"
+          notify_restore_failure "$backup_file" "$target_name" "scrub gate failed (target DB dropped)"
+          die "Scrub gate FAILED. Target DB '$target_name' was DROPPED (fail-closed). See scrub_report.json under $scrub_report_dir."
+        fi
+      fi
+    elif [[ "$skip_scrub" == "true" ]]; then
+      # --no-scrub was passed but no gate would have fired anyway. Be
+      # explicit so the user doesn't think they bypassed a real check.
+      log_info "--no-scrub: no scrub gate is configured for $host (flag had no effect)."
+    fi
   fi
 
   local restore_dur=$(($(date +%s) - restore_start))
@@ -1007,6 +1073,43 @@ EOF
         fi
       done <<< "$hosts"
 
+      # Validate any scrub manifests referenced from host configs. A
+      # broken manifest causes `dbx scrub check` and the restore-time
+      # gate to fail, so catch it during `dbx config validate` rather
+      # than at 2am when a scheduled job tries to use it.
+      while IFS= read -r h; do
+        [[ -z "$h" ]] && continue
+        local mf
+        mf=$(scrub_manifest_path "$h")
+        if [[ -n "$mf" ]]; then
+          if [[ ! -f "$mf" ]]; then
+            log_error "Host '$h': scrub.manifest references missing file: $mf"
+            ((errors++)) || true
+          else
+            if scrub_validate_manifest "$mf" >/dev/null 2>&1; then
+              log_success "Host '$h': scrub manifest valid ($(basename "$mf"))"
+            else
+              # Re-run with full output so the user sees each error.
+              log_error "Host '$h': scrub manifest INVALID ($mf):"
+              scrub_validate_manifest "$mf" || true
+              ((errors++)) || true
+            fi
+            # If scrub.required is true, require the seed_env to be set
+            # in the current environment (warn-only — required env vars
+            # may legitimately be missing in interactive use).
+            local req
+            req=$(jq -r ".hosts[\"$h\"].scrub.required // false" "$CONFIG_FILE")
+            if [[ "$req" == "true" ]]; then
+              local seed_env_name
+              seed_env_name=$(jq -r '.seed_env // empty' "$mf" 2>/dev/null || true)
+              if [[ -n "$seed_env_name" ]] && [[ -z "${!seed_env_name:-}" ]]; then
+                log_warn "Host '$h': scrub.required=true and seed_env '$seed_env_name' is unset in current env"
+              fi
+            fi
+          fi
+        fi
+      done <<< "$hosts"
+
       # Check encryption config coherence
       local enc_type
       enc_type=$(get_encryption_type 2>/dev/null || echo "none")
@@ -1389,6 +1492,243 @@ cmd_storage() {
       die "Unknown storage action: $action (use: upload, download, list, delete, sync, info, add)"
       ;;
   esac
+}
+
+# ============================================================================
+# Scrub (PII manifest + drift detection)
+# ============================================================================
+
+cmd_scrub() {
+  local action="${1:-}"
+  shift || true
+
+  case "$action" in
+    init)
+      _cmd_scrub_init "$@"
+      ;;
+    check)
+      _cmd_scrub_check "$@"
+      ;;
+    validate)
+      _cmd_scrub_validate "$@"
+      ;;
+    ""|help|-h|--help)
+      cat <<EOF
+Usage:
+  dbx scrub init <host>/<database> [--include-empty] [--output FILE]
+  dbx scrub check <host>/<database> [--quiet] [--json]
+  dbx scrub validate <host>
+
+  init       Connect to source, walk information_schema, emit a draft
+             manifest with dictionary-matched columns. Review, commit,
+             then point hosts.<host>.scrub.manifest at the file.
+  check      Diff the manifest against the live schema. Exit 0 on clean,
+             2 on drift (new PII columns, undeclared JSON, missing
+             declared columns), 1 on error. Use in CI nightly.
+  validate   Schema-validate the configured manifest file.
+EOF
+      ;;
+    *)
+      die "Unknown scrub action: $action (use: init, check, validate)"
+      ;;
+  esac
+}
+
+# Parse a <host>/<database> argument; echoes "host" and "database" on
+# separate lines via stdout (caller reads with mapfile or `read -r`).
+# Dies on a malformed input.
+_parse_scrub_target() {
+  local arg="$1"
+  [[ -z "$arg" ]] && die "Usage: dbx scrub <action> <host>/<database>"
+  [[ "$arg" != */* ]] && die "Target must be in the form <host>/<database> (got: $arg)"
+  local host="${arg%%/*}"
+  local database="${arg#*/}"
+  [[ -z "$host" || -z "$database" ]] && \
+    die "Could not parse host/database from '$arg'"
+  printf '%s\n%s\n' "$host" "$database"
+}
+
+# Dispatch the engine-specific schema query, emitting TSV on stdout.
+# Args: $1 host, $2 database
+_scrub_query_live_schema_tsv() {
+  local host="$1" db="$2"
+  local dbtype
+  dbtype=$(get_db_type "$host")
+  case "$dbtype" in
+    postgres|postgresql) scrub_schema_query_pg "$host" "$db" ;;
+    mysql|mariadb)       scrub_schema_query_mysql "$host" "$db" ;;
+    *) die "scrub: unknown database type for host '$host': $dbtype" ;;
+  esac
+}
+
+_cmd_scrub_init() {
+  local target="" output="" include_empty=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --include-empty) include_empty=true; shift ;;
+      --output|-o) output="$2"; shift 2 ;;
+      --*|-*) die "Unknown option: $1" ;;
+      *) [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
+    esac
+  done
+
+  require_config
+  require_jq
+  require_docker
+
+  local host database
+  { read -r host; read -r database; } < <(_parse_scrub_target "$target")
+
+  log_step "scrub init: querying schema of $database@$host..."
+  local tsv schema draft
+  tsv=$(_scrub_query_live_schema_tsv "$host" "$database")
+  if [[ -z "$tsv" ]]; then
+    die "scrub init: schema query returned no rows (check credentials and database name)"
+  fi
+  schema=$(printf '%s\n' "$tsv" | scrub_schema_tsv_to_json)
+
+  # Inherit the configured seed_env name (if any) from the existing
+  # manifest, so re-running init doesn't fight the user's choice.
+  local seed_env="DBX_SCRUB_SEED"
+  if scrub_manifest_exists "$host"; then
+    local existing
+    existing=$(scrub_read_manifest "$host")
+    local cfgured
+    cfgured=$(jq -r '.seed_env // empty' <<<"$existing")
+    [[ -n "$cfgured" ]] && seed_env="$cfgured"
+  fi
+
+  draft=$(scrub_init_draft_from_schema "$schema" "$seed_env" "$include_empty")
+  # Pretty-print for human consumption.
+  local pretty
+  pretty=$(jq '.' <<<"$draft")
+
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$pretty" > "$output"
+    log_success "Draft manifest written: $output"
+    log_info "Review, edit, then point hosts.$host.scrub.manifest at the file."
+  else
+    printf '%s\n' "$pretty"
+    log_info "Re-run with --output PATH to save the draft to a file."
+  fi
+}
+
+_cmd_scrub_check() {
+  local target="" quiet=false as_json=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --quiet|-q) quiet=true; shift ;;
+      --json)     as_json=true; shift ;;
+      --*|-*)     die "Unknown option: $1" ;;
+      *) [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
+    esac
+  done
+
+  require_config
+  require_jq
+  require_docker
+
+  local host database
+  { read -r host; read -r database; } < <(_parse_scrub_target "$target")
+
+  if ! scrub_manifest_exists "$host"; then
+    log_error "scrub check: no manifest configured for host '$host'"
+    log_info "Run: dbx scrub init $target --output dbx.scrub.json"
+    log_info "Then set hosts.$host.scrub.manifest to that path in your config."
+    return 1
+  fi
+
+  local mf
+  mf=$(scrub_manifest_path "$host")
+  # Schema-validate the manifest before drift-checking. A malformed
+  # manifest cannot be meaningfully compared against a live schema.
+  if ! scrub_validate_manifest "$mf" >/dev/null 2>&1; then
+    log_error "scrub check: manifest is invalid — run 'dbx scrub validate $host' for details"
+    return 1
+  fi
+
+  [[ "$quiet" != "true" ]] && log_step "scrub check: comparing manifest against live schema of $database@$host..."
+
+  local tsv schema manifest report
+  tsv=$(_scrub_query_live_schema_tsv "$host" "$database")
+  if [[ -z "$tsv" ]]; then
+    die "scrub check: schema query returned no rows"
+  fi
+  schema=$(printf '%s\n' "$tsv" | scrub_schema_tsv_to_json)
+  manifest=$(scrub_read_manifest "$host")
+  report=$(scrub_check_diff "$schema" "$manifest")
+
+  if [[ "$as_json" == "true" ]]; then
+    printf '%s\n' "$report" | jq '.'
+    if [[ "$(jq -r '.ok' <<<"$report")" == "true" ]]; then return 0; else return 2; fi
+  fi
+
+  # Human-readable report
+  if [[ "$(jq -r '.ok' <<<"$report")" == "true" ]]; then
+    [[ "$quiet" != "true" ]] && \
+      log_success "scrub: $target — manifest is current (no drift)"
+    return 0
+  fi
+
+  log_error "scrub: $target — DRIFT DETECTED"
+  echo ""
+
+  local nc nt nm nju
+  nc=$(jq '.new_columns_with_dict_match | length' <<<"$report")
+  nt=$(jq '.new_tables_with_dict_matches | length' <<<"$report")
+  nm=$(jq '.missing_declared_columns | length' <<<"$report")
+  nju=$(jq '.json_columns_undeclared | length' <<<"$report")
+
+  if [[ "$nc" -gt 0 ]]; then
+    echo "  NEW dictionary-matching columns (no strategy declared):"
+    jq -r '.new_columns_with_dict_match[] |
+      "    \(.table).\(.column)\t(pattern: \(.pattern))\tsuggested: \(.suggested.strategy)"' \
+      <<<"$report" | column -t -s $'\t'
+    echo ""
+  fi
+
+  if [[ "$nt" -gt 0 ]]; then
+    echo "  NEW tables with dictionary matches (not in manifest):"
+    jq -r '.new_tables_with_dict_matches[] |
+      "    \(.table):\n" +
+      (.matches | map("      · \(.column)\t(pattern: \(.pattern))\tsuggested: \(.suggested.strategy)") | join("\n"))' \
+      <<<"$report"
+    echo ""
+  fi
+
+  if [[ "$nm" -gt 0 ]]; then
+    echo "  MISSING declared columns (manifest references a column not in schema — strategy would no-op, PII may leak):"
+    jq -r '.missing_declared_columns[] | "    \(.table).\(.column)"' <<<"$report"
+    echo ""
+  fi
+
+  if [[ "$nju" -gt 0 ]]; then
+    echo "  UNDECLARED JSON columns (implicit-deny — declare jsonb_scrub_paths, redact, or passthrough):"
+    jq -r '.json_columns_undeclared[] | "    \(.table).\(.column)"' <<<"$report"
+    echo ""
+  fi
+
+  echo "  This manifest does not cover the current schema. A clone"
+  echo "  scrubbed against it may leak PII. Edit $(basename "$mf") and re-run."
+  return 2
+}
+
+_cmd_scrub_validate() {
+  local host="${1:-}"
+  [[ -z "$host" ]] && die "Usage: dbx scrub validate <host>"
+  require_config
+  require_jq
+  if ! scrub_manifest_exists "$host"; then
+    die "scrub validate: no manifest configured for host '$host'"
+  fi
+  local mf
+  mf=$(scrub_manifest_path "$host")
+  if scrub_validate_manifest "$mf"; then
+    log_success "Manifest schema valid: $mf"
+    return 0
+  else
+    return 1
+  fi
 }
 
 cmd_query() {
@@ -1855,7 +2195,7 @@ ${BOLD}USAGE:${NC}
 
 ${BOLD}COMMANDS:${NC}
   backup [-v] [--upload] <host> [database]  Backup database(s) (-v verbose)
-  restore <source> [--name N] [--no-post-restore | --hooks-only]  Restore a backup to local container
+  restore <source> [--name N] [--no-post-restore | --hooks-only] [--no-scrub]  Restore a backup to local container
                                <source> can be a local file, host/db/latest,
                                s3://host/db/latest, or use --from-remote PATH
   verify [backup-file]         Verify backup integrity (checksum)
@@ -1880,6 +2220,11 @@ ${BOLD}SCHEDULING & STORAGE:${NC}
   storage add                  Interactively configure remote storage (S3/MinIO) + live test
   storage info                 Show storage configuration
   config init|edit|show|validate  Manage configuration
+
+${BOLD}PII SCRUB:${NC}
+  scrub init <host>/<db>       Walk live schema, emit draft scrub manifest
+  scrub check <host>/<db>      Drift check (CI-friendly: exit 2 on drift)
+  scrub validate <host>        Schema-validate the configured manifest
 
 ${BOLD}EXAMPLES:${NC}
   # Setup
@@ -2029,6 +2374,9 @@ main() {
       ;;
     storage|s3)
       cmd_storage "$@"
+      ;;
+    scrub)
+      cmd_scrub "$@"
       ;;
     help|--help|-h)
       cmd_help
