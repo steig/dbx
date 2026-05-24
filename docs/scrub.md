@@ -262,6 +262,10 @@ If sniff verification fails, **the restored DB is dropped**. This inverts the po
 
 To preview without committing, restore to a non-gated destination first; nothing is dropped because nothing was gated.
 
+### `--into` bypasses the gate
+
+`dbx restore <source> --into <container>` (see [Restore](restore.md#targeting-an-external-container-with-into)) **bypasses the scrub gate** even when the source is gated. The reason is the fail-closed policy: on a sniff failure the gate must DROP the target DB, but dbx can't safely drop a database inside a user-managed external container. Instead a loud warning is logged and a `scrub_bypass` / `into_external` row is written to the audit log. The expectation is that `--into` is paired with `--transform=PATH`, where the user-supplied script is the sanitization layer — see [Streaming sanitization with --transform](restore.md#streaming-sanitization-with-transform).
+
 ## `scrub_report.json`
 
 Written next to the restore artifact after a gated restore. Format:

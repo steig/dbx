@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **`dbx restore --transform=PATH`** — pipe the restore byte-stream through a host-side executable before any write to the target. Unsanitized bytes never touch disk; the script receives plain SQL on stdin (postgres custom-format dumps are converted via `pg_restore -f -`) and emits sanitized SQL on stdout. Atomic on postgres (single-transaction wrap with `psql -1 -v ON_ERROR_STOP=1`); best-effort on MySQL (DDL implicitly commits). Non-zero exit from the script aborts the restore and drops the target. (#41)
+- **`dbx restore --into NAME`** — restore into a named external running docker container (e.g. a compose-managed postgres sidecar) instead of the managed `postgres-dbx`. Reads `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` from the container's env via `docker inspect`; waits up to 30s for `pg_isready`. Postgres only — MySQL `--into` is rejected with a clear error. Implicitly bypasses the scrub gate (dbx can't safely DROP a user-managed container's DB) with a loud warning + `scrub_bypass` audit log entry. (#41)
+- The two flags compose: `dbx restore <src> --transform=./sanitize.sh --into sidecar-container` runs the streaming sanitize pipeline into a non-dbx-managed container. The load-bearing [boring](https://github.com/steig/boring) v0.5 integration use case.
+
 ## [0.10.0] - 2026-05-24
 
 Two-feature minor release: a browser-based config builder with an online static variant (#38), and a first-class PII scrubber with declarative manifest, schema drift detection, and a fail-closed restore-time gate (#40).
