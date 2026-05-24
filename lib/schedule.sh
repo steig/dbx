@@ -149,6 +149,8 @@ EOF
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:$HOME/.nix-profile/bin</string>
     </dict>
+    <key>DbxScheduleExpression</key>
+    <string>$schedule</string>
 </dict>
 </plist>
 EOF
@@ -309,8 +311,11 @@ StandardError=append:$HOME/.local/share/dbx/logs/${job_name}.error.log
 WantedBy=default.target
 EOF
 
-  # Create timer unit
+  # Create timer unit. The DbxScheduleExpression header lets
+  # `dbx schedule sync` read back the friendly form without
+  # reverse-parsing the OnCalendar field.
   cat > "$timer_path" << EOF
+# DbxScheduleExpression: $schedule
 [Unit]
 Description=DBX backup timer: $database@$host
 
@@ -380,6 +385,129 @@ systemd_list() {
   if ! $found; then
     echo "  No scheduled backups found"
   fi
+}
+
+# ============================================================================
+# Declarative-config interface (#39, read path)
+#
+# Config is canonical: `config.schedules[]` describes the desired state;
+# installed launchd/systemd units are derived. The friendly schedule
+# expression is stamped into the unit at install time (DbxScheduleExpression
+# in the plist; `# DbxScheduleExpression:` header in the timer) so we can
+# read it back without reverse-parsing cron.
+# ============================================================================
+
+# Emit one TSV line per `.schedules[]` entry in config.json:
+#   host TAB database TAB when
+# Returns 0 with no output if `.schedules` is missing or empty.
+schedule_config_read() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  jq -r '
+    (.schedules // []) | .[] |
+    [.host, .database, .when] | @tsv
+  ' "$CONFIG_FILE" 2>/dev/null
+}
+
+# Emit one TSV line per installed unit:
+#   host TAB database TAB when
+# Units installed before this feature (no marker) emit "?" for `when`.
+# Job name shape is "<PREFIX>.<host>.<database>"; the host/db split is the
+# inverse of make_job_name.
+schedule_installed_read() {
+  if is_macos; then
+    local plist
+    for plist in "$LAUNCHD_DIR"/${SCHEDULE_PREFIX}.*.plist; do
+      [[ -f "$plist" ]] || continue
+      local job_name rest host database expr
+      job_name=$(basename "$plist" .plist)
+      rest="${job_name#${SCHEDULE_PREFIX}.}"
+      host="${rest%%.*}"
+      database="${rest#*.}"
+      expr=$(/usr/libexec/PlistBuddy -c "Print :DbxScheduleExpression" "$plist" 2>/dev/null || echo "?")
+      [[ -z "$expr" ]] && expr="?"
+      printf '%s\t%s\t%s\n' "$host" "$database" "$expr"
+    done
+  else
+    local timer
+    for timer in "$SYSTEMD_DIR"/${SCHEDULE_PREFIX}.*.timer; do
+      [[ -f "$timer" ]] || continue
+      local job_name rest host database expr
+      job_name=$(basename "$timer" .timer)
+      rest="${job_name#${SCHEDULE_PREFIX}.}"
+      host="${rest%%.*}"
+      database="${rest#*.}"
+      expr=$(grep -m1 '^# DbxScheduleExpression: ' "$timer" 2>/dev/null \
+        | sed 's/^# DbxScheduleExpression: //' || true)
+      [[ -z "$expr" ]] && expr="?"
+      printf '%s\t%s\t%s\n' "$host" "$database" "$expr"
+    done
+  fi
+}
+
+# Compute the sync plan as TSV lines:
+#   action TAB host TAB database TAB when
+# Action values: install | update | orphan | nochange
+# Used by `dbx schedule sync` and `--dry-run`. Pure function over the
+# output of schedule_config_read and schedule_installed_read — no side
+# effects, fully unit-testable.
+# Args: $1 = config TSV (multiline), $2 = installed TSV (multiline)
+schedule_sync_plan() {
+  local cfg="$1" inst="$2"
+  # Stream both inputs into awk via stdin so multi-line content works
+  # under BSD awk (macOS) too — `-v` won't accept embedded newlines.
+  # CFG/INST sentinel lines disambiguate which side each row came from.
+  {
+    printf '%s\n' "CFG_START"
+    [[ -n "$cfg" ]] && printf '%s\n' "$cfg"
+    printf '%s\n' "INST_START"
+    [[ -n "$inst" ]] && printf '%s\n' "$inst"
+  } | awk -F'\t' '
+    /^CFG_START$/  { side = "cfg"; next }
+    /^INST_START$/ { side = "inst"; next }
+    {
+      if ($0 == "") next
+      key = $1 "\t" $2
+      if (side == "cfg")  { cfg_when[key] = $3; cfg_keys[key] = 1 }
+      else                { inst_when[key] = $3; inst_keys[key] = 1 }
+    }
+    END {
+      for (k in cfg_keys) {
+        if (!(k in inst_keys))                  print "install\t"  k "\t" cfg_when[k]
+        else if (inst_when[k] != cfg_when[k])   print "update\t"   k "\t" cfg_when[k]
+        else                                    print "nochange\t" k "\t" cfg_when[k]
+      }
+      for (k in inst_keys) {
+        if (!(k in cfg_keys)) print "orphan\t" k "\t" inst_when[k]
+      }
+    }
+  '
+}
+
+# Print the plan in human-friendly form. Returns:
+#   0 if there is anything actionable (install/update/orphan)
+#   1 if everything is nochange or the plan is empty
+# Args: $1 = plan TSV (multiline, as emitted by schedule_sync_plan)
+schedule_sync_print_plan() {
+  local plan="$1" total=0 actionable=0
+  local action host database when
+  echo "${BOLD}Schedule sync plan${NC}"
+  echo ""
+  while IFS=$'\t' read -r action host database when; do
+    [[ -z "$action" ]] && continue
+    total=$((total + 1))
+    case "$action" in
+      install)  printf "  ${GREEN}+ install${NC}  %s/%s @ %s\n" "$host" "$database" "$when"; actionable=$((actionable + 1)) ;;
+      update)   printf "  ${YELLOW}~ update${NC}   %s/%s → %s\n" "$host" "$database" "$when"; actionable=$((actionable + 1)) ;;
+      orphan)   printf "  ${RED}! orphan${NC}   %s/%s @ %s (installed but not in config)\n" "$host" "$database" "$when"; actionable=$((actionable + 1)) ;;
+      nochange) printf "  ${CYAN}= same${NC}     %s/%s @ %s\n" "$host" "$database" "$when" ;;
+    esac
+  done <<< "$plan"
+  if [[ "$total" -eq 0 ]]; then
+    echo "  (config.schedules is empty and no units are installed)"
+    return 1
+  fi
+  echo ""
+  [[ "$actionable" -gt 0 ]] && return 0 || return 1
 }
 
 # ============================================================================

@@ -20,7 +20,7 @@ VERSION="0.10.0"
 #   dbx query <host> [database]
 #   dbx config init|edit|show|validate
 #   dbx vault set|get|list|delete <host>
-#   dbx schedule add|remove|list|run
+#   dbx schedule add|remove|list|run|sync
 #   dbx storage upload|download|sync|info
 #   dbx scrub init|check|validate <host>/<database>
 #
@@ -1238,6 +1238,24 @@ EOF
         fi
       fi
 
+      # Schedule drift warning (#39). Doesn't count as a validation error
+      # — config.schedules and installed units are two separate sources
+      # of truth in v0.x. Reports drift as a hint to run `schedule sync`.
+      local cfg_sched
+      cfg_sched=$(jq -r '.schedules // [] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+      if [[ "$cfg_sched" -gt 0 ]]; then
+        local cfg_tsv inst_tsv plan actionable
+        cfg_tsv=$(schedule_config_read || true)
+        inst_tsv=$(schedule_installed_read || true)
+        plan=$(schedule_sync_plan "$cfg_tsv" "$inst_tsv")
+        actionable=$(echo "$plan" | grep -cE '^(install|update|orphan)' 2>/dev/null || echo 0)
+        if [[ "$actionable" -gt 0 ]]; then
+          log_warn "config.schedules has $actionable change(s) not reflected in installed units. Run 'dbx schedule sync' to preview."
+        else
+          log_success "$cfg_sched schedule(s) configured, in sync with installed units"
+        fi
+      fi
+
       if [[ $errors -gt 0 ]]; then
         echo ""
         log_error "$errors error(s) found"
@@ -1365,8 +1383,37 @@ cmd_schedule() {
       schedule_list
       ;;
 
+    sync)
+      # Reconcile config.schedules[] against installed units. Read-only
+      # in this slice (#39 PR A): always behaves as --dry-run. The write
+      # path lands in a follow-up PR. Lets users validate their config
+      # block today before committing to the full declarative flow.
+      require_config
+      require_jq
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --dry-run) shift ;;
+          --force)   die "--force is not yet implemented (write path lands in a follow-up PR; only --dry-run is supported today)" ;;
+          -*)        die "Unknown schedule sync option: $1" ;;
+          *)         die "Unknown schedule sync argument: $1" ;;
+        esac
+      done
+
+      local cfg_tsv inst_tsv plan
+      cfg_tsv=$(schedule_config_read || true)
+      inst_tsv=$(schedule_installed_read || true)
+      plan=$(schedule_sync_plan "$cfg_tsv" "$inst_tsv")
+
+      schedule_sync_print_plan "$plan"
+      local plan_rc=$?
+      echo "  (read-only preview — the write path lands in a follow-up PR)"
+      # Non-zero exit when there's actionable drift so CI / pre-commit
+      # hooks can use this as a check.
+      return "$plan_rc"
+      ;;
+
     *)
-      die "Unknown schedule action: $action (use: add, remove, list, run)"
+      die "Unknown schedule action: $action (use: add, remove, list, run, sync)"
       ;;
   esac
 }
@@ -2322,7 +2369,7 @@ ${BOLD}CREDENTIAL & ENCRYPTION:${NC}
   vault init-age               Initialize age encryption
 
 ${BOLD}SCHEDULING & STORAGE:${NC}
-  schedule add|remove|list     Manage scheduled backups (launchd/systemd)
+  schedule add|remove|list|sync  Manage scheduled backups (launchd/systemd; sync reconciles config.schedules[])
   storage upload|download|sync S3/MinIO cloud storage
   storage add                  Interactively configure remote storage (S3/MinIO) + live test
   storage info                 Show storage configuration
@@ -2355,7 +2402,7 @@ ${BOLD}EXAMPLES:${NC}
   dbx restore production/myapp/latest
   dbx restore staging/myapp/latest --name myapp_copy
 
-  # Restore directly from S3/MinIO (no separate `storage download` step)
+  # Restore directly from S3/MinIO (no separate \`storage download\` step)
   dbx restore --from-remote production/myapp/latest
   dbx restore s3://production/myapp/latest --name myapp_copy
   dbx restore --from-remote prod/db/db_20260510_120000.sql.zst.age --keep-download
@@ -2364,6 +2411,7 @@ ${BOLD}EXAMPLES:${NC}
   dbx schedule add production myapp daily   # Run daily at 2am
   dbx schedule add prod db weekly@0:3       # Sunday at 3am
   dbx schedule list                         # Show scheduled jobs
+  dbx schedule sync                         # Preview reconcile config.schedules[] vs installed (read-only)
 
   # Cloud storage
   dbx storage info                          # Show S3/MinIO config
@@ -2402,7 +2450,10 @@ ${BOLD}CONFIG STRUCTURE:${NC}
         "bucket": "backups",
         "endpoint": "http://minio:9000"
       }
-    }
+    },
+    "schedules": [
+      { "host": "production", "database": "myapp", "when": "daily@5" }
+    ]
   }
 
 ${BOLD}FEATURES:${NC}
