@@ -37,6 +37,11 @@ jobs:
         run: pip install -r docs/requirements.txt
 
       - name: Build (strict)
+        env:
+          # PostHog project key (public — designed to be exposed client-side).
+          # Lives as a repo variable so we don't commit it to YAML; empty
+          # means analytics snippet is skipped (PR / fork builds, etc).
+          POSTHOG_API_KEY: ${{ vars.POSTHOG_API_KEY }}
         run: mkdocs build --strict --site-dir _site
 
       - uses: actions/configure-pages@v5

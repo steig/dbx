@@ -16,6 +16,7 @@ copyright: Copyright &copy; 2026 Tom Steigerwald &middot; <a href="https://githu
 
 theme:
   name: material
+  custom_dir: overrides
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -59,6 +60,13 @@ extra:
       link: https://github.com/steig/dbx
       name: dbx on GitHub
   generator: false
+  analytics:
+    provider: custom
+    # POSTHOG_API_KEY is set as a GitHub Actions repo variable + threaded
+    # through the docs.yml workflow env. Empty default means local builds
+    # without the var skip the snippet entirely (no analytics in preview).
+    posthog_key: !ENV [POSTHOG_API_KEY, ""]
+    posthog_host: https://us.i.posthog.com
 
 extra_css:
   - stylesheets/extra.css
