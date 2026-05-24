@@ -334,10 +334,13 @@ mysql_restore_backup() {
 #   decompress → filter_sql → [transform] → mysql in target
 # Atomicity is best-effort — MySQL DDL implicitly commits. On failure we
 # DROP the target as cleanup. See docs/restore.md for caveats.
+# Transform script runs under `env -i` by default (see transform_exec_argv).
 #
-# Args: $1 backup_file, $2 target_db, $3 transform_script (may be empty)
+# Args: $1 backup_file, $2 target_db, $3 transform_script (may be empty),
+#       $4 transform_inherit_env ("true" to skip env cleaning)
 mysql_restore_backup_streaming() {
   local backup_file="$1" target_db="$2" transform_script="$3"
+  local transform_inherit_env="${4:-false}"
 
   log_step "Streaming restore (mysql) → $target_db"
   require_container "$MYSQL_CONTAINER"
@@ -358,9 +361,13 @@ mysql_restore_backup_streaming() {
   log_info "Streaming restore → transform → target..."
   local rc=0
   if [[ -n "$transform_script" ]]; then
+    local -a transform_argv=()
+    local line
+    while IFS= read -r line; do transform_argv+=("$line"); done \
+      < <(transform_exec_argv "$transform_inherit_env" "$transform_script")
     { decompress_backup "$backup_file" \
         | bash -c "$filter_sql_cmd" \
-        | "$transform_script" \
+        | "${transform_argv[@]}" \
         | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
           mysql -u root "$target_db"
     } || rc=$?

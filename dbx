@@ -195,6 +195,7 @@ cmd_restore() {
   local hooks_only=false
   local skip_scrub=false
   local transform_script=""
+  local transform_inherit_env=false
   local into_container=""
 
   # Mixed flag/positional parse: `source` is the only positional and
@@ -240,6 +241,13 @@ cmd_restore() {
         transform_script="${1#--transform=}"
         shift
         ;;
+      --transform-inherit-env)
+        # Opt-in to passing dbx's full environment (PGPASSWORD, vault
+        # tokens, DBX_*) to the transform subprocess. Default since
+        # this flag landed is `env -i` with a small allowlist.
+        transform_inherit_env=true
+        shift
+        ;;
       --into)
         into_container="$2"
         shift 2
@@ -277,6 +285,9 @@ cmd_restore() {
   fi
   if [[ "$hooks_only" == "true" && (-n "$transform_script" || -n "$into_container") ]]; then
     die "--hooks-only is incompatible with --transform / --into (no engine restore happens in hooks-only mode)"
+  fi
+  if [[ "$transform_inherit_env" == "true" && -z "$transform_script" ]]; then
+    die "--transform-inherit-env requires --transform=PATH"
   fi
 
   # Validate --transform target is an executable.
@@ -571,11 +582,13 @@ cmd_restore() {
       postgres|postgresql)
         [[ -z "$target_container" ]] && target_container="$POSTGRES_CONTAINER"
         pg_restore_backup_streaming "$backup_file" "$target_name" \
-          "$target_container" "$target_user" "$target_pass" "$transform_script"
+          "$target_container" "$target_user" "$target_pass" \
+          "$transform_script" "$transform_inherit_env"
         ;;
       mysql|mariadb)
         # MySQL --transform path (--into already rejected above).
-        mysql_restore_backup_streaming "$backup_file" "$target_name" "$transform_script"
+        mysql_restore_backup_streaming "$backup_file" "$target_name" \
+          "$transform_script" "$transform_inherit_env"
         ;;
       *)
         die "Unknown database type: $db_type"
@@ -2290,7 +2303,7 @@ ${BOLD}COMMANDS:${NC}
   restore <source> [--name N] [--no-post-restore | --hooks-only] [--no-scrub] [--transform=PATH] [--into NAME]  Restore a backup
                                <source> can be a local file, host/db/latest,
                                s3://host/db/latest, or use --from-remote PATH
-                               --transform pipes the restore through a host script (streaming sanitize, atomic on postgres)
+                               --transform pipes the restore through a host script (runs under env -i; use --transform-inherit-env to opt out)
                                --into targets a named running container instead of the managed postgres-dbx (postgres only)
   verify [backup-file]         Verify backup integrity (checksum)
   query <host> [database]      Open interactive shell to remote database

@@ -437,16 +437,18 @@ pg_resolve_into_container() {
 
 # Streaming restore variant used when `--transform` or `--into` is set.
 # Pipeline: pg_restore -f - | <transform> | psql -1 ON_ERROR_STOP=1
-# The transform script (if any) runs on the host. A non-zero exit from
+# The transform script (if any) runs on the host under `env -i` by
+# default (see transform_exec_argv in core.sh). A non-zero exit from
 # any pipe stage rolls back the single-tx target.
 #
 # Args: $1 backup_file, $2 target_db, $3 target_container,
 #       $4 target_user, $5 target_pass (may be empty),
-#       $6 transform_script (may be empty)
+#       $6 transform_script (may be empty),
+#       $7 transform_inherit_env ("true" to skip env cleaning)
 pg_restore_backup_streaming() {
   local backup_file="$1" target_db="$2"
   local target_container="$3" target_user="$4" target_pass="$5"
-  local transform_script="$6"
+  local transform_script="$6" transform_inherit_env="${7:-false}"
 
   log_step "Streaming restore (postgres) → $target_container:$target_db"
 
@@ -506,9 +508,13 @@ pg_restore_backup_streaming() {
 
   local rc=0
   if [[ -n "$transform_script" ]]; then
+    local -a transform_argv=()
+    local line
+    while IFS= read -r line; do transform_argv+=("$line"); done \
+      < <(transform_exec_argv "$transform_inherit_env" "$transform_script")
     { docker exec "$POSTGRES_CONTAINER" \
         pg_restore --no-owner --no-privileges -f - "$in_container_dump" \
-        | "$transform_script" \
+        | "${transform_argv[@]}" \
         | "${target_psql[@]}"
     } || rc=$?
   else

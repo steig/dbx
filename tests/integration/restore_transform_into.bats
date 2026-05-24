@@ -363,3 +363,78 @@ EOF
     -c "SELECT count(*) FROM pg_database WHERE datname = '$TEST_TGT'" | tr -d '[:space:]')
   [ "$exists" = "0" ]
 }
+
+# ----------------------------------------------------------------------------
+# --transform env scrubbing (default: env -i + allowlist)
+# ----------------------------------------------------------------------------
+
+# Sanitize script that writes the values of PGPASSWORD and DBX_SCRUB_SEED
+# (or empty strings if unset) into a marker file, then passes stdin through
+# unchanged. We assert the marker file shows BOTH as empty under the
+# default env-clean behavior, and as populated under --transform-inherit-env.
+_write_env_probe_script() {
+  local marker="$1"
+  cat > "$TRANSFORM_SCRIPT" <<EOF
+#!/usr/bin/env bash
+{
+  printf 'PGPASSWORD=%s\n' "\${PGPASSWORD:-<unset>}"
+  printf 'DBX_SCRUB_SEED=%s\n' "\${DBX_SCRUB_SEED:-<unset>}"
+  printf 'DBX_TRANSFORM_FOO=%s\n' "\${DBX_TRANSFORM_FOO:-<unset>}"
+} > "$marker"
+cat   # pass stdin through unchanged
+EOF
+  chmod +x "$TRANSFORM_SCRIPT"
+}
+
+@test "--transform default: PGPASSWORD and DBX_SCRUB_SEED are NOT inherited" {
+  local marker="$BATS_TEST_TMPDIR/env-probe.txt"
+  _write_env_probe_script "$marker"
+
+  seed_postgres_db "$TEST_SRC" "CREATE TABLE t (id INT); INSERT INTO t VALUES (1);"
+  export DBX_SCRUB_SEED="should-not-leak-to-script"
+  export PGPASSWORD="should-not-leak-to-script-either"
+  export DBX_TRANSFORM_FOO="explicit-pass-through"
+  dbx_run backup local-pg "$TEST_SRC"
+  [ "$status" -eq 0 ]
+
+  dbx_run restore "local-pg/$TEST_SRC/latest" \
+    --name "$TEST_TGT" \
+    --transform="$TRANSFORM_SCRIPT"
+  [ "$status" -eq 0 ]
+
+  # Probe captured what the script saw:
+  [ -f "$marker" ]
+  grep -q '^PGPASSWORD=<unset>$' "$marker"
+  grep -q '^DBX_SCRUB_SEED=<unset>$' "$marker"
+  # The DBX_TRANSFORM_* prefix is explicitly passed through.
+  grep -q '^DBX_TRANSFORM_FOO=explicit-pass-through$' "$marker"
+
+  unset DBX_SCRUB_SEED PGPASSWORD DBX_TRANSFORM_FOO
+}
+
+@test "--transform --transform-inherit-env: legacy behavior, all env passed through" {
+  local marker="$BATS_TEST_TMPDIR/env-probe-inherit.txt"
+  _write_env_probe_script "$marker"
+
+  seed_postgres_db "$TEST_SRC" "CREATE TABLE t (id INT); INSERT INTO t VALUES (1);"
+  export DBX_SCRUB_SEED="visible-with-inherit-flag"
+  dbx_run backup local-pg "$TEST_SRC"
+  [ "$status" -eq 0 ]
+
+  dbx_run restore "local-pg/$TEST_SRC/latest" \
+    --name "$TEST_TGT" \
+    --transform="$TRANSFORM_SCRIPT" \
+    --transform-inherit-env
+  [ "$status" -eq 0 ]
+
+  [ -f "$marker" ]
+  grep -q '^DBX_SCRUB_SEED=visible-with-inherit-flag$' "$marker"
+
+  unset DBX_SCRUB_SEED
+}
+
+@test "--transform-inherit-env without --transform is rejected" {
+  dbx_run restore /tmp/nonexistent.sql --name foo --transform-inherit-env
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "requires --transform"
+}
