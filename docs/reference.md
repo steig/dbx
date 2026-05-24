@@ -21,7 +21,7 @@
 | `dbx storage upload\|download\|list\|sync\|info` | Cloud [storage](storage.md). |
 | `dbx update` | Re-run `install.sh` to upgrade to the latest release. |
 | `dbx version` | Print version. |
-| `dbx help` | Full reference. |
+| `dbx help` | One-screen reference (links here for full docs). |
 
 ## Environment variables
 
