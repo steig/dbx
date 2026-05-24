@@ -9,9 +9,6 @@ load '../helpers/common'
 setup() {
   setup_dbx_env
   source_dbx_libs
-  # Source dbx itself to pull cmd_wizard helpers into scope.
-  # shellcheck disable=SC1090
-  source <(sed -n '/^# Browser-driven config wizard/,/^cmd_help() {/p' "$DBX_REPO_ROOT/dbx" | sed '$d')
 }
 
 # ----------------------------------------------------------------------------
