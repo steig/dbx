@@ -34,7 +34,13 @@ Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them wit
 - **Credentials in the system vault** — no plaintext passwords in shell history or config files. macOS Keychain, GNOME libsecret, `pass`, or a GPG-encrypted file as fallback.
 - **One config file, JSON** — version-controllable, tab-completable, no surprises.
 
-Not for you if: you need streaming/PITR replication, point-in-time recovery from WAL, or anything beyond logical dumps.
+### What dbx is and isn't
+
+dbx is for **logical backups** — periodic `pg_dump` / `mysqldump` snapshots you keep around for dev clones, ad-hoc audits, and recovery from "I dropped the wrong table at 14:32 and our last good state is yesterday morning." This is the operational layer most teams need first and don't get around to building cleanly.
+
+It is **not a disaster-recovery system.** If your recovery objective is "rewind production to 14:31:59" or "lose no more than 30 seconds of writes on a hardware failure," you need WAL shipping or streaming replication — `pgbackrest`, `wal-g`, or your cloud provider's managed PITR. dbx will happily back up a database the moment you run it, but it will not capture the writes that happened between backups, and restoring an N-hours-old snapshot is the only recovery path it offers.
+
+A reasonable production setup uses both: managed PITR for the "we lost the box at 14:32" case, and dbx (or equivalent) for the "give me yesterday's prod data in my laptop's docker container, scrubbed" case. They're solving different problems.
 
 ## Install
 
