@@ -233,9 +233,6 @@ cmd_restore() {
         shift
         ;;
       --transform)
-        # Streaming sanitization via a host-side script. Unsanitized
-        # bytes never touch disk on the target: decompress → optional
-        # plain-SQL emit → script → atomic restore.
         transform_script="$2"
         shift 2
         ;;
@@ -244,8 +241,6 @@ cmd_restore() {
         shift
         ;;
       --into)
-        # Target an external running docker container (e.g. a compose
-        # sidecar) instead of dbx's managed postgres-dbx. Postgres-only.
         into_container="$2"
         shift 2
         ;;
@@ -537,9 +532,8 @@ cmd_restore() {
     fi
   fi
 
-  # When --transform or --into is set, take the streaming code path.
-  # --into is postgres-only (boring's compose sidecars are postgres);
-  # MySQL --into errors out with a clear message.
+  # --transform / --into take the streaming code path. --into is
+  # postgres-only; MySQL --into is rejected below.
   if [[ -n "$transform_script" || -n "$into_container" ]]; then
     local target_container="" target_user="postgres" target_pass=""
     if [[ -n "$into_container" ]]; then
@@ -592,7 +586,12 @@ cmd_restore() {
   fi
 
   # Hooks skipped for ad-hoc file restores (no host/db in path).
-  if [[ "$skip_hooks" == "false" && -n "$host" && -n "$database" ]]; then
+  # Hooks also skipped when --into targets an external container: the
+  # hook runners (pg_run_sql_stream / mysql_run_sql_stream) hardcode the
+  # local POSTGRES_CONTAINER / MYSQL_CONTAINER, so running them after an
+  # --into restore would mutate the wrong DB. The operator uses
+  # --transform for sanitization in the --into flow.
+  if [[ "$skip_hooks" == "false" && -n "$host" && -n "$database" && -z "$into_container" ]]; then
     local backup_basename backup_ts
     backup_basename=$(basename "$backup_file")
     backup_ts=$(parse_backup_timestamp "$backup_basename")
@@ -603,6 +602,8 @@ cmd_restore() {
       notify_restore_failure "$backup_file" "$target_name" "post-restore hooks failed"
       die "Post-restore hooks failed. Database '$target_name' is in a partial state and was left in place for inspection."
     fi
+  elif [[ "$skip_hooks" == "false" && -n "$into_container" ]]; then
+    log_warn "--into: post-restore hooks are skipped (hook runners target the managed postgres-dbx container, not '$into_container')."
   elif [[ "$skip_hooks" == "false" && -z "$host" ]]; then
     # Ad-hoc file restore: tell the user explicitly that any configured
     # hooks won't run, so they don't assume PII scrub / config rewrites

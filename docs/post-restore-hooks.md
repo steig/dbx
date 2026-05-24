@@ -92,3 +92,8 @@ The hooks pattern is also the easiest way to make a dev clone smaller — `TRUNC
 ## Ad-hoc file restores
 
 When restoring a backup file directly (`dbx restore /tmp/backup.sql.zst --name foo`) without a `<host>/<db>` path, dbx doesn't know which host config to look at, so hooks are skipped with a `log_warn` line. If you need hooks to run on an ad-hoc restore, use `--hooks-only --name foo` afterwards.
+
+## With `--transform` and `--into`
+
+- **`--transform`** runs hooks normally after the streaming restore. The sanitization happens inside the pipeline; hooks see the post-transform, post-restore DB.
+- **`--into <container>`** **skips post-restore hooks** with a `log_warn`. The hook runners (`pg_run_sql_stream` / `mysql_run_sql_stream`) target the managed `postgres-dbx` / `mysql-dbx` container by design, so running them after an `--into` restore would mutate the wrong DB. The `--into` flow is intended for streaming sanitization via `--transform`; if you need additional SQL to run against the external container, do it from your tool side after `dbx restore` returns.

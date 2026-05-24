@@ -329,15 +329,11 @@ mysql_restore_backup() {
   log_success "Restore complete: $target_db"
 }
 
-# Streaming restore variant for `--transform`. mysqldump output is already
-# plain SQL, so the pipeline is simpler than the postgres equivalent:
-#
+# Streaming restore variant for `--transform`. mysqldump output is plain
+# SQL so the pipeline skips the pg_restore -f - step:
 #   decompress → filter_sql → [transform] → mysql in target
-#
-# Caveat (documented in docs/restore.md): MySQL DDL implicitly commits,
-# so atomicity is best-effort. A transform script that fails mid-stream
-# may leave the target DB in a partial state — we drop it post-failure
-# as cleanup. For atomic streaming sanitization, use postgres.
+# Atomicity is best-effort — MySQL DDL implicitly commits. On failure we
+# DROP the target as cleanup. See docs/restore.md for caveats.
 #
 # Args: $1 backup_file, $2 target_db, $3 transform_script (may be empty)
 mysql_restore_backup_streaming() {
@@ -353,14 +349,13 @@ mysql_restore_backup_streaming() {
   docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
     mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" >/dev/null
 
-  # filter_sql defined in mysql_restore_backup; redefine here so this
-  # function stays self-contained (callable independently for tests).
+  # filter_sql is defined inline as a function-scoped here so the streaming
+  # variant doesn't depend on mysql_restore_backup having been sourced.
   local filter_sql_cmd='(printf "SET foreign_key_checks=0; SET unique_checks=0;\n" &&
     grep -v "^mysqldump: \[Warning\]" | grep -v "^Warning: Using a password" |
     sed "s/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g")'
 
   log_info "Streaming restore → transform → target..."
-  # set -e + pipefail: capture rc via `|| rc=$?` so cleanup can run.
   local rc=0
   if [[ -n "$transform_script" ]]; then
     { decompress_backup "$backup_file" \

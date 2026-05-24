@@ -317,3 +317,49 @@ EOF
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "incompatible"
 }
+
+@test "--into: post-restore hooks are SKIPPED (would target wrong container)" {
+  # Hooks use pg_run_sql_stream which hardcodes postgres-dbx. With
+  # --into, running them would mutate postgres-dbx instead of the
+  # sidecar — silent wrong-target writes. We skip with a log_warn.
+  seed_postgres_db "$TEST_SRC" "
+    CREATE TABLE t (id SERIAL, label TEXT);
+    INSERT INTO t(label) VALUES ('original');
+  "
+  cat > "$DBX_CONFIG_DIR/relabel.sql" <<'SQL'
+UPDATE t SET label = 'mutated_by_hook';
+SQL
+  cat > "$DBX_CONFIG_DIR/config.json" <<EOF
+{
+  "hosts": {
+    "local-pg": {
+      "type": "postgres", "host": "127.0.0.1", "port": 5432, "user": "postgres",
+      "password_cmd": "echo devpassword",
+      "post_restore": [{"file": "relabel.sql"}],
+      "databases": { "$TEST_SRC": {} }
+    }
+  }
+}
+EOF
+  dbx_run backup local-pg "$TEST_SRC"
+  [ "$status" -eq 0 ]
+
+  dbx_run restore "local-pg/$TEST_SRC/latest" \
+    --name "$TEST_TGT" \
+    --into "$SIDECAR"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "post-restore hooks are skipped"
+
+  # Sidecar row still says 'original' — the hook did NOT run.
+  local label
+  label=$(docker exec -e PGPASSWORD=sidecarpass "$SIDECAR" \
+    psql -U sidecaruser -d "$TEST_TGT" -tA -c "SELECT label FROM t LIMIT 1" | tr -d '[:space:]')
+  [ "$label" = "original" ]
+
+  # postgres-dbx must NOT have had the wrong-target mutation: no
+  # database with the target name exists there at all.
+  local exists
+  exists=$(docker exec postgres-dbx psql -U postgres -tA \
+    -c "SELECT count(*) FROM pg_database WHERE datname = '$TEST_TGT'" | tr -d '[:space:]')
+  [ "$exists" = "0" ]
+}
