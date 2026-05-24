@@ -41,6 +41,10 @@ source_dbx_libs() {
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/post_restore.sh"
   # shellcheck source=/dev/null
+  source "$DBX_REPO_ROOT/lib/scrub.sh"
+  # shellcheck source=/dev/null
+  source "$DBX_REPO_ROOT/lib/scrub_strategies.sh"
+  # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/notify.sh"
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/schedule.sh"

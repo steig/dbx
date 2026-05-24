@@ -140,6 +140,21 @@ pg_backup() {
       | jq -R . | jq -s 'map(select(length > 0))')
   fi
 
+  # Capture information_schema.columns into the meta.json so that
+  # `dbx restore` can run a pre-restore drift check against the manifest
+  # BEFORE any data hits the local container. Best-effort — if the
+  # query fails (permissions, transient connectivity), we write an
+  # empty schema and the restore-time gate falls back to its own
+  # post-restore check. The stream is the same TSV → JSON pipeline
+  # used by `dbx scrub init`/`check`.
+  local scrub_schema_tsv scrub_schema_json="{}"
+  scrub_schema_tsv=$(docker exec -i -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+    psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
+    -tA -F $'\t' -c "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null < /dev/null || true)
+  if [[ -n "$scrub_schema_tsv" ]]; then
+    scrub_schema_json=$(printf '%s\n' "$scrub_schema_tsv" | scrub_schema_tsv_to_json 2>/dev/null || echo "{}")
+  fi
+
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
   jq -n \
@@ -153,6 +168,7 @@ pg_backup() {
     --arg src_flavor "postgres" \
     --arg src_major "$src_major" \
     --argjson src_exts "$src_exts_json" \
+    --argjson scrub_schema "$scrub_schema_json" \
     '{
       host: $host,
       database: $database,
@@ -163,7 +179,8 @@ pg_backup() {
       dbx_version: $dbx_version,
       source_flavor: $src_flavor,
       source_major_version: $src_major,
-      source_extensions: $src_exts
+      source_extensions: $src_exts,
+      scrub_schema: $scrub_schema
     }' > "$meta_file"
   secure_file "$meta_file"
 

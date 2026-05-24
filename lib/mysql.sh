@@ -176,6 +176,19 @@ mysql_backup() {
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
 
+  # Capture information_schema.columns for the pre-restore scrub drift
+  # check. See the same block in pg_backup for rationale. Best-effort;
+  # falls back to empty JSON on any query failure so the backup still
+  # completes (the restore-time gate will then do its own post-restore
+  # check as a fallback for legacy/empty meta).
+  local scrub_schema_tsv scrub_schema_json="{}"
+  scrub_schema_tsv=$(docker exec -i -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+    mysql -h "$db_host" -P "$db_port" -u "$db_user" -B -N \
+    -e "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = '$database' ORDER BY table_name, ordinal_position" 2>/dev/null < /dev/null || true)
+  if [[ -n "$scrub_schema_tsv" ]]; then
+    scrub_schema_json=$(printf '%s\n' "$scrub_schema_tsv" | scrub_schema_tsv_to_json 2>/dev/null || echo "{}")
+  fi
+
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
   jq -n \
@@ -190,6 +203,7 @@ mysql_backup() {
     --arg src_flavor "$flavor" \
     --arg src_major "$src_major" \
     --arg src_minor "$src_minor" \
+    --argjson scrub_schema "$scrub_schema_json" \
     '{
       host: $host,
       database: $database,
@@ -202,7 +216,8 @@ mysql_backup() {
       source_flavor: $src_flavor,
       source_major_version: $src_major,
       source_minor_version: $src_minor,
-      source_extensions: []
+      source_extensions: [],
+      scrub_schema: $scrub_schema
     }' > "$meta_file"
   secure_file "$meta_file"
 

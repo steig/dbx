@@ -71,7 +71,13 @@ Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them wit
 
     ---
 
-    Declare SQL to scrub PII or repoint webhooks; dbx runs it automatically after every restore, in a transaction.
+    Declare SQL to repoint webhooks, reset feature flags, or run ad-hoc cleanup; dbx runs it automatically after every restore, in a transaction.
+
+-   :material-shield-account-outline:{ .lg .middle } **First-class PII scrub**
+
+    ---
+
+    Declarative manifest + schema drift detection + fail-closed restore-time gate. The clone is provably scrubbed or it doesn't exist.
 
 -   :material-cloud-upload-outline:{ .lg .middle } **S3 / MinIO / R2**
 
@@ -94,7 +100,8 @@ Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them wit
 
 -   **[Restore directly from S3 / MinIO](restore.md#restoring-from-cloud-storage)** with `--from-remote` or `s3://`
 -   **[Interactive wizards](wizards.md)** for adding hosts and configuring cloud storage
--   **[Post-restore SQL hooks](post-restore-hooks.md)** — scrub PII, repoint webhooks, fail-fast on errors
+-   **[Post-restore SQL hooks](post-restore-hooks.md)** — repoint webhooks, fail-fast on errors
+-   **[PII scrub](scrub.md)** — declarative manifest, schema drift detection, fail-closed gate
 
 See the full [changelog](https://github.com/steig/dbx/blob/main/CHANGELOG.md) on GitHub.
 
