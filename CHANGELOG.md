@@ -4,6 +4,11 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **`dbx wizard`**: browser-based interactive config builder. Spins up a one-shot local HTTP server on `127.0.0.1:<random-port>` with a URL token, opens your default browser to a polished form (hosts, databases, storage, defaults), POSTs the result back, writes `~/.config/dbx/config.json` + shuts down. Auto-falls back to the gum-based `dbx host add` flow on SSH sessions, missing `python3`, or no GUI; explicit `--no-browser` / `--browser` flags override detection.
+- **Online config builder** at `https://steig.github.io/dbx/config-builder/` — the same form, runs entirely in your browser, **Copy** or **Download** the resulting `config.json`. Nothing is sent to any server. Useful for previewing the config shape before installing dbx.
+
 ## [0.9.0] - 2026-05-23
 
 Three-feature minor release: restore directly from S3/MinIO (#33), interactive `dbx host add` / `dbx storage add` wizards (#35), and post-restore SQL hooks on `dbx restore` (#36). Removes the experimental TUI.

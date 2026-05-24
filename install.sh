@@ -66,6 +66,13 @@ main() {
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$lib" -o "$LIB_DIR/$lib"
   done
 
+  # HTML assets for the browser-based `dbx wizard` config builder. Same
+  # form fragment also powers the static docs builder; downloading both
+  # gives offline-capable wizard mode.
+  for asset in wizard.html wizard-form.html; do
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$asset" -o "$LIB_DIR/$asset"
+  done
+
   # Update lib path in main script to use installed location.
   # Avoid `sed -i` — its argument shape differs between BSD and GNU sed, and
   # `uname` can't tell us which is actually first in PATH (e.g. GNU sed via

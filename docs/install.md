@@ -34,6 +34,7 @@ Once installed, `dbx update` upgrades in place when a new release is out.
 | `fzf` | Interactive backup picker for restore / verify |
 | `pv` | Progress bar during MySQL restore |
 | `gum` | Required for the [interactive wizards](wizards.md) (`dbx host add` / `dbx storage add`) |
+| `python3` | Required for browser mode of [`dbx wizard`](wizards.md#dbx-wizard-browser-mode); without it, `dbx wizard` falls back to the gum-based flow |
 
 ## Update notifications
 

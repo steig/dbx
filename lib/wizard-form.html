@@ -1,0 +1,487 @@
+<!--
+  dbx config-builder form fragment.
+  Loaded in two contexts:
+    - lib/wizard.html (standalone) served by the local Python server when
+      `dbx wizard` runs. The page sets data-mode="cli" + a save URL.
+    - docs/config-builder.md (mkdocs page) included via pymdownx.snippets.
+      The page sets data-mode="static".
+  Everything runs in the browser — no fields are sent anywhere except,
+  in cli mode, the user's own localhost (one-shot loopback POST).
+-->
+
+<style>
+  .dbx-builder { display: grid; gap: 1.5rem; grid-template-columns: 1fr; }
+  @media (min-width: 1100px) { .dbx-builder { grid-template-columns: minmax(0, 1fr) minmax(0, 28rem); } }
+  .dbx-builder__trust {
+    border-left: 3px solid var(--md-accent-fg-color);
+    padding: 0.75rem 1rem;
+    background: var(--md-code-bg-color);
+    border-radius: 0.25rem;
+    font-size: 0.9rem;
+  }
+  .dbx-builder fieldset {
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 0.5rem;
+    padding: 1rem 1.25rem 1.25rem;
+    margin: 0;
+  }
+  .dbx-builder legend { padding: 0 0.5rem; font-weight: 600; font-size: 1rem; }
+  .dbx-builder label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.25rem; color: var(--md-default-fg-color--light); }
+  .dbx-builder label span.req { color: #d32f2f; }
+  .dbx-builder input[type=text], .dbx-builder input[type=number], .dbx-builder select, .dbx-builder textarea {
+    width: 100%;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--md-default-fg-color--lighter);
+    border-radius: 0.25rem;
+    background: var(--md-default-bg-color);
+    color: var(--md-default-fg-color);
+    font: inherit;
+    font-size: 0.9rem;
+  }
+  .dbx-builder input:focus, .dbx-builder select:focus, .dbx-builder textarea:focus {
+    outline: none;
+    border-color: var(--md-accent-fg-color);
+    box-shadow: 0 0 0 2px var(--md-accent-fg-color--transparent);
+  }
+  .dbx-builder textarea { font-family: var(--md-code-font-family), monospace; font-size: 0.8rem; min-height: 5rem; }
+  .dbx-builder input.invalid { border-color: #d32f2f; }
+  .dbx-builder__row { display: grid; gap: 0.75rem; grid-template-columns: 1fr; }
+  @media (min-width: 600px) { .dbx-builder__row.cols-2 { grid-template-columns: 1fr 1fr; } .dbx-builder__row.cols-3 { grid-template-columns: 1fr 1fr 1fr; } }
+  .dbx-builder__row + .dbx-builder__row { margin-top: 0.75rem; }
+  .dbx-builder__card {
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    background: var(--md-default-bg-color);
+  }
+  .dbx-builder__card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+  .dbx-builder__card-title { font-weight: 600; font-size: 0.95rem; }
+  .dbx-builder__btn {
+    cursor: pointer;
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--md-default-fg-color--lighter);
+    border-radius: 0.25rem;
+    background: var(--md-default-bg-color);
+    color: var(--md-default-fg-color);
+    font: inherit;
+    font-size: 0.85rem;
+    transition: border-color 0.1s, background 0.1s;
+  }
+  .dbx-builder__btn:hover { border-color: var(--md-accent-fg-color); }
+  .dbx-builder__btn--primary {
+    background: var(--md-accent-fg-color);
+    color: var(--md-accent-bg-color);
+    border-color: var(--md-accent-fg-color);
+  }
+  .dbx-builder__btn--primary:hover { filter: brightness(0.92); }
+  .dbx-builder__btn--danger { color: #d32f2f; border-color: var(--md-default-fg-color--lightest); }
+  .dbx-builder__btn--danger:hover { border-color: #d32f2f; }
+  .dbx-builder__btn--small { padding: 0.2rem 0.6rem; font-size: 0.8rem; }
+  .dbx-builder__actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
+  .dbx-builder__preview {
+    position: sticky;
+    top: 1rem;
+    align-self: start;
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 0.5rem;
+    overflow: hidden;
+  }
+  .dbx-builder__preview-head { padding: 0.5rem 0.85rem; background: var(--md-code-bg-color); font-size: 0.85rem; font-weight: 600; border-bottom: 1px solid var(--md-default-fg-color--lightest); display: flex; justify-content: space-between; align-items: center; }
+  .dbx-builder__preview pre { margin: 0; padding: 0.85rem; max-height: 32rem; overflow: auto; font-size: 0.78rem; }
+  .dbx-builder__db-row { display: grid; gap: 0.5rem; grid-template-columns: 1fr 2fr auto; align-items: end; margin-bottom: 0.5rem; }
+  .dbx-builder__db-row label { margin-bottom: 0.15rem; font-size: 0.75rem; }
+  .dbx-builder__hint { font-size: 0.78rem; color: var(--md-default-fg-color--light); margin-top: 0.35rem; }
+  .dbx-builder__inline-error { color: #d32f2f; font-size: 0.8rem; margin-top: 0.35rem; }
+  .dbx-builder__toggle { display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+  .dbx-builder__toggle input { width: auto; margin: 0; }
+  .dbx-builder__saved { padding: 0.75rem 1rem; border-radius: 0.25rem; background: #1f883d22; border: 1px solid #1f883d; color: var(--md-default-fg-color); margin-top: 1rem; }
+  .dbx-builder__saved code { background: var(--md-code-bg-color); padding: 0.1rem 0.3rem; border-radius: 0.2rem; }
+  .dbx-builder__saved-err { background: #d32f2f22; border-color: #d32f2f; }
+</style>
+
+<div class="dbx-builder" x-data="dbxBuilder()" x-init="init()">
+  <!-- Form column -->
+  <div>
+    <div class="dbx-builder__trust">
+      <strong>Runs entirely in your browser.</strong>
+      <span x-show="mode === 'static'">No fields are sent to any server.</span>
+      <span x-show="mode === 'cli'">The "Save & exit" button POSTs once to the local <code>dbx wizard</code> process on <code>127.0.0.1</code> and nothing else.</span>
+      Passwords are never collected — the generated config references
+      <code>dbx vault set &lt;alias&gt;</code> commands you run separately.
+    </div>
+
+    <!-- Hosts -->
+    <fieldset>
+      <legend>Hosts</legend>
+      <template x-for="(host, hi) in hosts" :key="hi">
+        <div class="dbx-builder__card">
+          <div class="dbx-builder__card-header">
+            <div class="dbx-builder__card-title" x-text="host.alias || `Host #${hi + 1}`"></div>
+            <button type="button" class="dbx-builder__btn dbx-builder__btn--small dbx-builder__btn--danger"
+                    x-show="hosts.length > 1" @click="hosts.splice(hi, 1)">Remove</button>
+          </div>
+
+          <div class="dbx-builder__row cols-2">
+            <div>
+              <label>Alias <span class="req">*</span></label>
+              <input type="text" x-model="host.alias" placeholder="production"
+                     :class="aliasError(hi) ? 'invalid' : ''"/>
+              <div class="dbx-builder__inline-error" x-show="aliasError(hi)" x-text="aliasError(hi)"></div>
+            </div>
+            <div>
+              <label>Database type <span class="req">*</span></label>
+              <select x-model="host.type">
+                <option value="postgres">PostgreSQL</option>
+                <option value="mysql">MySQL / MariaDB</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="dbx-builder__row" style="margin-top: 0.75rem;">
+            <div>
+              <label>Connection</label>
+              <select x-model="host.connection">
+                <option value="direct">Direct (host + port)</option>
+                <option value="ssh_tunnel">SSH tunnel</option>
+              </select>
+            </div>
+          </div>
+
+          <template x-if="host.connection === 'direct'">
+            <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
+              <div>
+                <label>Host</label>
+                <input type="text" x-model="host.host" placeholder="db.internal"/>
+              </div>
+              <div>
+                <label>Port</label>
+                <input type="number" x-model.number="host.port"
+                       :placeholder="host.type === 'mysql' ? '3306' : '5432'"/>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="host.connection === 'ssh_tunnel'">
+            <div style="margin-top: 0.75rem;">
+              <div class="dbx-builder__row">
+                <div>
+                  <label>Jump host (SSH alias) <span class="req">*</span></label>
+                  <input type="text" x-model="host.jump_host" placeholder="bastion"/>
+                  <div class="dbx-builder__hint">Resolves via your <code>~/.ssh/config</code>. Use the alias, e.g. <code>bastion</code>, not <code>user@host</code>.</div>
+                </div>
+              </div>
+              <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
+                <div>
+                  <label>Target host (DB as seen from bastion)</label>
+                  <input type="text" x-model="host.target_host" placeholder="db.internal"/>
+                </div>
+                <div>
+                  <label>Target port</label>
+                  <input type="number" x-model.number="host.target_port"
+                         :placeholder="host.type === 'mysql' ? '3306' : '5432'"/>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
+            <div>
+              <label>User <span class="req">*</span></label>
+              <input type="text" x-model="host.user" :placeholder="host.type === 'mysql' ? 'root' : 'postgres'"/>
+              <div class="dbx-builder__hint">Set the password later: <code x-text="'dbx vault set ' + (host.alias || '&lt;alias&gt;')"></code></div>
+            </div>
+            <template x-if="host.type === 'mysql'">
+              <div>
+                <label>DEFINER handling</label>
+                <select x-model="host.definer_handling">
+                  <option value="strip">strip (default — removes DEFINER clauses)</option>
+                  <option value="keep">keep</option>
+                  <option value="rewrite">rewrite to CURRENT_USER</option>
+                </select>
+              </div>
+            </template>
+          </div>
+
+          <!-- Databases -->
+          <div style="margin-top: 1rem;">
+            <label style="font-size: 0.9rem;">Databases</label>
+            <template x-for="(db, di) in host.databases" :key="di">
+              <div class="dbx-builder__db-row">
+                <div>
+                  <label>Name</label>
+                  <input type="text" x-model="db.name" placeholder="myapp"/>
+                </div>
+                <div>
+                  <label>Exclude data (table names, comma-separated; schema kept)</label>
+                  <input type="text" x-model="db.exclude_data" placeholder="sessions, cache, logs"/>
+                </div>
+                <button type="button" class="dbx-builder__btn dbx-builder__btn--small dbx-builder__btn--danger"
+                        x-show="host.databases.length > 1" @click="host.databases.splice(di, 1)">−</button>
+              </div>
+            </template>
+            <button type="button" class="dbx-builder__btn dbx-builder__btn--small" @click="addDb(hi)">+ database</button>
+          </div>
+
+          <!-- Post-restore hooks (raw JSON textarea for v1) -->
+          <div style="margin-top: 1rem;">
+            <label>Post-restore hooks (optional — JSON array; <a href="../post-restore-hooks/" target="_blank">docs</a>)</label>
+            <textarea x-model="host.post_restore_raw" rows="3"
+                      :placeholder='`[{&quot;file&quot;: &quot;hooks/scrub-pii.sql&quot;}]`'></textarea>
+            <div class="dbx-builder__inline-error" x-show="hookError(hi)" x-text="hookError(hi)"></div>
+          </div>
+        </div>
+      </template>
+      <button type="button" class="dbx-builder__btn" @click="addHost()">+ host</button>
+    </fieldset>
+
+    <!-- Storage -->
+    <fieldset style="margin-top: 1.25rem;">
+      <legend>Cloud storage (optional)</legend>
+      <label class="dbx-builder__toggle">
+        <input type="checkbox" x-model="storage.enabled"/>
+        <span>Configure S3 / MinIO / R2 / B2</span>
+      </label>
+      <div x-show="storage.enabled" style="margin-top: 0.75rem;">
+        <div class="dbx-builder__row cols-2">
+          <div>
+            <label>Bucket <span class="req">*</span></label>
+            <input type="text" x-model="storage.bucket" placeholder="dbx-backups"/>
+          </div>
+          <div>
+            <label>Endpoint (blank for AWS)</label>
+            <input type="text" x-model="storage.endpoint" placeholder="https://minio.example.com"/>
+          </div>
+        </div>
+        <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
+          <div>
+            <label>Prefix / path</label>
+            <input type="text" x-model="storage.prefix" placeholder="dbx/"/>
+          </div>
+          <div>
+            <label>Access key</label>
+            <input type="text" x-model="storage.access_key" placeholder="AKIA..."/>
+          </div>
+        </div>
+        <div class="dbx-builder__hint" style="margin-top: 0.5rem;">
+          The secret key goes in the vault, not here:
+          <code>dbx vault set s3-secret-key</code>.
+          Config references it via <code>secret_key_cmd</code>.
+        </div>
+      </div>
+    </fieldset>
+
+    <!-- Defaults -->
+    <fieldset style="margin-top: 1.25rem;">
+      <legend>Defaults</legend>
+      <div class="dbx-builder__row cols-3">
+        <div>
+          <label>Encryption</label>
+          <select x-model="defaults.encryption_type">
+            <option value="none">none</option>
+            <option value="age">age (recommended)</option>
+            <option value="gpg">gpg</option>
+          </select>
+        </div>
+        <div>
+          <label>Keep N backups</label>
+          <input type="number" x-model.number="defaults.keep_backups" min="1"/>
+        </div>
+        <div>
+          <label>Compression level (1–22)</label>
+          <input type="number" x-model.number="defaults.compression_level" min="1" max="22"/>
+        </div>
+      </div>
+      <label class="dbx-builder__toggle" style="margin-top: 0.75rem;">
+        <input type="checkbox" x-model="defaults.auto_upload"/>
+        <span>Auto-upload every backup to cloud storage</span>
+      </label>
+    </fieldset>
+
+    <!-- Actions -->
+    <div class="dbx-builder__actions">
+      <template x-if="mode === 'cli'">
+        <button type="button" class="dbx-builder__btn dbx-builder__btn--primary"
+                @click="saveCli()" :disabled="!isValid() || saving" x-text="saving ? 'Saving…' : 'Save & exit'"></button>
+      </template>
+      <button type="button" class="dbx-builder__btn" @click="copyJson()" :disabled="!isValid()">Copy JSON</button>
+      <button type="button" class="dbx-builder__btn" @click="downloadJson()" :disabled="!isValid()">Download config.json</button>
+      <button type="button" class="dbx-builder__btn" @click="reset()" style="margin-left: auto;">Reset</button>
+    </div>
+
+    <div class="dbx-builder__saved" x-show="savedMsg" x-text="savedMsg" :class="savedErr ? 'dbx-builder__saved-err' : ''"></div>
+  </div>
+
+  <!-- Live JSON preview -->
+  <div class="dbx-builder__preview">
+    <div class="dbx-builder__preview-head">
+      <span>config.json (live)</span>
+      <span x-show="!isValid()" style="color: #d32f2f; font-weight: 500;">fix errors to enable save</span>
+    </div>
+    <pre><code x-text="previewJson()"></code></pre>
+  </div>
+</div>
+
+<script>
+  function dbxBuilder() {
+    return {
+      mode: 'static',   // overridden by host page via data-mode attr (see init)
+      saveUrl: null,    // populated in cli mode
+      saving: false,
+      savedMsg: '',
+      savedErr: false,
+
+      hosts: [emptyHost()],
+      storage: { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' },
+      defaults: { encryption_type: 'age', keep_backups: 10, compression_level: 3, auto_upload: false },
+
+      init() {
+        const el = this.$el.closest('[data-mode]');
+        if (el) this.mode = el.dataset.mode;
+        if (el && el.dataset.saveUrl) this.saveUrl = el.dataset.saveUrl;
+      },
+
+      addHost() { this.hosts.push(emptyHost()); },
+      addDb(hi) { this.hosts[hi].databases.push({ name: '', exclude_data: '' }); },
+
+      aliasError(hi) {
+        const a = this.hosts[hi].alias;
+        if (!a) return '';
+        if (!/^[a-z0-9_-]+$/.test(a)) return 'Use lowercase letters, numbers, dashes, underscores only.';
+        const dup = this.hosts.filter((h, i) => i !== hi && h.alias === a).length > 0;
+        return dup ? 'Duplicate alias.' : '';
+      },
+
+      hookError(hi) {
+        const raw = (this.hosts[hi].post_restore_raw || '').trim();
+        if (!raw) return '';
+        try {
+          const parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed)) return 'Must be a JSON array.';
+          return '';
+        } catch (e) { return 'Invalid JSON: ' + e.message; }
+      },
+
+      isValid() {
+        if (!this.hosts.length) return false;
+        for (let i = 0; i < this.hosts.length; i++) {
+          const h = this.hosts[i];
+          if (!h.alias || this.aliasError(i)) return false;
+          if (!h.user) return false;
+          if (h.connection === 'ssh_tunnel' && !h.jump_host) return false;
+          if (this.hookError(i)) return false;
+        }
+        if (this.storage.enabled && !this.storage.bucket) return false;
+        return true;
+      },
+
+      buildConfig() {
+        const cfg = { hosts: {}, defaults: { ...this.defaults } };
+        for (const h of this.hosts) {
+          const block = { type: h.type, user: h.user };
+          if (h.connection === 'direct') {
+            if (h.host) block.host = h.host;
+            if (h.port) block.port = h.port;
+          } else {
+            block.ssh_tunnel = { jump_host: h.jump_host };
+            if (h.target_host) block.ssh_tunnel.target_host = h.target_host;
+            if (h.target_port) block.ssh_tunnel.target_port = h.target_port;
+          }
+          if (h.type === 'mysql' && h.definer_handling && h.definer_handling !== 'strip') {
+            block.definer_handling = h.definer_handling;
+          }
+          block.password_cmd = `dbx vault get ${h.alias}`;
+          if (h.databases.length) {
+            block.databases = {};
+            for (const db of h.databases) {
+              if (!db.name) continue;
+              const dbBlock = {};
+              const excl = (db.exclude_data || '').split(',').map(s => s.trim()).filter(Boolean);
+              if (excl.length) dbBlock.exclude_data = excl;
+              block.databases[db.name] = dbBlock;
+            }
+          }
+          const raw = (h.post_restore_raw || '').trim();
+          if (raw) {
+            try { block.post_restore = JSON.parse(raw); } catch (_) {}
+          }
+          cfg.hosts[h.alias] = block;
+        }
+        if (this.storage.enabled) {
+          cfg.storage = { type: 's3', s3: { bucket: this.storage.bucket } };
+          if (this.storage.endpoint) cfg.storage.s3.endpoint = this.storage.endpoint;
+          if (this.storage.prefix)   cfg.storage.s3.prefix = this.storage.prefix;
+          if (this.storage.access_key) cfg.storage.s3.access_key = this.storage.access_key;
+          cfg.storage.s3.secret_key_cmd = 'dbx vault get s3-secret-key';
+        }
+        return cfg;
+      },
+
+      previewJson() {
+        try { return JSON.stringify(this.buildConfig(), null, 2); }
+        catch (e) { return '// error: ' + e.message; }
+      },
+
+      copyJson() {
+        navigator.clipboard.writeText(this.previewJson()).then(
+          () => { this.savedMsg = 'Copied. Paste into ~/.config/dbx/config.json (or run `dbx config edit`).'; this.savedErr = false; },
+          () => { this.savedMsg = 'Clipboard write failed. Use the Download button instead.'; this.savedErr = true; }
+        );
+      },
+
+      downloadJson() {
+        const blob = new Blob([this.previewJson()], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'config.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        this.savedMsg = 'Downloaded. Move to ~/.config/dbx/config.json.'; this.savedErr = false;
+      },
+
+      saveCli() {
+        if (!this.saveUrl) {
+          this.savedMsg = 'CLI mode is not initialized (missing save URL).'; this.savedErr = true; return;
+        }
+        this.saving = true;
+        fetch(this.saveUrl, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: this.previewJson()
+        }).then(r => {
+          this.saving = false;
+          if (r.ok) {
+            this.savedMsg = 'Saved! You can close this tab; the terminal will continue.';
+            this.savedErr = false;
+          } else {
+            this.savedMsg = 'Save failed (HTTP ' + r.status + '). Check the terminal.';
+            this.savedErr = true;
+          }
+        }).catch(err => {
+          this.saving = false;
+          this.savedMsg = 'Save failed: ' + err.message;
+          this.savedErr = true;
+        });
+      },
+
+      reset() {
+        if (!confirm('Discard all entries and start over?')) return;
+        this.hosts = [emptyHost()];
+        this.storage = { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' };
+        this.defaults = { encryption_type: 'age', keep_backups: 10, compression_level: 3, auto_upload: false };
+        this.savedMsg = '';
+      }
+    };
+  }
+
+  function emptyHost() {
+    return {
+      alias: '', type: 'postgres',
+      connection: 'direct',
+      host: '', port: '',
+      jump_host: '', target_host: '', target_port: '',
+      user: '', definer_handling: 'strip',
+      databases: [{ name: '', exclude_data: '' }],
+      post_restore_raw: ''
+    };
+  }
+</script>

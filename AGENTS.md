@@ -18,6 +18,8 @@ lib/
   schedule.sh          # Scheduled backups (launchd on macOS, systemd on Linux)
   storage.sh           # Cloud storage (S3/MinIO via mc or aws CLI)
   update.sh            # GitHub Releases API check + caching
+  wizard.html          # HTML shell for `dbx wizard` (browser config builder)
+  wizard-form.html     # Shared Alpine.js form fragment — also embedded in docs/config-builder.md
 install.sh             # Curl-based installer script
 tests/
   helpers/             # Shared bats helpers
