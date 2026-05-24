@@ -59,31 +59,35 @@
       --dbxb-shadow-2: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
     }
   }
-  @media (min-width: 1100px) {
-    .dbx-builder { grid-template-columns: minmax(0, 1fr) minmax(0, 26rem); }
+  /* Side-by-side only at very wide viewports (≥1500px). At typical
+     mkdocs-material content widths (~1220px), the preview reserved 26rem
+     leaving the form too narrow for cols-2 fields ("PostgreSQ|" truncation).
+     Stack by default — form gets full width, preview lives below as a
+     sticky panel so it's still always-visible. */
+  @media (min-width: 1500px) {
+    .dbx-builder { grid-template-columns: minmax(0, 1fr) minmax(0, 24rem); }
   }
 
   /* Trust banner --------------------------------------------------------- */
   .dbx-builder__trust {
     display: flex;
     gap: var(--dbxb-space-3);
-    align-items: flex-start;
-    padding: var(--dbxb-space-4);
+    align-items: center;
+    padding: var(--dbxb-space-3) var(--dbxb-space-4);
     background: var(--dbxb-accent-soft);
-    border: 1px solid color-mix(in srgb, var(--dbxb-accent) 25%, transparent);
-    border-radius: var(--dbxb-radius-2);
-    font-size: 0.875rem;
+    border-left: 3px solid var(--dbxb-accent);
+    border-radius: var(--dbxb-radius-1);
+    font-size: 0.85rem;
     color: var(--dbxb-fg);
+    line-height: 1.45;
   }
   .dbx-builder__trust::before {
     content: "🔒";
     flex: 0 0 auto;
-    font-size: 1.1rem;
-    line-height: 1.5;
+    font-size: 1rem;
+    line-height: 1;
   }
   .dbx-builder__trust-text {
-    /* Single text-flow child so the flex parent doesn't break <strong>,
-       <span>, and <code> into separate narrow columns. */
     flex: 1 1 auto;
     min-width: 0;
   }
@@ -99,24 +103,25 @@
     white-space: nowrap;
   }
 
-  /* Section (fieldset) --------------------------------------------------- */
+  /* Section (fieldset) — flat, no outer card; legend acts as the title.
+     Reduces nesting (was: fieldset-card holding host-cards = card-in-card). */
   .dbx-builder fieldset {
     border: 0;
-    background: var(--dbxb-bg);
-    box-shadow: var(--dbxb-shadow-1);
-    border-radius: var(--dbxb-radius-3);
-    padding: var(--dbxb-space-5) var(--dbxb-space-5) var(--dbxb-space-5);
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
     margin: 0;
   }
-  .dbx-builder fieldset + fieldset { margin-top: var(--dbxb-space-5); }
+  .dbx-builder fieldset + fieldset { margin-top: var(--dbxb-space-6); }
   .dbx-builder legend {
     padding: 0;
-    font-weight: 600;
-    font-size: 0.85rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--dbxb-fg-muted);
-    margin-bottom: var(--dbxb-space-4);
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--dbxb-fg);
+    margin-bottom: var(--dbxb-space-3);
+    width: 100%;
+    border-bottom: 1px solid var(--dbxb-border);
+    padding-bottom: var(--dbxb-space-2);
   }
 
   /* Form fields ---------------------------------------------------------- */
@@ -195,19 +200,21 @@
     .dbx-builder__row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
   }
 
-  /* Host cards ----------------------------------------------------------- */
+  /* Host cards — now the only card-level container (fieldsets are flat).
+     Real elevation so they read as distinct objects. */
   .dbx-builder__card {
     border: 1px solid var(--dbxb-border);
     border-radius: var(--dbxb-radius-2);
-    padding: var(--dbxb-space-4) var(--dbxb-space-4) var(--dbxb-space-4);
+    padding: var(--dbxb-space-5);
     margin-bottom: var(--dbxb-space-3);
     background: var(--dbxb-bg);
-    transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+    box-shadow: var(--dbxb-shadow-1);
+    transition: border-color 150ms ease, box-shadow 150ms ease;
     animation: dbxb-fade-in 200ms ease;
   }
   .dbx-builder__card:hover {
-    border-color: color-mix(in srgb, var(--dbxb-accent) 40%, var(--dbxb-border));
-    box-shadow: var(--dbxb-shadow-1);
+    border-color: color-mix(in srgb, var(--dbxb-accent) 50%, var(--dbxb-border));
+    box-shadow: var(--dbxb-shadow-2);
   }
   .dbx-builder__card-header {
     display: flex;

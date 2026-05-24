@@ -26,6 +26,13 @@
         capture_pageleave: true,
         // Public docs site, no business need to watch users.
         disable_session_recording: true,
+        // Autocapture would auto-track click/form-submit events with their
+        // visible button text and CSS selectors — fine on regular doc pages,
+        // but the config-builder form's "Nothing is sent anywhere" trust
+        // copy would be lying if we tracked which buttons the user clicked.
+        // Turn it OFF globally and rely on explicit posthog.capture() calls
+        // (pageviews + docs_feedback) so the captured surface is auditable.
+        autocapture: false,
         // In-memory persistence: no cookies, no localStorage. Distinct users
         // are counted per-tab — fine for "which pages are popular" analytics.
         persistence: 'memory'
