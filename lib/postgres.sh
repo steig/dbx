@@ -198,19 +198,15 @@ pg_backup() {
 # PostgreSQL Restore
 # ============================================================================
 
-# Decompress (and decrypt if needed) $backup_file, then restore into
-# $target_db on the postgres-dbx container. Creates the target
-# database if it doesn't exist. pg_restore warnings are passed through;
-# fatal errors are surfaced.
-# Args: $1=backup file path, $2=target database name
-pg_restore_backup() {
+# Ensure POSTGRES_CONTAINER is running an image compatible with $backup_file.
+# Reads source_major_version + source_extensions from the backup's
+# .meta.json (handles .zst / .age / .gpg suffix layering); falls back to
+# the default image when meta is missing (legacy backups). Honors
+# DBX_POSTGRES_IMAGE override and defaults.postgres_image config.
+# Returns non-zero on image pick failure or container-state conflict.
+# Args: $1=backup file path
+pg_ensure_image_for_backup() {
   local backup_file="$1"
-  local target_db="$2"
-
-  log_step "Restoring PostgreSQL backup to: $target_db"
-
-  # Determine the right container image based on backup metadata. Legacy
-  # backups without source_* fields use the default (postgres:17-alpine).
   local src_major src_exts override desired_image
   local meta_file="${backup_file%.zst}.meta.json"
   [[ ! -f "$meta_file" ]] && meta_file="${backup_file}.meta.json"
@@ -231,9 +227,22 @@ pg_restore_backup() {
     return 1
   fi
 
-  # If the running container doesn't match, gate on user DBs unless flag set.
   local recreate="${DBX_RECREATE_CONTAINER:-false}"
-  ensure_container_image "$POSTGRES_CONTAINER" "$desired_image" "$recreate" || return 1
+  ensure_container_image "$POSTGRES_CONTAINER" "$desired_image" "$recreate"
+}
+
+# Decompress (and decrypt if needed) $backup_file, then restore into
+# $target_db on the postgres-dbx container. Creates the target
+# database if it doesn't exist. pg_restore warnings are passed through;
+# fatal errors are surfaced.
+# Args: $1=backup file path, $2=target database name
+pg_restore_backup() {
+  local backup_file="$1"
+  local target_db="$2"
+
+  log_step "Restoring PostgreSQL backup to: $target_db"
+
+  pg_ensure_image_for_backup "$backup_file" || return 1
 
   # Decompress backup first (use DATA_DIR to avoid /tmp quota issues)
   local tmp_dir="$DATA_DIR/.tmp"
@@ -409,15 +418,19 @@ pg_resolve_into_container() {
   [[ -z "$db" ]] && db="$user"  # postgres image defaults POSTGRES_DB to POSTGRES_USER
 
   # Wait for postgres inside the container to accept connections.
-  local i max_wait=30
+  # Loop is max_wait probes with sleep 1 between failures, so the wall-
+  # clock budget is ~max_wait seconds. Exit the loop on the first ready
+  # response; die after exhausting all attempts.
+  local i max_wait=30 ready=false
   for ((i=1; i<=max_wait; i++)); do
     if docker exec -e PGPASSWORD="$pass" "$container" \
         pg_isready -U "$user" -d "$db" >/dev/null 2>&1; then
+      ready=true
       break
     fi
-    [[ $i -eq $max_wait ]] && die "--into: postgres in '$container' did not become ready within ${max_wait}s"
-    sleep 1
+    [[ $i -lt $max_wait ]] && sleep 1
   done
+  [[ "$ready" == "true" ]] || die "--into: postgres in '$container' did not become ready within ${max_wait}s"
 
   printf '%s\t%s\t%s\t%s\n' "$container" "$user" "$pass" "$db"
 }
@@ -437,6 +450,12 @@ pg_restore_backup_streaming() {
 
   log_step "Streaming restore (postgres) → $target_container:$target_db"
 
+  # postgres-dbx is the pg_restore -f - worker that emits plain SQL,
+  # regardless of where target_container actually is. Ensure its image
+  # matches the backup's source major so an old postgres-dbx can't
+  # silently fail to read a newer custom-format dump.
+  pg_ensure_image_for_backup "$backup_file" || return 1
+
   # pg_restore on the custom format needs random access, so we decompress
   # to a tempfile (the transform script never sees this file — it sees
   # the plain-SQL stream emitted by `pg_restore -f -` downstream).
@@ -452,8 +471,6 @@ pg_restore_backup_streaming() {
   log_info "Decompressing backup..."
   decompress_backup "$backup_file" > "$tmpfile"
 
-  # postgres-dbx is the pg_restore worker that converts the custom-format
-  # dump to plain SQL on stdout, regardless of what target_container is.
   require_container "$POSTGRES_CONTAINER"
   docker cp "$tmpfile" "$POSTGRES_CONTAINER:$in_container_dump"
 
