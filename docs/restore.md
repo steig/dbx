@@ -81,6 +81,15 @@ dbx restore production/myapp/latest --name myapp_review --transform=./sanitize.s
 
 **Constraints:** the source backup must be plain-SQL-readable (postgres custom-format dumps work — `pg_restore -f -` emits plain SQL). Binary formats incompatible with plain-SQL output will fail clearly.
 
+!!! warning "Transform scripts inherit dbx's environment"
+    The script runs as a normal subprocess and inherits every environment variable in dbx's process, including any credentials in scope at invocation time — `PGPASSWORD`, `MYSQL_PWD`, `DBX_SCRUB_SEED`, vault tokens, AWS credentials. **Treat the transform script with the same trust level as your shell rc files.** A script committed to the project repo and run by an operator with vault access has effective access to that vault.
+
+    Practical mitigations:
+
+    - Audit the script the same way you'd audit a deploy script.
+    - If you need stronger isolation, invoke dbx itself with `env -i PATH=... HOME=... dbx restore ...` so dbx never sees the credentials in the first place (you'll need to supply DB passwords via `password_cmd` config or the keychain instead of env).
+    - The `--transform` script does not need any of dbx's env vars to do its job — it operates on stdin/stdout. Authors should write transform scripts that don't read `PGPASSWORD` / `DBX_*` env vars at all, so even if a future dbx version sandboxes them, the script keeps working.
+
 ## Targeting an external container with `--into`
 
 By default, `dbx restore` lands data in dbx's managed `postgres-dbx` container. With `--into NAME` you can restore into a different running docker container — typically a compose sidecar that another tool (`boring`, `docker compose`, etc.) manages.
