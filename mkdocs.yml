@@ -16,7 +16,7 @@ copyright: Copyright &copy; 2026 Tom Steigerwald &middot; <a href="https://githu
 
 theme:
   name: material
-  custom_dir: overrides
+  custom_dir: .mkdocs
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
