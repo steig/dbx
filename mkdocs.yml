@@ -67,6 +67,22 @@ extra:
     # without the var skip the snippet entirely (no analytics in preview).
     posthog_key: !ENV [POSTHOG_API_KEY, ""]
     posthog_host: https://us.i.posthog.com
+  consent:
+    title: Cookies & analytics
+    description: >-
+      We use <a href="https://posthog.com" target="_blank" rel="noopener">PostHog</a>
+      to understand which docs pages are useful and where readers get stuck.
+      No session recording, no third-party ad networks, no cross-site tracking.
+      You can opt out below — your choice is stored locally and respected on
+      every page load. The site works identically either way.
+    actions:
+      - accept
+      - reject
+      - manage
+    cookies:
+      analytics:
+        name: PostHog (anonymous pageview analytics)
+        checked: true
 
 extra_css:
   - stylesheets/extra.css
