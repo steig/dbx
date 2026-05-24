@@ -87,10 +87,16 @@ _scrub_mysql_ident() {
 # single-quote doubling so we don't get caught by Postgres in
 # standard_conforming_strings=off mode (rare but real) or MySQL's
 # default NO_BACKSLASH_ESCAPES=off.
+#
+# bash 3.2 oddity (macOS system bash): `${var//\'/\'\'}` does the
+# wrong thing — the pattern engine keeps the backslashes in the
+# replacement instead of stripping them. Same workaround as
+# mysql_build_var_prelude: hold the single quote in a variable and
+# substitute via $sq instead of the literal escape.
 _scrub_sql_string() {
-  local v="$1"
+  local v="$1" sq=\'
   v="${v//\\/\\\\}"
-  printf "'%s'" "${v//\'/\'\'}"
+  printf "'%s'" "${v//$sq/$sq$sq}"
 }
 
 # Engine dispatcher: echo "pg" or "mysql" from the public "postgres" /
