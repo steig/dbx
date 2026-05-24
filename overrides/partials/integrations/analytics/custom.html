@@ -33,9 +33,45 @@
 
       // Re-capture pageview on mkdocs-material's instant-navigation swaps
       // (otherwise we'd undercount everything but the first page in a session).
+      // Also bind the feedback widget on every page swap.
       if (typeof document$ !== "undefined") {
-        document$.subscribe(function() { posthog.capture('$pageview'); });
+        document$.subscribe(function() {
+          posthog.capture('$pageview');
+          bindFeedbackWidget();
+        });
+      } else {
+        bindFeedbackWidget();
       }
+    }
+
+    // mkdocs-material renders a feedback form (configured via
+    // extra.analytics.feedback) on every page. It's hidden by default
+    // until JS unhides it. On submit we capture to PostHog as a
+    // `docs_feedback` event with the page path and the rating value.
+    function bindFeedbackWidget() {
+      var feedback = document.forms.feedback;
+      if (!feedback || feedback.dataset.dbxBound) return;
+      feedback.dataset.dbxBound = "1";
+      feedback.hidden = false;
+      feedback.addEventListener("submit", function(ev) {
+        ev.preventDefault();
+        var page = document.location.pathname;
+        var data = ev.submitter && ev.submitter.getAttribute("data-md-value");
+        var ratingValue = parseInt(data, 10);
+        // Only capture if PostHog initialized (i.e. user consented).
+        // The widget still renders for non-consented users so the "thanks"
+        // microcopy doesn't disappear surprisingly — we just no-op the send.
+        if (window.__dbx_posthog_initialized && typeof posthog !== "undefined") {
+          posthog.capture("docs_feedback", {
+            page: page,
+            page_title: document.title,
+            rating: ratingValue === 1 ? "helpful" : "not_helpful",
+            rating_value: ratingValue
+          });
+        }
+        // mkdocs-material handles the "Thanks!" microcopy via its own
+        // submit listener that runs after ours.
+      });
     }
 
     // mkdocs-material stores consent in localStorage under __consent. We

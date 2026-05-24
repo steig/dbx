@@ -67,6 +67,21 @@ extra:
     # without the var skip the snippet entirely (no analytics in preview).
     posthog_key: !ENV [POSTHOG_API_KEY, ""]
     posthog_host: https://us.i.posthog.com
+    feedback:
+      title: Was this page helpful?
+      ratings:
+        - icon: material/thumb-up-outline
+          name: This page was helpful
+          data: 1
+          note: >-
+            Thanks! Your feedback helps us prioritize what to improve.
+        - icon: material/thumb-down-outline
+          name: This page could be improved
+          data: 0
+          note: >-
+            Thanks for letting us know. If you have a specific suggestion,
+            <a href="https://github.com/steig/dbx/issues/new?labels=docs&title=Docs+feedback%3A+" target="_blank" rel="noopener">open a docs issue on GitHub</a> —
+            we read every one.
   consent:
     title: Cookies & analytics
     description: >-
