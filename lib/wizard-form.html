@@ -680,6 +680,126 @@
       </label>
     </fieldset>
 
+    <!-- Notifications -->
+    <fieldset style="margin-top: 1.25rem;">
+      <legend>Notifications (optional)</legend>
+      <label class="dbx-builder__toggle">
+        <input type="checkbox" x-model="notifications.enabled"/>
+        <span>Send a message on backup / restore events</span>
+      </label>
+
+      <div x-show="notifications.enabled" style="margin-top: 1rem;">
+        <div class="dbx-builder__row cols-2">
+          <div>
+            <label>Notify on</label>
+            <select x-model="notifications.on">
+              <option value="failure">Failures only (recommended)</option>
+              <option value="success">Successes only</option>
+              <option value="all">All events</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-top: 1rem;">
+          <label>Backends</label>
+          <div style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-top: 0.5rem;">
+            <label class="dbx-builder__toggle">
+              <input type="checkbox" x-model="notifications.backends.slack"/>
+              <span>Slack</span>
+            </label>
+            <label class="dbx-builder__toggle">
+              <input type="checkbox" x-model="notifications.backends.desktop"/>
+              <span>Desktop (macOS / Linux)</span>
+            </label>
+            <label class="dbx-builder__toggle">
+              <input type="checkbox" x-model="notifications.backends.email"/>
+              <span>Email (SMTP)</span>
+            </label>
+            <label class="dbx-builder__toggle">
+              <input type="checkbox" x-model="notifications.backends.command"/>
+              <span>Custom command</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Slack -->
+        <div x-show="notifications.backends.slack" class="dbx-builder__card" style="margin-top: 1rem;">
+          <div class="dbx-builder__card-title" style="margin-bottom: 0.75rem;">Slack</div>
+          <label class="dbx-builder__toggle" style="margin-bottom: 0.75rem;">
+            <input type="checkbox" x-model="notifications.slack.use_vault"/>
+            <span>Use the vault for the webhook URL (recommended)</span>
+          </label>
+          <template x-if="notifications.slack.use_vault">
+            <div class="dbx-builder__hint">
+              Config will reference <code>dbx vault get slack-webhook</code>. Set it after:
+              <code>dbx vault set slack-webhook</code> (paste the webhook URL when prompted).
+            </div>
+          </template>
+          <template x-if="!notifications.slack.use_vault">
+            <div>
+              <label>Webhook URL</label>
+              <input type="text" x-model="notifications.slack.webhook_url"
+                     placeholder="https://hooks.slack.com/services/T.../B.../..."/>
+              <div class="dbx-builder__hint">
+                ⚠ This URL grants posting access to your Slack channel. It will be saved in plaintext in <code>config.json</code>. Consider the vault option above instead.
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Email -->
+        <div x-show="notifications.backends.email" class="dbx-builder__card" style="margin-top: 1rem;">
+          <div class="dbx-builder__card-title" style="margin-bottom: 0.75rem;">Email (SMTP)</div>
+          <div class="dbx-builder__row cols-2">
+            <div>
+              <label>To</label>
+              <input type="text" x-model="notifications.email.to" placeholder="admin@example.com"/>
+            </div>
+            <div>
+              <label>From</label>
+              <input type="text" x-model="notifications.email.from" placeholder="dbx@example.com"/>
+            </div>
+          </div>
+          <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
+            <div>
+              <label>SMTP host</label>
+              <input type="text" x-model="notifications.email.smtp_host" placeholder="smtp.example.com"/>
+            </div>
+            <div>
+              <label>SMTP port</label>
+              <input type="number" x-model.number="notifications.email.smtp_port" placeholder="587"/>
+            </div>
+          </div>
+          <div class="dbx-builder__hint" style="margin-top: 0.5rem;">
+            Uses <code>sendmail</code> if available, else <code>msmtp</code>. SMTP auth credentials, if any, go in your local mailer config (e.g. <code>~/.msmtprc</code>), not here.
+          </div>
+        </div>
+
+        <!-- Command -->
+        <div x-show="notifications.backends.command" class="dbx-builder__card" style="margin-top: 1rem;">
+          <div class="dbx-builder__card-title" style="margin-bottom: 0.75rem;">Custom command</div>
+          <div>
+            <label>On failure (recommended)</label>
+            <input type="text" x-model="notifications.command.on_failure"
+                   placeholder="terminal-notifier -title DBX -message 'Backup failed'"/>
+          </div>
+          <div style="margin-top: 0.75rem;">
+            <label>On success (optional)</label>
+            <input type="text" x-model="notifications.command.on_success"
+                   placeholder="(blank = don't fire on success)"/>
+          </div>
+          <div class="dbx-builder__hint" style="margin-top: 0.5rem;">
+            Shell template; runs with <code>DBX_NOTIFY_TITLE</code> / <code>DBX_NOTIFY_MESSAGE</code> in env.
+          </div>
+        </div>
+
+        <!-- Desktop has no config -->
+        <div x-show="notifications.backends.desktop" class="dbx-builder__hint" style="margin-top: 1rem; padding-left: 0.25rem;">
+          Desktop notifications use <code>osascript</code> on macOS and <code>notify-send</code> on Linux. No config needed.
+        </div>
+      </div>
+    </fieldset>
+
     <!-- Actions -->
     <div class="dbx-builder__actions">
       <template x-if="mode === 'cli'">
@@ -716,6 +836,14 @@
       hosts: [emptyHost()],
       storage: { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' },
       defaults: { encryption_type: 'age', keep_backups: 10, compression_level: 3, auto_upload: false },
+      notifications: {
+        enabled: false,
+        on: 'failure',
+        backends: { slack: false, desktop: false, email: false, command: false },
+        slack:   { use_vault: true, webhook_url: '' },
+        email:   { to: '', from: '', smtp_host: '', smtp_port: 587 },
+        command: { on_failure: '', on_success: '' }
+      },
 
       init() {
         const el = this.$el.closest('[data-mode]');
@@ -796,6 +924,31 @@
           if (this.storage.access_key) cfg.storage.s3.access_key = this.storage.access_key;
           cfg.storage.s3.secret_key_cmd = 'dbx vault get s3-secret-key';
         }
+        if (this.notifications.enabled) {
+          const enabledBackends = Object.entries(this.notifications.backends)
+            .filter(([_, on]) => on).map(([name]) => name);
+          if (enabledBackends.length) {
+            const n = { enabled: true, on: this.notifications.on, backends: enabledBackends };
+            if (this.notifications.backends.slack) {
+              n.slack = this.notifications.slack.use_vault
+                ? { webhook_url_cmd: 'dbx vault get slack-webhook' }
+                : { webhook_url: this.notifications.slack.webhook_url };
+            }
+            if (this.notifications.backends.email) {
+              n.email = {};
+              if (this.notifications.email.to)        n.email.to = this.notifications.email.to;
+              if (this.notifications.email.from)      n.email.from = this.notifications.email.from;
+              if (this.notifications.email.smtp_host) n.email.smtp_host = this.notifications.email.smtp_host;
+              if (this.notifications.email.smtp_port) n.email.smtp_port = this.notifications.email.smtp_port;
+            }
+            if (this.notifications.backends.command) {
+              n.command = {};
+              if (this.notifications.command.on_failure) n.command.on_failure = this.notifications.command.on_failure;
+              if (this.notifications.command.on_success) n.command.on_success = this.notifications.command.on_success;
+            }
+            cfg.notifications = n;
+          }
+        }
         return cfg;
       },
 
@@ -850,6 +1003,14 @@
         this.hosts = [emptyHost()];
         this.storage = { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' };
         this.defaults = { encryption_type: 'age', keep_backups: 10, compression_level: 3, auto_upload: false };
+        this.notifications = {
+          enabled: false,
+          on: 'failure',
+          backends: { slack: false, desktop: false, email: false, command: false },
+          slack:   { use_vault: true, webhook_url: '' },
+          email:   { to: '', from: '', smtp_host: '', smtp_port: 587 },
+          command: { on_failure: '', on_success: '' }
+        };
         this.savedMsg = '';
       }
     };
