@@ -96,12 +96,11 @@ Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them wit
 !!! info "Not for you if"
     You need streaming/PITR replication, point-in-time recovery from WAL, or anything beyond logical dumps.
 
-## What's new in v0.9.0
+## What's new in v0.10.0
 
--   **[Restore directly from S3 / MinIO](restore.md#restoring-from-cloud-storage)** with `--from-remote` or `s3://`
--   **[Interactive wizards](wizards.md)** for adding hosts and configuring cloud storage
--   **[Post-restore SQL hooks](post-restore-hooks.md)** — repoint webhooks, fail-fast on errors
--   **[PII scrub](scrub.md)** — declarative manifest, schema drift detection, fail-closed gate
+-   **[PII scrub](scrub.md)** — declarative manifest, schema drift detection, fail-closed restore-time gate. A clone is provably scrubbed or it doesn't exist.
+-   **[Browser-based config builder](wizards.md)** via `dbx wizard`, plus an [online static version](config-builder.md) that runs entirely in your browser
+-   See the full v0.10.0 release notes on [GitHub](https://github.com/steig/dbx/releases/tag/v0.10.0)
 
 See the full [changelog](https://github.com/steig/dbx/blob/main/CHANGELOG.md) on GitHub.
 
