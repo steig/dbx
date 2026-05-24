@@ -1191,3 +1191,43 @@ list_remote_databases() {
       ;;
   esac
 }
+
+# ============================================================================
+# --transform script exec helper
+# ============================================================================
+
+# Print the argv prefix to run a `--transform` subprocess. Default is
+# `env -i` with a minimal allowlist (PATH, HOME, LANG, LC_*, TZ, USER,
+# SHELL) plus any `DBX_TRANSFORM_*`-prefixed vars the operator wants to
+# pass through explicitly. The transform script gets stdin/stdout but
+# none of dbx's credentials (PGPASSWORD, vault tokens, DBX_SCRUB_SEED).
+#
+# When $1 == "true", inherits the full environment (legacy / opt-out).
+# Use like: `... | $(transform_exec_prefix "$inherit") "$script" | ...`
+# but for argv safety prefer building an array; see callers.
+#
+# Args: $1 = inherit_env ("true" to skip cleaning), $2 = script path
+# Echoes one argument per line so callers can `mapfile`/`read` into
+# an array safely.
+transform_exec_argv() {
+  local inherit_env="$1" script="$2"
+  if [[ "$inherit_env" == "true" ]]; then
+    printf '%s\n' "$script"
+    return 0
+  fi
+  printf '%s\n' env -i
+  # Minimal allowlist — what a script needs to find binaries and behave
+  # correctly under different locales. NOT in the allowlist on purpose:
+  # PGPASSWORD, MYSQL_PWD, DBX_SCRUB_SEED, vault tokens, AWS_*.
+  local k v
+  for k in PATH HOME LANG LC_ALL LC_CTYPE LC_COLLATE LC_MESSAGES TZ USER SHELL TMPDIR; do
+    v="${!k:-}"
+    [[ -n "$v" ]] && printf '%s=%s\n' "$k" "$v"
+  done
+  # DBX_TRANSFORM_* prefix: operator opt-in. Anything they want the
+  # script to see, they prefix DBX_TRANSFORM_ and it gets passed.
+  while IFS='=' read -r k v; do
+    [[ "$k" == DBX_TRANSFORM_* ]] && printf '%s=%s\n' "$k" "$v"
+  done < <(env)
+  printf '%s\n' "$script"
+}

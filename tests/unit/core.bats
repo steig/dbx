@@ -117,3 +117,62 @@ setup() {
   write_config '{"defaults":{"parallel_jobs":2},"hosts":{"prod":{"databases":{"app":{}}}}}'
   [ "$(get_parallel_jobs prod app)" = "2" ]
 }
+
+# ----------------------------------------------------------------------------
+# transform_exec_argv — --transform subprocess argv builder
+# ----------------------------------------------------------------------------
+
+@test "transform_exec_argv default (env clean): emits env -i + allowlist + script" {
+  PATH=/usr/bin HOME=/h LANG=C.UTF-8 TZ=UTC USER=u SHELL=/bin/sh \
+    run transform_exec_argv "false" "/path/to/script.sh"
+  [ "$status" -eq 0 ]
+  # First line is `env`, second is `-i`
+  first=$(echo "$output" | sed -n 1p)
+  second=$(echo "$output" | sed -n 2p)
+  [ "$first" = "env" ]
+  [ "$second" = "-i" ]
+  # Allowlisted vars appear as KEY=VALUE lines
+  echo "$output" | grep -q '^PATH=/usr/bin$'
+  echo "$output" | grep -q '^HOME=/h$'
+  echo "$output" | grep -q '^LANG=C.UTF-8$'
+  # Last line is the script path
+  last=$(echo "$output" | tail -1)
+  [ "$last" = "/path/to/script.sh" ]
+}
+
+@test "transform_exec_argv default: PGPASSWORD is NOT passed through" {
+  export PGPASSWORD="secret123"
+  run transform_exec_argv "false" "/path/to/script.sh"
+  ! echo "$output" | grep -q "PGPASSWORD"
+  ! echo "$output" | grep -q "secret123"
+  unset PGPASSWORD
+}
+
+@test "transform_exec_argv default: DBX_SCRUB_SEED is NOT passed through" {
+  export DBX_SCRUB_SEED="salty"
+  run transform_exec_argv "false" "/path/to/script.sh"
+  ! echo "$output" | grep -q "DBX_SCRUB_SEED"
+  ! echo "$output" | grep -q "salty"
+  unset DBX_SCRUB_SEED
+}
+
+@test "transform_exec_argv default: DBX_TRANSFORM_* prefix IS passed through" {
+  export DBX_TRANSFORM_PROJECT="myapp"
+  export DBX_TRANSFORM_SEED="abc"
+  run transform_exec_argv "false" "/path/to/script.sh"
+  echo "$output" | grep -q '^DBX_TRANSFORM_PROJECT=myapp$'
+  echo "$output" | grep -q '^DBX_TRANSFORM_SEED=abc$'
+  unset DBX_TRANSFORM_PROJECT DBX_TRANSFORM_SEED
+}
+
+@test "transform_exec_argv inherit=true: emits just the script (no env -i)" {
+  run transform_exec_argv "true" "/path/to/script.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "/path/to/script.sh" ]
+}
+
+@test "transform_exec_argv default: missing allowlist var is skipped (no empty value)" {
+  unset TMPDIR
+  run transform_exec_argv "false" "/path/to/script.sh"
+  ! echo "$output" | grep -q "^TMPDIR=$"
+}

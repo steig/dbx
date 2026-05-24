@@ -30,7 +30,8 @@ If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>`
 | `--keep-download` | Keep the locally-staged copy after a `--from-remote` restore succeeds (default: deleted). |
 | `--no-post-restore` | Skip configured [post-restore hooks](post-restore-hooks.md) for this run. |
 | `--hooks-only` | Skip the engine restore; only run configured hooks against the DB named by `--name`. Useful for iterating on hook scripts. |
-| `--transform PATH` | Pipe the restore byte-stream through a host-side executable before any write to the target. See [Streaming sanitization](#streaming-sanitization-with-transform) below. |
+| `--transform PATH` | Pipe the restore byte-stream through a host-side executable before any write to the target. Runs under `env -i` by default (cleaned env, only allowlisted vars + `DBX_TRANSFORM_*` passed through). See [Streaming sanitization](#streaming-sanitization-with-transform) below. |
+| `--transform-inherit-env` | Inherit dbx's full environment into the `--transform` subprocess (legacy behavior). Requires `--transform`. |
 | `--into NAME` | Restore into a named external docker container (e.g. a compose-managed postgres sidecar) instead of the managed `postgres-dbx`. Postgres only. See [Targeting an external container](#targeting-an-external-container-with-into) below. |
 
 `--hooks-only` requires `--name <existing-db>` and is mutually exclusive with `--no-post-restore`, `--from-remote`, `--transform`, and `--into`.
@@ -81,14 +82,17 @@ dbx restore production/myapp/latest --name myapp_review --transform=./sanitize.s
 
 **Constraints:** the source backup must be plain-SQL-readable (postgres custom-format dumps work — `pg_restore -f -` emits plain SQL). Binary formats incompatible with plain-SQL output will fail clearly.
 
-!!! warning "Transform scripts inherit dbx's environment"
-    The script runs as a normal subprocess and inherits every environment variable in dbx's process, including any credentials in scope at invocation time — `PGPASSWORD`, `MYSQL_PWD`, `DBX_SCRUB_SEED`, vault tokens, AWS credentials. **Treat the transform script with the same trust level as your shell rc files.** A script committed to the project repo and run by an operator with vault access has effective access to that vault.
+!!! note "Transform scripts run with a cleaned environment by default"
+    The script is `exec`'d under `env -i` with a minimal allowlist: `PATH`, `HOME`, `LANG`, `LC_*`, `TZ`, `USER`, `SHELL`, `TMPDIR`. dbx's credentials — `PGPASSWORD`, `MYSQL_PWD`, `DBX_SCRUB_SEED`, vault tokens, `AWS_*` — are **not** inherited by the script.
 
-    Practical mitigations:
+    **Explicit pass-through:** any environment variable starting with `DBX_TRANSFORM_` is passed through. Use this to hand the script project-specific values without exposing dbx's secrets:
 
-    - Audit the script the same way you'd audit a deploy script.
-    - If you need stronger isolation, invoke dbx itself with `env -i PATH=... HOME=... dbx restore ...` so dbx never sees the credentials in the first place (you'll need to supply DB passwords via `password_cmd` config or the keychain instead of env).
-    - The `--transform` script does not need any of dbx's env vars to do its job — it operates on stdin/stdout. Authors should write transform scripts that don't read `PGPASSWORD` / `DBX_*` env vars at all, so even if a future dbx version sandboxes them, the script keeps working.
+    ```bash
+    DBX_TRANSFORM_PROJECT=myapp DBX_TRANSFORM_SEED="$(pass show transform/seed)" \
+        dbx restore prod/myapp/latest --transform=./sanitize.sh --name myapp_review
+    ```
+
+    **Opt-out:** pass `--transform-inherit-env` to inherit dbx's full environment (the original behavior — useful if you have a legacy script that reads `PGPASSWORD` directly, but audit it first).
 
 ## Targeting an external container with `--into`
 
