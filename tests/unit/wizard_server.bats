@@ -49,6 +49,7 @@ SH
     --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
     --form-fragment     "$WIZ_REPO_ROOT/lib/wizard-form.html" \
     --backups-fragment  "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
+    --backup-fragment   "$WIZ_REPO_ROOT/lib/wizard-backup.html" \
     --restore-fragment  "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
     --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
     --runs-fragment     "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
@@ -200,6 +201,67 @@ JSON
   [[ "$output" == *'"exit_code": 0'* ]]
 }
 
+@test "POST /api/backup rejects missing host" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" -d '{}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/backup rejects host not in config.json" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"staging"}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not configured"* ]]
+}
+
+@test "POST /api/backup rejects shell-metachar database" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"bad;rm -rf"}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invalid characters"* ]]
+}
+
+@test "POST /api/backup rejects non-boolean verbose" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","verbose":"yes"}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"must be a boolean"* ]]
+}
+
+@test "POST /api/backup rejects when no hosts are configured" {
+  # No config.json at all → 400 with a useful error.
+  rm -f "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod"}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no hosts configured"* ]]
+}
+
+@test "POST /api/backup with valid host returns a job_id" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod"}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ \"job_id\":\ ?\"[0-9a-f]{32}\" ]]
+}
+
+@test "POST /api/backup forwards verbose + database into argv" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  local body job_id
+  body=$(curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp","verbose":true}' "$(api /api/backup)")
+  job_id=$(echo "$body" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+  [ -n "$job_id" ]
+  run curl -s -N --max-time 3 "http://127.0.0.1:$WIZ_PORT/api/jobs/$job_id/events?token=$WIZ_TOKEN"
+  # The fake dbx echoes its argv on the first line.
+  [[ "$output" == *"cmd=backup -v prod myapp"* ]]
+}
+
 @test "POST /api/jobs/<bad-id>/cancel returns 404" {
   run curl -s -o /dev/null -w "%{http_code}" -X POST \
     "$(api /api/jobs/00000000000000000000000000000000/cancel)"
@@ -289,6 +351,12 @@ JSON
   run curl -s "$(api /)"
   [ "$status" -eq 0 ]
   [[ "$output" == *"dbxSchedule()"* ]]
+}
+
+@test "GET / now composes the backup fragment too" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxBackup()"* ]]
 }
 
 @test "GET /api/config returns existing config.json verbatim" {

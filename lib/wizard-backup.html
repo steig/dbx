@@ -1,0 +1,306 @@
+<!--
+  Backup view fragment. Loaded by `dbx wizard` only.
+
+  Wraps `dbx backup <host> <database> [-v] [--upload]` with a form +
+  EventSource log stream + cancel. Same job/SSE plumbing as the Restore
+  view; same /api/jobs/<id>/(events|cancel) endpoints. The new server
+  endpoint is POST /api/backup; it validates host against config.json's
+  hosts allowlist before spawning so a hand-crafted POST can't run
+  `dbx backup` against an unconfigured target.
+
+  Host + Database are dropdowns sourced from GET /api/config so the
+  user picks from the same set they configured. (Free-text would also
+  reach the host-allowlist validator on the server, but exposing only
+  configured options keeps the surface tighter and the UX nicer.)
+-->
+<style>
+  .dbx-backup__layout { display: grid; gap: 1.25rem; }
+  .dbx-backup__form { display: grid; gap: 0.75rem; grid-template-columns: 1fr 1fr; padding: 1rem 1.25rem; border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-code-bg-color); }
+  .dbx-backup__form label { display: block; font-size: 0.8125rem; font-weight: 600; color: var(--md-default-fg-color--light); margin-bottom: 0.25rem; }
+  .dbx-backup__form select,
+  .dbx-backup__form input[type=text] { width: 100%; padding: 0.4rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
+  .dbx-backup__form select:disabled { opacity: 0.6; cursor: not-allowed; }
+  .dbx-backup__row { display: flex; flex-direction: column; }
+  .dbx-backup__row--full { grid-column: 1 / -1; }
+  .dbx-backup__checks { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; font-size: 0.875rem; }
+  .dbx-backup__checks label { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 400; color: var(--md-default-fg-color); margin: 0; }
+  .dbx-backup__hint { font-size: 0.8125rem; color: var(--md-default-fg-color--light); margin: 0; }
+  .dbx-backup__actions { display: flex; gap: 0.6rem; align-items: center; }
+  .dbx-backup__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.45rem 0.95rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
+  .dbx-backup__btn:hover:not(:disabled) { opacity: 0.92; filter: brightness(1.08); }
+  .dbx-backup__btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .dbx-backup__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
+  .dbx-backup__btn--secondary:hover:not(:disabled) { background: var(--md-code-bg-color); filter: none; }
+  .dbx-backup__btn--danger { background: #c43d3d; }
+  .dbx-backup__status { padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.875rem; margin: 0; }
+  .dbx-backup__status--running { background: rgba(0, 102, 255, 0.16); color: var(--md-accent-fg-color); }
+  .dbx-backup__status--ok      { background: rgba(74, 158, 76, 0.20); color: #2f7d31; }
+  .dbx-backup__status--err     { background: rgba(196, 61, 61, 0.20); color: #a83232; }
+  .dbx-backup__elapsed { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 4px; background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color); font-family: var(--md-code-font-family); font-size: 0.8125rem; }
+  .dbx-backup__log { background: #0d1117; color: #e6edf3; font-family: var(--md-code-font-family); font-size: 0.8125rem; padding: 0.75rem 1rem; border-radius: 6px; max-height: 32rem; overflow: auto; white-space: pre-wrap; }
+  .dbx-backup__empty { padding: 1rem 0; color: var(--md-default-fg-color--light); font-style: italic; font-size: 0.875rem; }
+</style>
+
+<div x-data="dbxBackup()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">
+      Backup
+      <span x-show="startedAt" class="dbx-backup__elapsed">Elapsed: <span x-text="formatElapsed(elapsed)"></span></span>
+    </h2>
+    <p class="dbx-view__subtitle">
+      Run <code>dbx backup &lt;host&gt; &lt;database&gt;</code> against a configured host.
+      Host + Database come from <code>config.json</code>.
+    </p>
+  </header>
+
+  <div class="dbx-backup__layout">
+    <template x-if="hosts.length === 0 && !loadingHosts">
+      <p class="dbx-backup__empty">
+        No hosts configured yet. Add one in the <a @click="$store.dbx.view='config'" style="cursor: pointer; color: var(--md-accent-fg-color); text-decoration: underline;">Config</a> tab first.
+      </p>
+    </template>
+
+    <template x-if="hosts.length > 0">
+      <div class="dbx-backup__form">
+        <div class="dbx-backup__row">
+          <label>Host</label>
+          <select x-model="form.host" @change="onHostChange()" :disabled="running">
+            <template x-for="h in hosts" :key="h.alias">
+              <option :value="h.alias" x-text="h.alias + (h.flavor ? ' (' + h.flavor + ')' : '')"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="dbx-backup__row">
+          <label>Database</label>
+          <template x-if="databasesForSelected().length > 0">
+            <select x-model="form.database" :disabled="running">
+              <option value="">(all databases)</option>
+              <template x-for="db in databasesForSelected()" :key="db">
+                <option :value="db" x-text="db"></option>
+              </template>
+            </select>
+          </template>
+          <template x-if="databasesForSelected().length === 0">
+            <input type="text" x-model.trim="form.database" placeholder="(host has no databases[] in config; type one or leave blank for all)" :disabled="running">
+          </template>
+        </div>
+
+        <div class="dbx-backup__row dbx-backup__row--full">
+          <div class="dbx-backup__checks">
+            <label><input type="checkbox" x-model="form.verbose" :disabled="running"> Verbose (<code>-v</code>)</label>
+            <label><input type="checkbox" x-model="form.upload" :disabled="running"> Upload to cloud storage (<code>--upload</code>)</label>
+          </div>
+        </div>
+
+        <div class="dbx-backup__row dbx-backup__row--full">
+          <p class="dbx-backup__hint" x-show="form.database === ''">Empty database = back up every DB on the host (<code>dbx backup &lt;host&gt;</code>).</p>
+        </div>
+      </div>
+    </template>
+
+    <div class="dbx-backup__actions" x-show="hosts.length > 0">
+      <button class="dbx-backup__btn" @click="start()" :disabled="running || !form.host">
+        <span x-show="!running">Start backup</span>
+        <span x-show="running">Running…</span>
+      </button>
+      <button class="dbx-backup__btn dbx-backup__btn--danger" @click="cancel()" :disabled="!running">Cancel</button>
+      <button class="dbx-backup__btn dbx-backup__btn--secondary" @click="clearLog()" :disabled="running || log.length === 0">Clear log</button>
+    </div>
+
+    <template x-if="status">
+      <p class="dbx-backup__status" :class="statusClass()" x-text="status"></p>
+    </template>
+
+    <template x-if="log.length > 0">
+      <pre class="dbx-backup__log"><template x-for="(line, i) in log" :key="i"><span x-text="line + '\n'"></span></template></pre>
+    </template>
+  </div>
+</div>
+
+<script>
+  function dbxBackup() {
+    return {
+      hosts: [],            // [{alias, flavor, databases: []}]
+      loadingHosts: false,
+      form: { host: '', database: '', verbose: false, upload: false },
+      log: [],
+      jobId: null,
+      eventSource: null,
+      running: false,
+      status: '',
+      exitCode: null,
+      startedAt: null,
+      elapsed: 0,
+      tickHandle: null,
+
+      init() {
+        this.$watch('$store.dbx.view', (v) => { if (v === 'backup') this.refresh(); });
+        if (Alpine.store('dbx').view === 'backup') this.refresh();
+      },
+
+      async refresh() {
+        // Reload hosts only if we don't already have them — they don't
+        // change while the wizard is running unless the user saves the
+        // Config view, in which case re-entering this tab will refresh.
+        if (this.hosts.length === 0 && !this.loadingHosts) await this.loadHosts();
+      },
+
+      async loadHosts() {
+        this.loadingHosts = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/config'));
+          if (!r.ok) { this.hosts = []; return; }
+          const cfg = await r.json();
+          const hosts = Array.isArray(cfg.hosts) ? cfg.hosts : [];
+          this.hosts = hosts.map(h => ({
+            alias: h.alias || '',
+            flavor: h.flavor || '',
+            databases: Array.isArray(h.databases) ? h.databases.slice() : [],
+          })).filter(h => h.alias);
+          // Default to the first host if nothing is picked yet.
+          if (!this.form.host && this.hosts.length > 0) this.form.host = this.hosts[0].alias;
+        } catch (e) {
+          this.hosts = [];
+        } finally {
+          this.loadingHosts = false;
+        }
+      },
+
+      onHostChange() {
+        // When the host changes, clear database so the user explicitly
+        // re-picks instead of carrying over a value that doesn't apply
+        // (e.g. mysql db name on a postgres host).
+        this.form.database = '';
+      },
+
+      databasesForSelected() {
+        const h = this.hosts.find(h => h.alias === this.form.host);
+        return h ? h.databases : [];
+      },
+
+      buildBody() {
+        const body = { host: this.form.host };
+        if (this.form.database) body.database = this.form.database;
+        if (this.form.verbose) body.verbose = true;
+        if (this.form.upload)  body.upload = true;
+        return body;
+      },
+
+      async start() {
+        if (this.running) return;
+        if (!this.form.host) { this.status = 'Pick a host first.'; return; }
+        this.log = [];
+        this.status = 'Starting backup…';
+        this.running = true;
+        this.startedAt = null;
+        this.elapsed = 0;
+        this.stopTicker();
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/backup'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this.buildBody()),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+            this.status = `Failed to start: ${err.error || r.status}`;
+            this.running = false;
+            return;
+          }
+          const { job_id } = await r.json();
+          this.jobId = job_id;
+          this.startedAt = Date.now();
+          this.startTicker();
+          this.attachStream(job_id);
+        } catch (e) {
+          this.status = `Network error: ${e}`;
+          this.running = false;
+        }
+      },
+
+      startTicker() {
+        this.stopTicker();
+        this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
+        this.tickHandle = setInterval(() => {
+          if (!this.startedAt) return;
+          this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
+        }, 1000);
+      },
+
+      stopTicker() {
+        if (this.tickHandle != null) {
+          clearInterval(this.tickHandle);
+          this.tickHandle = null;
+        }
+      },
+
+      formatElapsed(secs) {
+        if (!Number.isFinite(secs) || secs < 0) return '0s';
+        const s = Math.floor(secs);
+        if (s < 60) return s + 's';
+        if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+        const h = Math.floor(s / 3600);
+        const rem = s % 3600;
+        return h + 'h ' + Math.floor(rem / 60) + 'm ' + (rem % 60) + 's';
+      },
+
+      attachStream(jobId) {
+        const url = Alpine.store('dbx').api(`/jobs/${jobId}/events`);
+        const es = new EventSource(url);
+        this.eventSource = es;
+        es.onmessage = (ev) => {
+          try {
+            const { line } = JSON.parse(ev.data);
+            if (line !== undefined) this.log.push(line);
+          } catch (e) { /* ignore */ }
+        };
+        es.addEventListener('done', (ev) => {
+          try {
+            const { exit_code } = JSON.parse(ev.data);
+            this.exitCode = exit_code;
+            this.status = exit_code === 0
+              ? 'Backup completed successfully.'
+              : `Backup failed (exit ${exit_code}).`;
+          } catch (e) {
+            this.status = 'Backup finished (unknown exit code).';
+          } finally {
+            this.running = false;
+            if (this.startedAt) {
+              this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
+            }
+            this.stopTicker();
+            es.close();
+            this.eventSource = null;
+          }
+        });
+        es.onerror = () => {
+          if (!this.running) { es.close(); this.eventSource = null; }
+        };
+      },
+
+      async cancel() {
+        if (!this.jobId) return;
+        try {
+          await fetch(Alpine.store('dbx').api(`/jobs/${this.jobId}/cancel`), { method: 'POST' });
+        } catch (e) { /* swallow */ }
+      },
+
+      clearLog() {
+        this.log = [];
+        this.status = '';
+        this.exitCode = null;
+        this.startedAt = null;
+        this.elapsed = 0;
+        this.stopTicker();
+      },
+
+      statusClass() {
+        if (this.running) return 'dbx-backup__status--running';
+        if (this.exitCode === 0) return 'dbx-backup__status--ok';
+        if (this.exitCode != null) return 'dbx-backup__status--err';
+        return '';
+      },
+    };
+  }
+</script>
