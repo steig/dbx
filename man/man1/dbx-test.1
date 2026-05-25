@@ -1,0 +1,35 @@
+.TH DBX-TEST 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-test \- test connectivity to a configured host
+.SH SYNOPSIS
+.B dbx test
+.I host
+.PP
+.B dbx ping
+.I host
+.SH DESCRIPTION
+Try to reach
+.I host
+using the configured connection parameters. For SSH-tunneled hosts,
+opens the tunnel and runs a
+.B SELECT 1
+through the managed Docker client. Reports which step succeeded /
+failed so you can localize a problem (DNS, SSH, DB auth).
+.SH EXAMPLES
+.RS
+.nf
+dbx test production
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+0
+Reached the database successfully.
+.TP
+non-zero
+SSH tunnel failed, DB auth failed, or the host isn't in
+.IR config.json .
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-host (1),
+.BR dbx-query (1).

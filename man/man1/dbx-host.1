@@ -1,0 +1,49 @@
+.TH DBX-HOST 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-host \- interactively add a backup host to config.json
+.SH SYNOPSIS
+.B dbx host add
+.SH DESCRIPTION
+Interactively prompt for a new host's connection parameters and write
+them to
+.IR config.json .
+Uses
+.B gum
+when available for a polished TUI; falls back to plain
+.B read
+prompts otherwise.
+.PP
+Prompts cover:
+.IP \(bu 2
+Alias (key in
+.IR .hosts ).
+.IP \(bu 2
+DB type (postgres, mysql, mariadb).
+.IP \(bu 2
+Hostname / IP, port.
+.IP \(bu 2
+Username; optional password (stored in the system keychain via
+.BR dbx-vault (1),
+not in plain text in config).
+.IP \(bu 2
+Optional SSH tunnel (jump host, port, key path).
+.IP \(bu 2
+Optional
+.IR safety
+flag (prod / stage / local).
+.SH EXAMPLES
+.RS
+.nf
+dbx host add
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/dbx/config.json
+The host block is appended under
+.IR .hosts[alias] .
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-config (1),
+.BR dbx-vault (1),
+.BR dbx-test (1).

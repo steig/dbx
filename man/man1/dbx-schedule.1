@@ -1,0 +1,100 @@
+.TH DBX-SCHEDULE 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-schedule \- manage scheduled backups (launchd / systemd)
+.SH SYNOPSIS
+.B dbx schedule add
+.I host
+.I database
+.RI [ when ]
+.PP
+.B dbx schedule remove
+.I host
+.I database
+.PP
+.B dbx schedule list
+.PP
+.B dbx schedule run
+.I host
+.I database
+.PP
+.B dbx schedule sync
+.RB [ \-\-dry\-run ]
+.RB [ \-\-force ]
+.PP
+.B dbx cron
+.IR ...
+.SH DESCRIPTION
+Install, list, and remove scheduled backups. On macOS uses
+.B launchd
+.IR LaunchAgent
+plists under
+.IR ~/Library/LaunchAgents/ ;
+on Linux uses
+.B systemd
+.IR user
+.IR .timer / .service
+pairs under
+.IR ~/.config/systemd/user/ .
+.SH ACTIONS
+.TP
+.BR "add " host " " database " " [ when ]
+Install a scheduled unit. The
+.I when
+shorthand accepts:
+.RS
+.IP \(bu 2
+.IR daily ,
+.IR hourly ,
+.IR weekly
+.IP \(bu 2
+.IR daily@HH
+(daily at hour HH, 24h)
+.IP \(bu 2
+.IR weekly@DOW:HH
+(weekday DOW 1\-7, hour HH)
+.RE
+.TP
+.B "remove " host " " database
+Uninstall and disable the scheduled unit.
+.TP
+.B list
+Show all installed scheduled units across both
+.B launchd
+and
+.B systemd
+backends, with their next run time.
+.TP
+.B "run " host " " database
+Run the scheduled backup once, now (used by the scheduler itself but
+also handy for ad-hoc verification).
+.TP
+.B sync
+Reconcile installed units with the declarative
+.IR .schedules
+block in
+.IR config.json .
+.B --dry-run
+prints what would change without committing.
+.B --force
+also removes orphan units not declared in config.
+.SH EXAMPLES
+.RS
+.nf
+dbx schedule add production myapp daily@5
+dbx schedule list
+dbx schedule remove production myapp
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/Library/LaunchAgents/com.dbx.<host>-<db>.plist
+launchd plist (macOS).
+.TP
+.I ~/.config/systemd/user/dbx-<host>-<db>.{timer,service}
+systemd unit (Linux).
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-backup (1),
+.BR dbx-config (1),
+.BR launchd.plist (5),
+.BR systemd.timer (5).

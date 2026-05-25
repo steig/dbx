@@ -1,0 +1,89 @@
+.TH DBX-CLEAN 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-clean \- prune old backups by count or age
+.SH SYNOPSIS
+.B dbx clean
+.RB [ \-\-keep
+.IR N ]
+.RB [ \-\-older\-than
+.IR D ]
+.RB [ \-\-dry\-run ]
+.RI [ host ]
+.RI [ database ]
+.PP
+.B dbx prune
+.RI ...
+.SH DESCRIPTION
+Delete old backups according to a retention policy. Two modes:
+.IP \(bu 2
+.B Count mode
+.RB ( \-\-keep " " N ):
+keep the newest
+.I N
+backups per host+database, delete the rest.
+.IP \(bu 2
+.B Age mode
+.RB ( \-\-older\-than " " D ):
+delete every backup older than
+.I D
+days. If
+.B \-\-keep
+is also passed explicitly, the count acts as a floor (preserve newest
+.I N
+even when older than
+.IR D ).
+.PP
+With no scope arguments, applies the policy across every host+database
+under
+.IR $DATA_DIR .
+.SH OPTIONS
+.TP
+.BI \-\-keep " N"
+Keep the newest
+.I N
+backups per host+database. Default 10. When age mode is active without
+an explicit
+.BR \-\-keep ,
+the default is treated as advisory (ignored).
+.TP
+.BI \-\-older\-than " D"
+Delete backups older than
+.I D
+days. Activates age mode.
+.TP
+.B \-\-dry\-run
+Print what would be deleted, but don't actually delete.
+.SH EXAMPLES
+Keep newest 5 per database across all hosts:
+.PP
+.RS
+.nf
+dbx clean --keep 5
+.fi
+.RE
+.PP
+Delete anything older than 30 days, but always keep the newest 3:
+.PP
+.RS
+.nf
+dbx clean --older-than 30 --keep 3
+.fi
+.RE
+.PP
+See what would be deleted without committing:
+.PP
+.RS
+.nf
+dbx clean --older-than 90 --dry-run
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.data/dbx/<host>/<database>/
+Walked recursively. Both the backup file and its
+.I .meta.json
+sidecar are removed together.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-list (1),
+.BR dbx-backup (1).

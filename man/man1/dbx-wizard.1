@@ -1,0 +1,80 @@
+.TH DBX-WIZARD 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-wizard \- browser-based config builder
+.SH SYNOPSIS
+.B dbx wizard
+.RB [ \-\-remote ]
+.RB [ \-\-port
+.IR N ]
+.SH DESCRIPTION
+Spawn a local HTTP server that hosts a browser UI for building
+.IR config.json
+without hand-editing JSON. The same UI also surfaces:
+.IP \(bu 2
+.B Backups
+view \(em browse files under
+.IR $DATA_DIR ,
+delete with confirmation, kick off a restore.
+.IP \(bu 2
+.B Restore
+view \(em pick a backup and target with live progress + elapsed
+counter.
+.IP \(bu 2
+.B Schedules
+view \(em manage scheduled backups declaratively (writes to the
+.IR .schedules
+block in
+.IR config.json ).
+.PP
+Local mode (default): the server binds to 127.0.0.1 on a free port and
+opens your default browser. Remote mode
+.RB ( \-\-remote ):
+the server still binds 127.0.0.1 but prints an
+.B ssh -L
+tunnel command so you can forward the port from a laptop.
+.SH OPTIONS
+.TP
+.B \-\-remote
+Server-only mode. Skips the local browser launch and prints the URL
++ a suggested
+.B ssh -L
+tunnel command.
+.TP
+.BI \-\-port " N"
+Pin the bind port. Default: OS picks a free port. Useful with
+.B \-\-remote
+so the
+.B ssh -L
+command is stable across runs.
+.SH EXAMPLES
+Local:
+.PP
+.RS
+.nf
+dbx wizard
+.fi
+.RE
+.PP
+Remote, pinned port 8765:
+.PP
+.RS
+.nf
+dbx wizard --remote --port 8765
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/dbx/config.json
+Reads and writes the config; the wizard merges into the existing file
+(atomically via a
+.I .wizard-tmp
+swap) so unrelated top-level keys like
+.IR .scrub
+and
+.IR .vault
+are preserved.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-config (1),
+.BR dbx-restore (1),
+.BR ssh (1).

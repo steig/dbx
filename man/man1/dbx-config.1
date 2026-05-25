@@ -1,0 +1,82 @@
+.TH DBX-CONFIG 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-config \- manage dbx configuration
+.SH SYNOPSIS
+.B dbx config init
+.PP
+.B dbx config edit
+.PP
+.B dbx config show
+.PP
+.B dbx config validate
+.PP
+.B dbx cfg
+.IR ...
+.SH DESCRIPTION
+Manage the
+.IR config.json
+file at
+.IR $DBX_CONFIG_DIR/config.json
+(default
+.IR ~/.config/dbx/config.json ).
+.SH ACTIONS
+.TP
+.B init
+Create a starter
+.IR config.json
+in the config directory. Refuses to overwrite an existing file.
+.TP
+.B edit
+Open
+.IR config.json
+in
+.B $EDITOR
+(or
+.B nano
+if unset).
+.TP
+.B show
+Pretty-print the current
+.IR config.json
+to stdout.
+.TP
+.B validate
+Run shape checks on
+.IR config.json :
+required fields, per-host
+.IR safety
+field is one of prod / stage / local, scrub manifest references valid
+files, encryption settings are coherent. Exits non-zero on the first
+problem with a clear error message.
+.SH EXAMPLES
+First-time setup:
+.PP
+.RS
+.nf
+dbx config init && dbx host add
+.fi
+.RE
+.PP
+Pre-flight check before a deploy:
+.PP
+.RS
+.nf
+dbx config validate
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B EDITOR
+Used by
+.BR "config edit" .
+.TP
+.B DBX_CONFIG_DIR
+Override the default config directory.
+.SH FILES
+.TP
+.I ~/.config/dbx/config.json
+The config file.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-host (1),
+.BR dbx-wizard (1).

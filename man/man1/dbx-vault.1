@@ -1,0 +1,86 @@
+.TH DBX-VAULT 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-vault \- manage credentials and encryption keys
+.SH SYNOPSIS
+.B dbx vault set
+.I host
+.PP
+.B dbx vault get
+.I host
+.PP
+.B dbx vault delete
+.I host
+.PP
+.B dbx vault list
+.PP
+.B dbx vault info
+.PP
+.B dbx vault set-encryption-key
+.PP
+.B dbx vault init-age
+.SH DESCRIPTION
+Store and retrieve credentials in the system keychain (macOS Keychain
+on Darwin,
+.B libsecret
+on Linux), keeping passwords out of
+.IR config.json .
+.PP
+Also manages encryption keys used by
+.B dbx
+backup encryption: the GPG passphrase or the
+.BR age-encryption (1)
+identity file.
+.SH ACTIONS
+.TP
+.BI "set " host
+Prompt for and store a password for
+.IR host .
+.TP
+.BI "get " host
+Print the stored password for
+.IR host
+(intended for piping).
+.TP
+.BI "delete " host
+Remove the stored password for
+.IR host .
+.TP
+.B list
+List every host that has a stored password.
+.TP
+.B info
+Show which backend is in use and where keys live.
+.TP
+.B set-encryption-key
+Store the GPG passphrase used by
+.IR encryption: gpg
+backups.
+.TP
+.B init-age
+Generate a fresh age identity at
+.IR ~/.config/dbx/age.txt
+(or honor
+.BR DBX_AGE_KEY_FILE )
+and update
+.IR config.json
+to use it.
+.SH EXAMPLES
+.RS
+.nf
+dbx vault set production
+dbx vault list
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B DBX_AGE_KEY_FILE
+Override the default age identity file path.
+.SH FILES
+.TP
+.I ~/.config/dbx/age.txt
+The age identity file (mode 600).
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-host (1),
+.BR age (1),
+.BR gpg (1).

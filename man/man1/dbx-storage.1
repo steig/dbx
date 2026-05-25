@@ -1,0 +1,106 @@
+.TH DBX-STORAGE 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-storage \- upload, download, and sync backups to S3 / MinIO
+.SH SYNOPSIS
+.B dbx storage upload
+.I local-file
+.RI [ remote-path ]
+.PP
+.B dbx storage download
+.I remote-path
+.RI [ local-file ]
+.PP
+.B dbx storage sync upload
+.I host
+.RI [ database ]
+.PP
+.B dbx storage sync download
+.I host
+.RI [ database ]
+.PP
+.B dbx storage list
+.RI [ prefix ]
+.PP
+.B dbx storage delete
+.I remote-path
+.PP
+.B dbx storage info
+.PP
+.B dbx storage add
+.PP
+.B dbx s3
+.IR ...
+.SH DESCRIPTION
+Upload, download, and sync backups against a configured S3-compatible
+remote (real S3, MinIO, R2, etc.). Uses
+.B mc
+.RB ( "minio client" )
+when available, otherwise the
+.B aws
+CLI; configure which under
+.IR .storage
+in
+.IR config.json .
+.SH ACTIONS
+.TP
+.B add
+Interactively configure remote storage (bucket, endpoint URL, region,
+key ID, secret access key). Stored under
+.IR .storage
+in
+.IR config.json
+with the secret in the vault.
+.TP
+.B info
+Show the configured storage settings and a connectivity probe.
+.TP
+.B upload " " local " [" remote-path "]"
+Upload
+.I local
+to the configured bucket. If
+.I remote-path
+is omitted, mirrors the file's path under
+.IR $DATA_DIR .
+.TP
+.B download " " remote " [" local "]"
+Download
+.I remote
+to
+.I local
+(or mirror back into
+.IR $DATA_DIR
+when
+.I local
+is omitted).
+.TP
+.B sync " " upload | download " " host " [" database "]"
+Sync every backup for
+.IR host / database
+in the chosen direction.
+.TP
+.B list " [" prefix "]"
+List remote objects under
+.IR prefix
+(default: all).
+.TP
+.B "delete " remote
+Delete a single remote object.
+.SH EXAMPLES
+.RS
+.nf
+dbx storage add
+dbx storage info
+dbx storage sync upload production myapp
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/dbx/config.json
+Storage settings live under
+.IR .storage .
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-backup (1),
+.BR dbx-restore (1),
+.BR mc (1),
+.BR aws (1).

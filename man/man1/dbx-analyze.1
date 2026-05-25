@@ -1,0 +1,44 @@
+.TH DBX-ANALYZE 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-analyze \- interactively pick tables to exclude from backups
+.SH SYNOPSIS
+.B dbx analyze
+.I host
+.I database
+.PP
+.B dbx stats
+.I host
+.I database
+.SH DESCRIPTION
+Show a sorted table-stats view (rows, on-disk MB) for
+.IR host / database
+and let the user toggle tables to exclude from data dumps. The
+selection is written back to
+.IR config.json
+under
+.IR .hosts[host].databases[database].exclude_data .
+.PP
+Pre-existing exclusions are shown pre-selected; deselect a table to
+re-include it. Schema is always dumped \(em the exclusion only affects
+table data.
+.PP
+Requires
+.B fzf
+for the interactive picker. Without
+.BR fzf ,
+falls back to a sorted plain-text report.
+.SH EXAMPLES
+.RS
+.nf
+dbx analyze production b2c
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/dbx/config.json
+Exclusion list is persisted under
+.IR .hosts[host].databases[database].exclude_data .
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-backup (1),
+.BR fzf (1).
