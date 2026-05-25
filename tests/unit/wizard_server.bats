@@ -323,3 +323,113 @@ JSON
   [ "$status" -eq 0 ]
   [ "$output" = "400" ]
 }
+
+# ----------------------------------------------------------------------------
+# /api/config-save  — Save without exiting (Save-without-exit UX split)
+# ----------------------------------------------------------------------------
+
+@test "POST /api/config-save writes config but does NOT touch the done-marker" {
+  # Sanity: done-marker starts empty.
+  [ ! -s "$WIZ_DONE" ]
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": {}, "schedules": [{ "host": "h", "database": "d", "when": "daily" }] }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"h":{"type":"postgres","user":"u"}},"defaults":{}}' \
+    "$(api /api/config-save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\":true"* ]]
+  # Config updated...
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" == *"\"postgres\""* ]]
+  [[ "$output" == *"\"schedules\":"* ]]
+  # ...but the done-marker stays empty so the bash side doesn't exit.
+  [ ! -s "$WIZ_DONE" ]
+}
+
+@test "POST /save still touches done-marker (existing behavior preserved)" {
+  [ ! -s "$WIZ_DONE" ]
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{},"defaults":{}}' "$(api /save)"
+  [ "$status" -eq 0 ]
+  [ -s "$WIZ_DONE" ]
+}
+
+# ----------------------------------------------------------------------------
+# Backups: complete/incomplete flag + delete
+# ----------------------------------------------------------------------------
+
+@test "GET /api/backups marks complete=true when sidecar exists, false when missing" {
+  # Existing fixture (from setup) has prod/myapp/myapp_20260520_120000 WITH meta.
+  # Add a second backup WITHOUT a sidecar to exercise the "incomplete" path.
+  mkdir -p "$WIZ_SCRATCH/data/staging/app"
+  touch "$WIZ_SCRATCH/data/staging/app/app_20260601_000000.sql.zst"
+
+  run curl -s "$(api /api/backups)"
+  [ "$status" -eq 0 ]
+  # Both rows present, with explicit complete flags.
+  [[ "$output" == *"\"complete\": true"* ]]
+  [[ "$output" == *"\"complete\": false"* ]]
+}
+
+@test "POST /api/backups/delete removes the file and its sidecar" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  local sidecar="$backup.meta.json"
+  [ -f "$backup" ]
+  [ -f "$sidecar" ]
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"path\":\"$backup\"}" "$(api /api/backups/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [ ! -f "$backup" ]
+  [ ! -f "$sidecar" ]
+}
+
+@test "POST /api/backups/delete handles an incomplete backup (no sidecar)" {
+  mkdir -p "$WIZ_SCRATCH/data/staging/app"
+  local backup="$WIZ_SCRATCH/data/staging/app/orphan.sql.zst"
+  touch "$backup"
+  [ -f "$backup" ]
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"path\":\"$backup\"}" "$(api /api/backups/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [ ! -f "$backup" ]
+}
+
+@test "POST /api/backups/delete rejects paths outside data-dir" {
+  # Create a file outside the scratch DATA_DIR and try to delete it.
+  local outside="$BATS_TEST_TMPDIR/sneaky.sql.zst"
+  touch "$outside"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"path\":\"$outside\"}" "$(api /api/backups/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"data-dir"* ]] || [[ "$output" == *"inside"* ]]
+  # File still there.
+  [ -f "$outside" ]
+}
+
+@test "POST /api/backups/delete rejects non-backup file extensions" {
+  local notbk="$WIZ_SCRATCH/data/prod/myapp/notes.txt"
+  touch "$notbk"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"path\":\"$notbk\"}" "$(api /api/backups/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"backup file"* ]] || [[ "$output" == *".sql.zst"* ]]
+  [ -f "$notbk" ]
+}
+
+@test "POST /api/backups/delete rejects missing files" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"path\":\"$WIZ_SCRATCH/data/prod/myapp/does-not-exist.sql.zst\"}" \
+    "$(api /api/backups/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"does not exist"* ]]
+}
+
+@test "POST /api/backups/delete rejects missing path field" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{}' "$(api /api/backups/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"required"* ]]
+}
