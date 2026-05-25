@@ -95,6 +95,11 @@ cmd_backup() {
   require_jq
   require_docker
 
+  # Outer-loop start time for the multi-db case. Per-db start_epoch is set
+  # below after we narrow to a single database.
+  local cmd_start_epoch
+  cmd_start_epoch=$(date +%s)
+
   local host_config
   host_config=$(get_host_config "$host")
   [[ -z "$host_config" ]] && die "Host '$host' not found in config"
@@ -118,11 +123,36 @@ cmd_backup() {
       cmd_backup "${backup_args[@]}" || ((db_errors++)) || true
     done <<< "$databases"
     if [[ $db_errors -gt 0 ]]; then
-      log_error "$db_errors database(s) failed to backup"
+      local total_dur
+      total_dur=$(($(date +%s) - cmd_start_epoch))
+      log_error "$db_errors database(s) failed to backup (total elapsed $(format_duration "$total_dur"))"
       return 1
     fi
+    local total_dur
+    total_dur=$(($(date +%s) - cmd_start_epoch))
+    log_success "All databases backed up for $host in $(format_duration "$total_dur")"
     return 0
   fi
+
+  # Baseline: tell the user how long the last successful backup of the
+  # same host/db took. Best-effort — silent when there's no audit history
+  # (first run, fresh install, audit log rotated).
+  local last_dur last_size
+  last_dur=$(audit_last_duration "backup" "$host" "$database")
+  last_size=$(audit_last_size "backup" "$host" "$database")
+  if [[ -n "$last_dur" ]]; then
+    if [[ -n "$last_size" ]]; then
+      log_info "Last backup of $host/$database took $(format_duration "$last_dur"), produced $(human_size "$last_size")"
+    else
+      log_info "Last backup of $host/$database took $(format_duration "$last_dur")"
+    fi
+  fi
+
+  # Per-db start epoch — used for the final "[OK] Backup complete in Xs"
+  # summary. Independent of cmd_start_epoch so a multi-db run can still
+  # report per-db durations.
+  local start_epoch
+  start_epoch=$(date +%s)
 
   # Create SSH tunnel if configured
   if has_ssh_tunnel "$host"; then
@@ -160,16 +190,22 @@ cmd_backup() {
   fi
 
   echo ""
-  log_success "Backup complete: $host/$database"
 
   # Resolve actual backup file path (may have encryption extension)
   local enc_ext
   enc_ext=$(get_encryption_extension)
   local completed_file="$backup_dir/${database}_${ts}.sql.zst${enc_ext}"
 
-  # Send notification
-  local completed_size
+  # End-of-run summary: duration + on-disk size + path. The existing
+  # pg_backup / mysql_backup helpers also log a "Backup complete: <path>"
+  # line — that's the per-engine confirmation. This summary at the
+  # cmd_backup layer is the user-facing one with timing.
+  local completed_size duration
   completed_size=$(stat -f%z "$completed_file" 2>/dev/null || stat -c%s "$completed_file" 2>/dev/null || echo "0")
+  duration=$(($(date +%s) - start_epoch))
+  log_success "Backup complete in $(format_duration "$duration") — $(human_size "$completed_size") → $completed_file"
+
+  # Send notification
   notify_backup_success "$host" "$database" "$completed_file" "$completed_size"
 
   # Upload to cloud storage if requested or configured. Per-host
@@ -518,6 +554,15 @@ cmd_restore() {
   log_info "Restoring: $(basename "$backup_file")"
   log_info "Target database: $target_name"
 
+  # Baseline: last successful restore's duration. The restore audit row
+  # doesn't carry db_host/database, so we don't filter on them — this is
+  # a global "your last restore took N" hint, not per-source-DB.
+  local last_dur
+  last_dur=$(audit_last_duration "restore" "" "")
+  if [[ -n "$last_dur" ]]; then
+    log_info "Last restore took $(format_duration "$last_dur")"
+  fi
+
   local restore_start
   restore_start=$(date +%s)
 
@@ -676,7 +721,12 @@ cmd_restore() {
   audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
 
   echo ""
-  log_success "Database restored as: $target_name"
+  # On-disk size of the source backup file (not the restored DB) — gives
+  # the user a sense of throughput. Stat fallback covers both BSD (macOS)
+  # and GNU (Linux) flavors.
+  local src_size
+  src_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
   notify_restore_success "$backup_file" "$target_name"
 
   # Clean up the downloaded file from --from-remote unless the user

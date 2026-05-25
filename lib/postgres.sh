@@ -89,6 +89,7 @@ pg_backup() {
 
   # Run pg_dump with compression and optional encryption
   log_info "Running pg_dump..."
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "pg_dump started"
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
     # With encryption
     if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
@@ -124,7 +125,11 @@ pg_backup() {
   # Calculate checksum and create metadata file
   local file_size checksum
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
+  if [[ "$verbose" == "true" ]]; then
+    log_step_elapsed "$start_time" "pg_dump + compress + encrypt done — $(human_size "$file_size") on disk"
+  fi
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "sha256 done"
 
   # Detect source server version + extensions for restore-time image picking.
   # Redirect stdin from /dev/null so that `docker exec -i` inside these
@@ -183,6 +188,7 @@ pg_backup() {
       scrub_schema: $scrub_schema
     }' > "$meta_file"
   secure_file "$meta_file"
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
 
   # Calculate duration and audit
   local end_time duration
@@ -259,8 +265,24 @@ pg_restore_backup() {
     log_info "Decompressing backup..."
   fi
 
-  # Use the unified decompress function that handles encryption
-  decompress_backup "$backup_file" > "$tmpfile"
+  # Use the unified decompress function that handles encryption. When
+  # `pv` is on PATH, pipe its compressed-input bytes through pv first so
+  # the user sees a live progress bar with throughput and an ETA based on
+  # the known on-disk file size. We only enable pv for plain non-encrypted
+  # zstd backups — decompress_backup dispatches on the filename for
+  # encrypted variants, and threading pv into the encrypted path would
+  # bypass its require_age / require_gpg checks.
+  local src_size_bytes=0
+  src_size_bytes=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  if command -v pv >/dev/null 2>&1 \
+       && [[ "$src_size_bytes" -gt 0 ]] \
+       && ! is_file_encrypted "$backup_file" \
+       && [[ "$backup_file" == *.zst ]]; then
+    log_info "pv: live progress bar enabled ($(human_size "$src_size_bytes") compressed)"
+    pv -s "$src_size_bytes" "$backup_file" | zstd -d > "$tmpfile"
+  else
+    decompress_backup "$backup_file" > "$tmpfile"
+  fi
 
   local file_size
   file_size=$(ls -lh "$tmpfile" | awk '{print $5}')
