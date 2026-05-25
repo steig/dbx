@@ -348,6 +348,41 @@ cmd_restore() {
 
   require_config
   require_jq
+
+  # Early safety gate: if --into is set, derive the source host from the
+  # source string (cheaply, without docker) and refuse the prod-source ->
+  # sidecar combo before we even check for docker. Two reasons to do this
+  # early: (1) the user gets a fast, clear refusal — no docker prereq
+  # check first, no container spinup. (2) it lets the CLI test suite
+  # exercise this branch on hosts that don't have docker (notably the
+  # macOS CI runner).
+  if [[ -n "$into_container" && -n "$source" ]]; then
+    local _early_host=""
+    # Path-shape source ("<host>/<db>/<selector>"): host is the first
+    # segment. Works for the `host/db/latest` form most users type.
+    if [[ "$source" == */* && "$source" != /* ]]; then
+      _early_host="${source%%/*}"
+    # Absolute-file source under $DATA_DIR: extract host from the
+    # post-DATA_DIR path. Normalize both via `cd … && pwd -P` so the
+    # comparison works when one side is symlinked (notably bats'
+    # BATS_TEST_TMPDIR resolving `/tmp -> /private/tmp` on macOS).
+    elif [[ -f "$source" ]]; then
+      local _early_src_norm _early_data_norm
+      _early_src_norm=$(cd "$(dirname "$source")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$source")")
+      _early_data_norm=$(cd "$DATA_DIR" 2>/dev/null && pwd -P)
+      if [[ -n "$_early_src_norm" && -n "$_early_data_norm" && "$_early_src_norm" == "$_early_data_norm"/* ]]; then
+        _early_host="${_early_src_norm#"$_early_data_norm"/}"
+        _early_host="${_early_host%%/*}"
+      elif [[ "$source" == "$DATA_DIR"/* ]]; then
+        _early_host="${source#"$DATA_DIR"/}"
+        _early_host="${_early_host%%/*}"
+      fi
+    fi
+    if [[ -n "$_early_host" ]] && host_exists "$_early_host"; then
+      require_writable_host "$_early_host" "restore --into from prod-source backup"
+    fi
+  fi
+
   require_docker
 
   # ---- --hooks-only: run only the configured hooks against an existing DB --
@@ -488,8 +523,23 @@ cmd_restore() {
   # Parse source - could be path like "production/myapp/latest" or actual file
   elif [[ -f "$source" ]]; then
     backup_file="$source"
-    # Try to extract host/database from path
-    if [[ "$source" == "$DATA_DIR"/* ]]; then
+    # Try to extract host/database from path. Normalize BOTH sides via
+    # `cd <dir> && pwd -P` so the prefix match still works when one
+    # side is symlinked (notably on macOS, where bats' BATS_TEST_TMPDIR
+    # resolves `/tmp -> /private/tmp` and `/var -> /private/var`). Plain
+    # `$source == "$DATA_DIR"/*` fails the match if `$source` came from
+    # a `realpath`/`find` invocation while `$DATA_DIR` stayed literal.
+    local resolved_source resolved_data_dir
+    resolved_source=$(cd "$(dirname "$source")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$source")")
+    resolved_data_dir=$(cd "$DATA_DIR" 2>/dev/null && pwd -P)
+    if [[ -n "$resolved_source" && -n "$resolved_data_dir" && "$resolved_source" == "$resolved_data_dir"/* ]]; then
+      local rel_path="${resolved_source#$resolved_data_dir/}"
+      host=$(echo "$rel_path" | cut -d'/' -f1)
+      database=$(echo "$rel_path" | cut -d'/' -f2)
+    elif [[ "$source" == "$DATA_DIR"/* ]]; then
+      # Belt-and-suspenders: if normalization couldn't run for some
+      # reason (DATA_DIR doesn't exist yet, etc.), fall back to the
+      # literal-string prefix match the previous code used.
       local rel_path="${source#$DATA_DIR/}"
       host=$(echo "$rel_path" | cut -d'/' -f1)
       database=$(echo "$rel_path" | cut -d'/' -f2)
