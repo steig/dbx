@@ -111,6 +111,12 @@ def list_backups(data_dir: str):
                     stat = os.stat(path)
                 except OSError:
                     continue
+                meta_path = path + ".meta.json"
+                # `complete` = the .meta.json sidecar exists. dbx writes the
+                # sidecar AFTER pg_dump / mysqldump returns success (see
+                # lib/postgres.sh:159, lib/mysql.sh:193), so a missing sidecar
+                # reliably indicates a crashed/orphaned partial backup.
+                complete = os.path.isfile(meta_path)
                 entry = {
                     "host": host,
                     "database": db,
@@ -123,9 +129,9 @@ def list_backups(data_dir: str):
                         else "gpg" if fname.endswith(".gpg")
                         else "none"
                     ),
+                    "complete": complete,
                 }
-                meta_path = path + ".meta.json"
-                if os.path.isfile(meta_path):
+                if complete:
                     try:
                         with open(meta_path) as f:
                             meta = json.load(f)
@@ -137,6 +143,44 @@ def list_backups(data_dir: str):
                         pass
                 out.append(entry)
     return out
+
+
+def delete_backup(data_dir: str, raw_path):
+    """Remove a backup file and its .meta.json sidecar. `raw_path` is
+    intentionally untyped — it comes from arbitrary JSON. Strict validation:
+    path must resolve (via realpath) to a regular file inside DATA_DIR with
+    a `*.sql.zst[.age|.gpg]` suffix. Returns (ok, error_or_None).
+
+    Symlinks: realpath resolves them and we still require the resolved path
+    to be inside DATA_DIR — so a symlink under DATA_DIR pointing outside
+    is correctly rejected. The sidecar deletion is best-effort (a backup
+    without a sidecar is "incomplete" and we still want to clear it)."""
+    if not isinstance(raw_path, str) or not raw_path:
+        return False, "path is required"
+    try:
+        resolved = os.path.realpath(raw_path)
+    except (OSError, ValueError):
+        return False, "path could not be resolved"
+    data_root = os.path.realpath(data_dir)
+    if not (resolved == data_root or resolved.startswith(data_root + os.sep)):
+        return False, "path must be inside data-dir"
+    if not (resolved.endswith(".sql.zst") or resolved.endswith(".sql.zst.age")
+            or resolved.endswith(".sql.zst.gpg")):
+        return False, "path must be a .sql.zst[.age|.gpg] backup file"
+    if not os.path.isfile(resolved):
+        return False, "backup file does not exist"
+    try:
+        os.unlink(resolved)
+    except OSError as e:
+        return False, f"could not delete backup: {e}"
+    # Sidecar removal is best-effort — an incomplete backup may not have one.
+    meta_path = resolved + ".meta.json"
+    if os.path.isfile(meta_path):
+        try:
+            os.unlink(meta_path)
+        except OSError:
+            pass
+    return True, None
 
 
 def list_containers():
@@ -475,7 +519,9 @@ def make_handler(args):
                 self._send(403, "forbidden")
                 return
 
-            if path == "/save":
+            if path in ("/save", "/api/config-save"):
+                # /save           = write config + signal done-marker (bash exits)
+                # /api/config-save = write config, keep the wizard running
                 length = int(self.headers.get("Content-Length", 0))
                 if length <= 0 or length > 1_000_000:
                     self._send(400, "bad length")
@@ -521,8 +567,9 @@ def make_handler(args):
                 except OSError as e:
                     self._send(500, f"write failed: {e}")
                     return
-                with open(args.done_marker, "w") as f:
-                    f.write("ok\n")
+                if path == "/save":
+                    with open(args.done_marker, "w") as f:
+                        f.write("ok\n")
                 self._send(200, '{"ok":true}', "application/json")
                 return
 
@@ -568,6 +615,27 @@ def make_handler(args):
                     send_json(self, 400, {"error": "body must be {schedules: [...]}"})
                     return
                 ok, err = write_schedules_block(args.config_path, body["schedules"])
+                if not ok:
+                    send_json(self, 400, {"error": err})
+                    return
+                send_json(self, 200, {"ok": True})
+                return
+
+            if path == "/api/backups/delete":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                ok, err = delete_backup(args.data_dir, body.get("path"))
                 if not ok:
                     send_json(self, 400, {"error": err})
                     return

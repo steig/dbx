@@ -804,7 +804,17 @@
     <div class="dbx-builder__actions">
       <template x-if="mode === 'cli'">
         <button type="button" class="dbx-builder__btn dbx-builder__btn--primary"
-                @click="saveCli()" :disabled="!isValid() || saving" x-text="saving ? 'Saving…' : 'Save & exit'"></button>
+                @click="saveCli({ exit: false })" :disabled="!isValid() || saving"
+                title="Save config.json and stay in the wizard">
+          <span x-text="saving === 'save' ? 'Saving…' : 'Save'"></span>
+        </button>
+      </template>
+      <template x-if="mode === 'cli'">
+        <button type="button" class="dbx-builder__btn"
+                @click="saveCli({ exit: true })" :disabled="!isValid() || saving"
+                title="Save config.json and exit the wizard (terminal will unblock)">
+          <span x-text="saving === 'exit' ? 'Saving…' : 'Save & exit'"></span>
+        </button>
       </template>
       <button type="button" class="dbx-builder__btn" @click="copyJson()" :disabled="!isValid()">Copy JSON</button>
       <button type="button" class="dbx-builder__btn" @click="downloadJson()" :disabled="!isValid()">Download config.json</button>
@@ -1071,18 +1081,30 @@
         this.savedMsg = 'Downloaded. Move to ~/.config/dbx/config.json.'; this.savedErr = false;
       },
 
-      saveCli() {
+      // saveCli({ exit }) — exit=true posts to /save (terminal unblocks),
+      // exit=false posts to /api/config-save (wizard stays running).
+      // `this.saving` doubles as the in-flight marker so the right button
+      // shows the spinner.
+      saveCli(opts) {
+        const exit = !!(opts && opts.exit);
         if (!this.saveUrl) {
           this.savedMsg = 'CLI mode is not initialized (missing save URL).'; this.savedErr = true; return;
         }
-        this.saving = true;
-        fetch(this.saveUrl, {
+        // The saveUrl was minted by the server as /save?token=…; for the
+        // no-exit variant, retarget to /api/config-save with the same token.
+        const url = exit
+          ? this.saveUrl
+          : this.saveUrl.replace(/\/save\?/, '/api/config-save?');
+        this.saving = exit ? 'exit' : 'save';
+        fetch(url, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: this.previewJson()
         }).then(r => {
           this.saving = false;
           if (r.ok) {
-            this.savedMsg = 'Saved! You can close this tab; the terminal will continue.';
+            this.savedMsg = exit
+              ? 'Saved! You can close this tab; the terminal will continue.'
+              : 'Saved. Make more changes and Save again when ready.';
             this.savedErr = false;
           } else {
             this.savedMsg = 'Save failed (HTTP ' + r.status + '). Check the terminal.';

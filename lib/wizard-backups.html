@@ -35,12 +35,13 @@
           <th>Encryption</th>
           <th>Source</th>
           <th>When</th>
+          <th>Status</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
         <template x-for="b in filtered()" :key="b.path">
-          <tr>
+          <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
             <td x-text="b.host"></td>
             <td x-text="b.database"></td>
             <td><code x-text="b.filename"></code></td>
@@ -54,8 +55,22 @@
             <td x-text="sourceLabel(b)"></td>
             <td x-text="formatWhen(b)"></td>
             <td>
+              <template x-if="b.complete">
+                <span class="dbx-backups__chip dbx-backups__chip--complete"
+                      title="Backup has a .meta.json sidecar — finished successfully">✓ complete</span>
+              </template>
+              <template x-if="!b.complete">
+                <span class="dbx-backups__chip dbx-backups__chip--incomplete"
+                      title="No .meta.json sidecar — likely a partial backup from a crashed run. Safe to delete.">⚠ incomplete</span>
+              </template>
+            </td>
+            <td style="white-space: nowrap;">
               <button class="dbx-backups__btn" @click="restore(b)"
-                      title="Restore view lands in a follow-up commit">Restore</button>
+                      :disabled="!b.complete"
+                      :title="b.complete ? 'Restore this backup' : 'Cannot restore an incomplete backup'">Restore</button>
+              <button class="dbx-backups__btn dbx-backups__btn--danger"
+                      @click="deleteBackup(b)"
+                      title="Delete this backup and its .meta.json sidecar (no undo)">Delete</button>
             </td>
           </tr>
         </template>
@@ -126,15 +141,46 @@
       },
 
       sourceLabel(b) {
-        const flavor = b.source_flavor || '';
-        const major  = b.source_major_version || '';
+        // mysql_detect_server_version / pg_detect_server_version return the
+        // sentinels "unknown" / "0" when probing the source failed (e.g.
+        // SSH tunnel auth issue, or the user lacks SELECT on version()).
+        // Render those gracefully rather than as the raw "unknown 0".
+        const rawFlavor = (b.source_flavor || '').trim();
+        const rawMajor  = String(b.source_major_version || '').trim();
+        const flavor = (rawFlavor && rawFlavor !== 'unknown') ? rawFlavor : '';
+        const major  = (rawMajor  && rawMajor  !== '0' && rawMajor !== 'unknown') ? rawMajor : '';
         if (!flavor && !major) return '—';
-        return `${flavor} ${major}`.trim();
+        if (!major) return flavor;
+        if (!flavor) return major;
+        return `${flavor} ${major}`;
       },
 
       restore(b) {
+        if (!b.complete) return;
         Alpine.store('dbx').selectedBackup = b;
         Alpine.store('dbx').view = 'restore';
+      },
+
+      async deleteBackup(b) {
+        const label = `${b.host}/${b.database}/${b.filename}`;
+        const detail = b.complete ? '' : '\n\n(This backup is INCOMPLETE — safe to delete; it can\'t be restored anyway.)';
+        if (!window.confirm(`Delete ${label}?${detail}\n\nThis cannot be undone.`)) return;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/backups/delete'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: b.path }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+            window.alert(`Delete failed: ${err.error || r.status}`);
+            return;
+          }
+          // Optimistic: drop the row locally without a full reload.
+          this.rows = this.rows.filter(row => row.path !== b.path);
+        } catch (e) {
+          window.alert(`Network error: ${e}`);
+        }
       },
     };
   }
