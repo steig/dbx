@@ -89,11 +89,44 @@ def parse_args():
     return p.parse_args()
 
 
-def list_backups(data_dir: str):
-    """Walk DATA_DIR/<host>/<db>/*.sql.zst[.age|.gpg], read sidecar meta.json."""
+def _read_host_safety_map(config_path):
+    """Return {host_alias: 'prod'|'stage'|'local'} from config.json. Hosts
+    that omit the field default to 'local'. Malformed values also default
+    to 'local' (matches the bash-side host_safety helper). Returns {} if
+    the config can't be read."""
+    safety: dict[str, str] = {}
+    if not config_path or not os.path.isfile(config_path):
+        return safety
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return safety
+    if not isinstance(cfg, dict):
+        return safety
+    hosts = cfg.get("hosts")
+    if not isinstance(hosts, dict):
+        return safety
+    for h, block in hosts.items():
+        if not isinstance(block, dict):
+            continue
+        s = block.get("safety", "local")
+        safety[h] = s if s in ("prod", "stage", "local") else "local"
+    return safety
+
+
+def list_backups(data_dir: str, config_path: str | None = None):
+    """Walk DATA_DIR/<host>/<db>/*.sql.zst[.age|.gpg], read sidecar meta.json.
+
+    Each row carries `safety` — the source host's safety level (prod /
+    stage / local). Hosts not in the config or without the field fall
+    back to 'local'. Drives the PROD chip / restore-banner UI in the
+    wizard without a per-row round-trip.
+    """
     out = []
     if not os.path.isdir(data_dir):
         return out
+    safety_by_host = _read_host_safety_map(config_path)
     for host in sorted(os.listdir(data_dir)):
         host_dir = os.path.join(data_dir, host)
         if not os.path.isdir(host_dir) or not IDENT_RE.match(host):
@@ -130,6 +163,7 @@ def list_backups(data_dir: str):
                         else "none"
                     ),
                     "complete": complete,
+                    "safety": safety_by_host.get(host, "local"),
                 }
                 if complete:
                     try:
@@ -475,7 +509,7 @@ def make_handler(args):
                 self._send(200, html, "text/html; charset=utf-8")
                 return
             if path == "/api/backups":
-                send_json(self, 200, list_backups(args.data_dir))
+                send_json(self, 200, list_backups(args.data_dir, args.config_path))
                 return
             if path == "/api/containers":
                 send_json(self, 200, list_containers())

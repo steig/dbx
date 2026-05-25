@@ -100,6 +100,36 @@ api() { echo "http://127.0.0.1:$WIZ_PORT$1?token=$WIZ_TOKEN"; }
   [[ "$output" == *"\"source_major_version\": \"17\""* ]]
 }
 
+@test "GET /api/backups carries safety='local' when host config has no safety field" {
+  # No config.json file at all in the default setup → safety defaults to 'local'.
+  run curl -s "$(api /api/backups)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"safety\": \"local\""* ]]
+}
+
+@test "GET /api/backups carries safety='prod' when source host is marked prod" {
+  # Plant a config.json with prod marking for the `prod` host that the
+  # fixture data already lives under.
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "safety": "prod" } } }
+JSON
+  run curl -s "$(api /api/backups)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"host\": \"prod\""* ]]
+  [[ "$output" == *"\"safety\": \"prod\""* ]]
+}
+
+@test "GET /api/backups carries safety='local' when host has a malformed safety value" {
+  # Mirrors the bash-side host_safety: any non-{prod,stage,local} value
+  # falls back to 'local' so a typo can't silently promote a host.
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "safety": "production" } } }
+JSON
+  run curl -s "$(api /api/backups)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"safety\": \"local\""* ]]
+}
+
 @test "GET /api/backups with bad token returns 403" {
   run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/backups?token=NOPE"
   [ "$status" -eq 0 ]

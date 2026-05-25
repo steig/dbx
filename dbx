@@ -510,6 +510,16 @@ cmd_restore() {
 
   [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
 
+  # Per-host safety enforcement. If the SOURCE host (the one this backup
+  # came from) is marked safety=prod AND the user is using --into to
+  # write back into a sidecar container, refuse: that's the one path
+  # where a prod-source restore can mutate a live DB the operator might
+  # not realize is also prod. Plain restores (no --into) land in the
+  # managed postgres-dbx / mysql-dbx and are fine — those are dev clones.
+  if [[ -n "$into_container" && -n "$host" ]] && host_exists "$host"; then
+    require_writable_host "$host" "restore --into from prod-source backup"
+  fi
+
   # Determine target database name
   if [[ -z "$target_name" ]]; then
     local base_name="${database:-$(basename "$backup_file")}"
@@ -1189,6 +1199,21 @@ EOF
         if [[ -z "$huser" ]]; then
           log_error "Host '$h': missing 'user'"
           ((errors++)) || true
+        fi
+
+        # Validate the safety field shape. Allowed: prod | stage | local.
+        # Absent is fine (defaults to local at read time).
+        local hsafety_raw hsafety_present
+        hsafety_present=$(jq -r ".hosts[\"$h\"] | has(\"safety\")" "$CONFIG_FILE")
+        if [[ "$hsafety_present" == "true" ]]; then
+          hsafety_raw=$(jq -r ".hosts[\"$h\"].safety" "$CONFIG_FILE")
+          case "$hsafety_raw" in
+            prod|stage|local) ;;
+            *)
+              log_error "Host '$h': invalid 'safety' value '$hsafety_raw' (must be one of: prod, stage, local)"
+              ((errors++)) || true
+              ;;
+          esac
         fi
 
         # Check if a password source exists (without invoking external commands)
@@ -1953,36 +1978,61 @@ cmd_query() {
     create_ssh_tunnel "$host"
   fi
 
-  local db_type db_host db_port db_user db_pass
+  local db_type db_host db_port db_user db_pass safety
   db_type=$(get_db_type "$host")
   db_host=$(get_effective_host "$host")
   db_port=$(get_effective_port "$host")
   db_user=$(get_config_value ".hosts[\"$host\"].user")
   db_pass=$(get_password "$host")
+  safety=$(host_safety "$host")
 
   log_step "Connecting to $host ($db_type)"
   log_info "Host: $db_host:$db_port, User: $db_user"
   [[ -n "$database" ]] && log_info "Database: $database"
+  if [[ "$safety" == "prod" ]]; then
+    log_warn "Host '$host' is safety=prod — opening session as READ ONLY (writes will be refused by the server)"
+  fi
 
   case "$db_type" in
     postgres|postgresql)
       require_container "$POSTGRES_CONTAINER"
+      # Prod: PGOPTIONS forces default_transaction_read_only=on for the
+      # whole session, so any INSERT/UPDATE/DELETE/DDL is rejected with
+      # "cannot execute ... in a read-only transaction". Cleaner than
+      # SET TRANSACTION READ ONLY (which only covers one txn).
+      local pg_opts=""
+      [[ "$safety" == "prod" ]] && pg_opts="-c default_transaction_read_only=on"
       if [[ -n "$database" ]]; then
-        docker exec -it -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        docker exec -it -e PGPASSWORD="$db_pass" -e PGOPTIONS="$pg_opts" "$POSTGRES_CONTAINER" \
           psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database"
       else
-        docker exec -it -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        docker exec -it -e PGPASSWORD="$db_pass" -e PGOPTIONS="$pg_opts" "$POSTGRES_CONTAINER" \
           psql -h "$db_host" -p "$db_port" -U "$db_user"
       fi
       ;;
     mysql|mariadb)
       require_container "$MYSQL_CONTAINER"
-      if [[ -n "$database" ]]; then
-        docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
-          mysql -h "$db_host" -P "$db_port" -u "$db_user" "$database"
+      # Prod: --init-command runs at session start, so any subsequent
+      # INSERT/UPDATE/DELETE/DDL in this session is refused with
+      # "Cannot execute statement in a READ ONLY transaction".
+      if [[ "$safety" == "prod" ]]; then
+        if [[ -n "$database" ]]; then
+          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+            mysql -h "$db_host" -P "$db_port" -u "$db_user" \
+            --init-command="SET SESSION TRANSACTION READ ONLY" "$database"
+        else
+          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+            mysql -h "$db_host" -P "$db_port" -u "$db_user" \
+            --init-command="SET SESSION TRANSACTION READ ONLY"
+        fi
       else
-        docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
-          mysql -h "$db_host" -P "$db_port" -u "$db_user"
+        if [[ -n "$database" ]]; then
+          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+            mysql -h "$db_host" -P "$db_port" -u "$db_user" "$database"
+        else
+          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+            mysql -h "$db_host" -P "$db_port" -u "$db_user"
+        fi
       fi
       ;;
     *)

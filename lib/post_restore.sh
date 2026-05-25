@@ -102,6 +102,14 @@ run_post_restore_hooks() {
   total=$((host_count + db_count))
   [[ "$total" -eq 0 ]] && return 0
 
+  # Defense in depth: hooks execute SQL writes against $target_db. If the
+  # configured host is safety=prod, refuse — even though the hook runners
+  # target the local managed container (so the writes would land there,
+  # not on prod), this is the kind of "I didn't realize what would
+  # happen" footgun the safety flag exists to prevent. The operator can
+  # explicitly bypass with `dbx restore --no-post-restore`.
+  require_writable_host "$host" "post-restore hooks"
+
   log_step "Running post-restore hooks ($total)..."
 
   # Pre-collect into bash arrays. Never iterate via `... | while read` — the

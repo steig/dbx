@@ -55,9 +55,24 @@
         <span x-text="source.encryption" class="dbx-backups__chip"
               :class="{ 'dbx-backups__chip--age': source.encryption === 'age',
                         'dbx-backups__chip--gpg': source.encryption === 'gpg' }"></span>
+        <template x-if="source.safety === 'prod'">
+          <span class="dbx-backups__chip dbx-backups__chip--prod" style="margin-left: 0.5rem;">PROD</span>
+        </template>
+        <template x-if="source.safety === 'stage'">
+          <span class="dbx-backups__chip dbx-backups__chip--stage" style="margin-left: 0.5rem;">STAGE</span>
+        </template>
       </span>
     </template>
   </div>
+
+  <template x-if="source && source.safety === 'prod'">
+    <div class="dbx-restore__status dbx-restore__status--err" style="margin-bottom: 1rem;">
+      <strong>This backup is from a host marked safety=prod.</strong>
+      Plain restore into the managed dev container is allowed (the source backup is read-only at this point).
+      However, <code>--into &lt;container&gt;</code> is refused for prod-source backups — clear the
+      container picker before starting, or remove the safety flag in config.json if this is intentional.
+    </div>
+  </template>
 
   <template x-if="source">
     <div>
@@ -89,7 +104,9 @@
       </div>
 
       <div class="dbx-restore__actions">
-        <button class="dbx-restore__btn" @click="start()" :disabled="running || !source">
+        <button class="dbx-restore__btn" @click="start()"
+                :disabled="running || !source || prodIntoBlocked()"
+                :title="prodIntoBlocked() ? 'Prod-source restore --into is refused (clear the container picker)' : ''">
           <span x-show="!running">Start restore</span>
           <span x-show="running">Restoring…</span>
         </button>
@@ -309,6 +326,14 @@
         if (this.exitCode === 0) return 'dbx-restore__status--ok';
         if (this.exitCode != null) return 'dbx-restore__status--err';
         return '';
+      },
+
+      // Mirror the CLI refusal: `dbx restore --into <c>` against a
+      // backup whose source host is safety=prod is rejected. Block the
+      // Start button up front so the user gets immediate feedback
+      // rather than a server-side error.
+      prodIntoBlocked() {
+        return !!(this.source && this.source.safety === 'prod' && this.form.into);
       },
     };
   }
