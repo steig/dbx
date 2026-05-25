@@ -422,10 +422,13 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
 
 
 def run_scrub_subcommand(dbx_bin: str, argv_tail: list,
-                         timeout: int = 60) -> tuple[int, str, str]:
+                         timeout: int = 300) -> tuple[int, str, str]:
     """Run `dbx scrub <argv_tail>` synchronously. init/check are short
-    (one schema query + JSON emit), so they don't need the SSE job
-    machinery used by backup/restore."""
+    in absolute terms (one schema query + JSON emit), but the schema
+    query goes against the *source* host — which can be a prod box on
+    the other side of a slow VPN with a 5k-table schema. 5 minutes is
+    in line with the wizard's overall 10-minute idle timeout; below
+    that, internet-distant prod boxes time out spuriously."""
     try:
         result = subprocess.run(
             [dbx_bin, "scrub", *argv_tail],
