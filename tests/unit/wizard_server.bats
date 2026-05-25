@@ -145,8 +145,9 @@ api() { echo "http://127.0.0.1:$WIZ_PORT$1?token=$WIZ_TOKEN"; }
     -d '{"source":"prod/myapp/latest"}' "$(api /api/restore)")
   job_id=$(echo "$body" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
   [ -n "$job_id" ]
-  # Read up to ~3s; the fake dbx exits almost immediately.
-  run timeout 3 curl -s -N "http://127.0.0.1:$WIZ_PORT/api/jobs/$job_id/events?token=$WIZ_TOKEN"
+  # Read up to ~3s; the fake dbx exits almost immediately. `--max-time` is
+  # curl's own timeout (portable; macOS doesn't have GNU `timeout`).
+  run curl -s -N --max-time 3 "http://127.0.0.1:$WIZ_PORT/api/jobs/$job_id/events?token=$WIZ_TOKEN"
   [[ "$output" == *"line 1"* ]]
   [[ "$output" == *"[OK] done"* ]]
   [[ "$output" == *"event: done"* ]]
