@@ -444,6 +444,20 @@ def make_handler(args):
                     return
                 send_json(self, 200, state)
                 return
+            if path == "/api/config":
+                # Used by the Config view to pre-populate the form with the
+                # user's existing config.json instead of starting blank.
+                if not os.path.isfile(args.config_path):
+                    send_json(self, 200, {})
+                    return
+                try:
+                    with open(args.config_path) as f:
+                        cfg = json.load(f)
+                except (OSError, json.JSONDecodeError) as e:
+                    send_json(self, 500, {"error": f"could not read config: {e}"})
+                    return
+                send_json(self, 200, cfg if isinstance(cfg, dict) else {})
+                return
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/events$", path)
             if m:
                 with JOBS_LOCK:
@@ -468,16 +482,42 @@ def make_handler(args):
                     return
                 raw = self.rfile.read(length)
                 try:
-                    cfg = json.loads(raw.decode("utf-8"))
+                    form_cfg = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as e:
                     self._send(400, f"invalid json: {e}")
                     return
+                if not isinstance(form_cfg, dict):
+                    self._send(400, "body must be a JSON object")
+                    return
+                # Merge form payload into existing config.json so non-form
+                # top-level keys (schedules, scrub, vault, ...) survive. Form-
+                # managed keys are replaced with what the form sent — including
+                # being DELETED if the form omitted them (e.g., user unchecked
+                # storage.enabled). Keys outside the form-managed list are
+                # preserved verbatim.
+                FORM_MANAGED = {"hosts", "defaults", "storage", "notifications"}
+                try:
+                    if os.path.isfile(args.config_path):
+                        with open(args.config_path) as f:
+                            existing = json.load(f)
+                        if not isinstance(existing, dict):
+                            existing = {}
+                    else:
+                        existing = {}
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+                merged = {k: v for k, v in existing.items() if k not in FORM_MANAGED}
+                for k in FORM_MANAGED:
+                    if k in form_cfg:
+                        merged[k] = form_cfg[k]
                 try:
                     os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
-                    with open(args.config_path, "w") as f:
-                        json.dump(cfg, f, indent=2)
+                    tmp_path = args.config_path + ".wizard-tmp"
+                    with open(tmp_path, "w") as f:
+                        json.dump(merged, f, indent=2)
                         f.write("\n")
-                    os.chmod(args.config_path, 0o600)
+                    os.chmod(tmp_path, 0o600)
+                    os.replace(tmp_path, args.config_path)
                 except OSError as e:
                     self._send(500, f"write failed: {e}")
                     return
