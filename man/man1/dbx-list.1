@@ -1,0 +1,59 @@
+.TH DBX-LIST 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-list \- list available backups
+.SH SYNOPSIS
+.B dbx list
+.RI [ host ]
+.RI [ database ]
+.PP
+.B dbx ls
+.RI [ host ]
+.RI [ database ]
+.SH DESCRIPTION
+List backup files under
+.I $DATA_DIR
+(default
+.IR ~/.data/dbx ),
+showing filename, size, and modification time.
+.PP
+With no arguments, lists every host with backups. With just
+.IR host ,
+lists every database. With both, lists individual backup files
+newest-first.
+.SH EXAMPLES
+Show every database with backups for host
+.IR production :
+.PP
+.RS
+.nf
+dbx list production
+.fi
+.RE
+.PP
+Show every backup for
+.IR production/myapp ,
+newest first:
+.PP
+.RS
+.nf
+dbx list production myapp
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B DBX_DATA_DIR
+Override the default backup-data directory.
+.SH FILES
+.TP
+.I ~/.data/dbx/<host>/<database>/<file>.sql.zst[.age|.gpg]
+The backup files
+.B list
+walks.
+.TP
+.I ~/.data/dbx/<host>/<database>/<file>.meta.json
+Sidecar metadata read for the size / flavor columns.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-restore (1),
+.BR dbx-verify (1),
+.BR dbx-clean (1).

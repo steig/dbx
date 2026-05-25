@@ -1,0 +1,85 @@
+.TH DBX-SCRUB 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-scrub \- manage PII scrub manifests and the restore-time gate
+.SH SYNOPSIS
+.B dbx scrub init
+.RB [ \-\-include\-empty ]
+.RB [ \-\-output
+.IR file ]
+.I host/database
+.PP
+.B dbx scrub check
+.RB [ \-\-quiet ]
+.RB [ \-\-json ]
+.I host/database
+.PP
+.B dbx scrub validate
+.I host
+.SH DESCRIPTION
+Manage PII scrub manifests that describe how to sanitize sensitive
+columns at restore time. The
+.B restore
+command consults the manifest before importing into a sidecar
+container, refusing the restore if PII columns lack a declared
+strategy.
+.SH ACTIONS
+.TP
+.BR "init " [ "options" ] " " host/database
+Sniff the live schema and emit a starter manifest covering tables and
+columns that look PII-shaped (email, name, address, hashed-secret,
+etc.). With
+.B \-\-include\-empty,
+also emits entries for columns that are currently empty (defensive:
+will be populated later).
+.B \-\-output
+writes to a file instead of stdout.
+.TP
+.BR "check " [ "options" ] " " host/database
+Run the manifest's checks against the live schema and report drift:
+new tables, new columns, missing tables, columns that gained PII-shape
+since the manifest was last regenerated.
+.B \-\-quiet
+suppresses passing checks.
+.B \-\-json
+emits a machine-readable report.
+.TP
+.BI "validate " host
+Verify the manifest's syntactic shape (valid YAML, references real
+strategies, no duplicate entries).
+.SH STRATEGIES
+The manifest references per-column strategies declared under
+.IR .scrub.strategies
+in
+.IR config.json :
+.IR fake_email ,
+.IR redact ,
+.IR jsonb_scrub_paths ,
+and others. See the online docs for the full catalog.
+.SH EXAMPLES
+Generate a starter manifest from the live schema:
+.PP
+.RS
+.nf
+dbx scrub init production/myapp --output scrub/myapp.yaml
+.fi
+.RE
+.PP
+Check the manifest for drift:
+.PP
+.RS
+.nf
+dbx scrub check production/myapp
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/dbx/scrub/<host>/<database>.yaml
+Conventional manifest location. Path is taken from
+.IR .scrub.manifests
+in
+.IR config.json
+when set.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-restore (1),
+.BR dbx-config (1).

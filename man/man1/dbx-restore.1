@@ -1,0 +1,230 @@
+.TH DBX-RESTORE 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-restore \- restore a backup into a container or alternate target
+.SH SYNOPSIS
+.B dbx restore
+.RB [ \-v | \-\-verbose ]
+.RB [ \-\-name
+.IR target-db ]
+.RB [ \-\-into
+.IR container ]
+.RB [ \-\-from\-remote
+.IR remote-path ]
+.RB [ \-\-transform[=
+.IR script ]]
+.RB [ \-\-transform\-inherit\-env ]
+.RB [ \-\-no\-post\-restore ]
+.RB [ \-\-hooks\-only ]
+.RB [ \-\-no\-scrub ]
+.RB [ \-\-recreate\-container ]
+.RB [ \-\-keep\-download ]
+.IR source
+.SH DESCRIPTION
+Restore a backup into a local Docker container, an alternate container,
+or a remote dev host (via
+.BR DEV_SERVICES_MODE=remote ).
+.PP
+.I source
+can be:
+.IP \(bu 2
+.IR <host>/<database>/latest
+\(em resolve to the newest backup for that host+db
+.IP \(bu 2
+.IR <host>/<database>/<file>
+\(em an explicit backup file under
+.B $DATA_DIR
+.IP \(bu 2
+An absolute path to any
+.IR .sql.zst[.age|.gpg]
+file
+.IP \(bu 2
+.IR s3://<host>/<database>/latest
+\(em shorthand for
+.B \-\-from\-remote
+.IP \(bu 2
+Omitted (with
+.BR fzf
+installed) to pick interactively
+.PP
+By default the restore lands in the managed
+.B postgres-dbx
+or
+.B mysql-dbx
+container as a new database named
+.IR <base>_v<N>_<YYYYMMDD> .
+Override with
+.B \-\-name
+or redirect to a different container with
+.BR \-\-into .
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Surface per-statement output from the engine. For MySQL, tees live
+import errors. Also exports
+.B DBX_VERBOSE=1
+for downstream helpers.
+.TP
+.BI \-\-name " target-db"
+Use a specific target database name instead of the auto-versioned
+default.
+.TP
+.BI \-\-into " container"
+Restore into the named Docker container instead of
+.B postgres-dbx
+(MySQL containers also supported for the
+.B mysql
+flavor). Refused when the SOURCE host is marked
+.BR safety=prod
+in
+.IR config.json
+\(em opt out by setting safety=local.
+.TP
+.BI \-\-from\-remote " remote-path"
+Fetch from configured S3 / MinIO storage and restore. Path is
+.IR <host>/<database>/latest
+or a specific
+.IR <host>/<database>/<file>
+shape.
+.TP
+.B \-\-keep\-download
+With
+.BR \-\-from\-remote ,
+keep the downloaded file under
+.IR $DATA_DIR/.remote/
+on success (default: delete).
+.TP
+.BI \-\-transform " script"
+After decompression but before the engine import, pipe the SQL stream
+through
+.I script.
+The script receives SQL on stdin and writes transformed SQL to stdout.
+Useful for sanitization and table rewrites. The transform subprocess
+runs under
+.B env \-i
+with a small allowlist by default.
+.TP
+.B \-\-transform\-inherit\-env
+Opt in to passing
+.B dbx's
+full environment (PGPASSWORD, vault tokens, DBX_* vars) to the
+.B \-\-transform
+subprocess.
+.TP
+.B \-\-no\-post\-restore
+Skip the per-database post-restore SQL hooks declared in
+.IR config.json .
+.TP
+.B \-\-hooks\-only
+Run ONLY the post-restore hooks against an existing target DB; do not
+do an engine restore. Requires
+.B \-\-name
+to identify the existing DB.
+.TP
+.B \-\-no\-scrub
+Break-glass: bypass the PII scrub gate. Loud warning emitted; intended
+for debugging only.
+.TP
+.B \-\-recreate\-container
+Destroy and recreate the target Docker container before restoring.
+Required when the existing container has unrelated user data in it
+(see also
+.BR dbx-restore (1)
+"Refusing recreate" error message).
+.SH EXAMPLES
+Restore the latest
+.I myapp
+backup from
+.I production
+into the local managed container:
+.PP
+.RS
+.nf
+dbx restore production/myapp/latest
+.fi
+.RE
+.PP
+Restore into a sidecar container with a sanitization transform:
+.PP
+.RS
+.nf
+dbx restore prod/users/latest \\
+  --into devcopy \\
+  --transform /usr/local/bin/sanitize-pii.sh \\
+  --name users_safe
+.fi
+.RE
+.PP
+Restore from S3:
+.PP
+.RS
+.nf
+dbx restore s3://prod/users/latest
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B DBX_VERBOSE
+Set to 1 (or pass
+.BR \-v )
+to surface engine progress and helper diagnostics.
+.TP
+.B DBX_STRICT_IMPORT
+For MySQL restores, opt out of the default
+.B \-\-force
+mode so the first per-statement error aborts the import. Use only
+when a partial restore is worse than no restore.
+.TP
+.B DEV_SERVICES_MODE
+Set to
+.I remote
+to restore against a remote dev host (DEV_PG_HOST / DEV_MYSQL_HOST)
+instead of the managed local containers.
+.TP
+.B DBX_RECREATE_CONTAINER
+Equivalent to passing
+.BR \-\-recreate\-container .
+.SH SAFETY
+The
+.BR safety
+field on each host in
+.I config.json
+gates dangerous flag combinations.
+.B safety=prod
+hosts refuse
+.BR \-\-into
+restores (the dangerous "restore prod data into a sidecar that might
+shadow a live DB" path).
+.SH FILES
+.TP
+.I ~/.data/dbx/<host>/<database>/
+Where
+.B dbx
+looks for
+.IR latest
+and explicit filenames.
+.TP
+.I ~/.config/dbx/config.json
+Per-database
+.IR post_restore_hooks
+and
+.IR scrub
+manifests; per-host
+.IR safety
+flag.
+.SH EXIT STATUS
+.TP
+0
+Restore complete; data landed where the final
+.B [OK] Restore complete
+line says.
+.TP
+non-zero
+Restore failed at one of: source resolution, decompression /
+decryption, container provisioning, the engine import, the scrub gate,
+or post-restore hooks.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-backup (1),
+.BR dbx-verify (1),
+.BR dbx-scrub (1),
+.BR dbx-storage (1).

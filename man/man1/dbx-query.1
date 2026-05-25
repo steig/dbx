@@ -1,0 +1,61 @@
+.TH DBX-QUERY 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-query \- open an interactive shell against a database
+.SH SYNOPSIS
+.B dbx query
+.I host
+.RI [ database ]
+.PP
+.B dbx q
+.I host
+.RI [ database ]
+.PP
+.B dbx shell
+.I host
+.RI [ database ]
+.SH DESCRIPTION
+Open
+.B psql
+(Postgres) or
+.B mysql
+(MySQL / MariaDB) against the named host. Uses the same SSH-tunneled
+container infrastructure as
+.B dbx backup ,
+so no local DB client is needed.
+.PP
+If
+.I host
+has
+.BR safety=prod
+in
+.IR config.json ,
+the session is opened in READ ONLY mode: writes are refused server-side
+via
+.IR default_transaction_read_only=on
+(Postgres) or
+.IR --skip-secure-auth
++ session-level read-only (MySQL).
+.SH EXAMPLES
+Open psql against
+.IR production / myapp :
+.PP
+.RS
+.nf
+dbx query production myapp
+.fi
+.RE
+.SH SAFETY
+Per-host
+.IR safety
+flag in
+.IR config.json :
+.TP
+.B prod
+Session opens READ ONLY. Writes are refused at the server.
+.TP
+.B stage " or " local
+No restriction; session is read/write.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-test (1),
+.BR dbx-config (1).

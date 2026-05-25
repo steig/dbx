@@ -1,0 +1,63 @@
+.TH DBX-COMPLETION 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-completion \- print a shell completion script
+.SH SYNOPSIS
+.B dbx completion
+.IR bash | zsh | fish
+.SH DESCRIPTION
+Print a sourceable shell completion script for
+.BR bash ,
+.BR zsh ,
+or
+.BR fish .
+TAB completion covers host aliases, databases, vault keys, restore
+candidates from
+.IR $DATA_DIR ,
+schedule shorthands (daily / hourly / weekly / daily@HH / weekly@DOW:HH),
+and per-command long flags.
+.PP
+Dynamic data comes from a hidden
+.B "dbx __complete"
+subcommand the generated script invokes on every TAB press; it reads
+.IR config.json
+and walks
+.IR $DATA_DIR
+but never touches docker or the network, so TAB latency stays low.
+.PP
+Restore completions emit only
+.IR <host>/<database>/latest
+rows by default. Once the partial has 3+ path components, the script
+drills into that one host/db and emits specific filenames so you can
+TAB-complete a timestamp.
+.SH EXAMPLES
+bash:
+.PP
+.RS
+.nf
+echo 'eval "$(dbx completion bash)"' >> ~/.bashrc
+.fi
+.RE
+.PP
+zsh (requires
+.B "autoload -U compinit && compinit"
+earlier in
+.IR .zshrc ):
+.PP
+.RS
+.nf
+echo 'eval "$(dbx completion zsh)"' >> ~/.zshrc
+.fi
+.RE
+.PP
+fish:
+.PP
+.RS
+.nf
+dbx completion fish > ~/.config/fish/completions/dbx.fish
+.fi
+.RE
+.SH SEE ALSO
+.BR dbx (1),
+.BR bash (1),
+.BR zsh (1),
+.BR fish (1).

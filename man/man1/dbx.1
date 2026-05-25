@@ -1,0 +1,204 @@
+.TH DBX 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx \- database backup and restore utility
+.SH SYNOPSIS
+.B dbx
+.RI [ command ]
+.RI [ options ]
+.RI [ args ...]
+.SH DESCRIPTION
+.B dbx
+is a command-line utility for backing up and restoring PostgreSQL,
+MySQL, and MariaDB databases. Backups run against remote hosts over
+SSH tunnels using Docker-hosted
+.B pg_dump
+and
+.B mysqldump
+clients \(em no local DB install needed. Backups are zstd-compressed,
+optionally encrypted with age or GPG, and can be uploaded to S3 or
+MinIO.
+.PP
+Configuration lives in
+.IR ~/.config/dbx/config.json ;
+backups land under
+.IR ~/.data/dbx/<host>/<database>/ .
+Credentials are stored in the system keychain (macOS) or libsecret
+(Linux).
+.SH COMMANDS
+.SS Backup and restore
+.TP
+.B backup
+Back up one or more databases. See
+.BR dbx-backup (1).
+.TP
+.B restore
+Restore a backup into a managed Docker container, an alternate
+container, or a remote host. See
+.BR dbx-restore (1).
+.TP
+.B verify
+Verify a backup's SHA-256 checksum and inspect its
+.IR .meta.json
+sidecar. See
+.BR dbx-verify (1).
+.TP
+.B list
+Show available backups for a host or database. See
+.BR dbx-list (1).
+.TP
+.B clean
+Prune old backups by count or age. See
+.BR dbx-clean (1).
+.SS Inspection
+.TP
+.B query
+Open an interactive shell against a DB. See
+.BR dbx-query (1).
+.TP
+.B analyze
+Pick tables to exclude from backups using
+.BR fzf .
+See
+.BR dbx-analyze (1).
+.TP
+.B test
+Test connectivity to a host. See
+.BR dbx-test (1).
+.SS Configuration
+.TP
+.B host add
+Interactively add a host to config.json. See
+.BR dbx-host (1).
+.TP
+.B config
+Manage
+.IR config.json .
+See
+.BR dbx-config (1).
+.TP
+.B vault
+Manage stored credentials. See
+.BR dbx-vault (1).
+.TP
+.B wizard
+Browser-based config builder. See
+.BR dbx-wizard (1).
+.SS Scheduling
+.TP
+.B schedule
+Manage scheduled backups via launchd (macOS) or systemd (Linux). See
+.BR dbx-schedule (1).
+.SS Cloud storage
+.TP
+.B storage
+Upload, download, and sync backups against S3 / MinIO. See
+.BR dbx-storage (1).
+.SS PII
+.TP
+.B scrub
+Manage PII scrub manifests and the restore-time gate. See
+.BR dbx-scrub (1).
+.SS Shell integration
+.TP
+.B completion
+Print shell completion script (bash | zsh | fish). See
+.BR dbx-completion (1).
+.SS Self-maintenance
+.TP
+.B update
+Check for and install a newer release from GitHub.
+.TP
+.B version
+Print the installed version.
+.TP
+.B help
+Show the built-in command list.
+.SH EXAMPLES
+First-time setup:
+.PP
+.RS
+.nf
+dbx config init && dbx host add
+.fi
+.RE
+.PP
+Back up the
+.I myapp
+database on host
+.IR production :
+.PP
+.RS
+.nf
+dbx backup production myapp
+.fi
+.RE
+.PP
+Restore the latest backup of
+.I myapp
+into the managed local
+.B postgres-dbx
+container:
+.PP
+.RS
+.nf
+dbx restore production/myapp/latest
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B DBX_VERBOSE
+When set to 1, surfaces extra logging from helpers (mysqldump live
+stderr, version-detection diagnostics, etc.).
+.TP
+.B DBX_DATA_DIR
+Override the default backup-data directory
+.RB ( ~/.data/dbx ).
+.TP
+.B DBX_CONFIG_DIR
+Override the default config directory
+.RB ( ~/.config/dbx ).
+.TP
+.B DBX_AUDIT_DIR
+Override the default audit-log directory
+.RB ( ~/.local/share/dbx ).
+.TP
+.B DEV_SERVICES_MODE
+When set to
+.IR remote ,
+restore targets a remote dev host via
+.BR DEV_PG_HOST / DEV_MYSQL_HOST
+instead of the local managed containers.
+.SH FILES
+.TP
+.I ~/.config/dbx/config.json
+Host, database, encryption, and notification configuration.
+.TP
+.I ~/.data/dbx/<host>/<database>/
+Backup files. Each backup pairs with a
+.I .meta.json
+sidecar (size, checksum, source flavor / version,
+.B dbx
+version).
+.TP
+.I ~/.local/share/dbx/audit.log
+Audit log of completed backups and restores (used for ETA baselines).
+.SH SEE ALSO
+.BR dbx-backup (1),
+.BR dbx-restore (1),
+.BR dbx-verify (1),
+.BR dbx-list (1),
+.BR dbx-clean (1),
+.BR dbx-query (1),
+.BR dbx-test (1),
+.BR dbx-analyze (1),
+.BR dbx-host (1),
+.BR dbx-config (1),
+.BR dbx-vault (1),
+.BR dbx-wizard (1),
+.BR dbx-schedule (1),
+.BR dbx-storage (1),
+.BR dbx-scrub (1),
+.BR dbx-completion (1).
+.PP
+Online docs:
+.I https://steig.github.io/dbx/

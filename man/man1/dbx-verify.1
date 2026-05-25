@@ -1,0 +1,36 @@
+.TH DBX-VERIFY 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-verify \- verify a backup's checksum and inspect its sidecar
+.SH SYNOPSIS
+.B dbx verify
+.I backup-file
+.SH DESCRIPTION
+Verify that the SHA-256 checksum of
+.I backup-file
+matches the value recorded in its
+.IR .meta.json
+sidecar. Prints the file size, source flavor / version, and
+.B dbx
+version at write time.
+.PP
+.I backup-file
+may be an absolute path or a relative path under
+.IR $DATA_DIR .
+.SH EXAMPLES
+.RS
+.nf
+dbx verify ~/.data/dbx/prod/myapp/myapp_20260524_120000.sql.zst
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+0
+Checksum matches; the backup is intact.
+.TP
+non-zero
+Checksum mismatch, sidecar missing, or the file isn't a recognizable
+dbx backup.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-list (1),
+.BR dbx-restore (1).

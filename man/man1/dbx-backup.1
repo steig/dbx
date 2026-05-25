@@ -1,0 +1,129 @@
+.TH DBX-BACKUP 1 "2026-05-25" "dbx 0.12.0" "User Commands"
+.SH NAME
+dbx-backup \- back up a remote PostgreSQL, MySQL, or MariaDB database
+.SH SYNOPSIS
+.B dbx backup
+.RB [ \-v | \-\-verbose ]
+.RB [ \-\-upload ]
+.I host
+.RI [ database ]
+.SH DESCRIPTION
+Back up the named database from
+.I host
+to a zstd-compressed (and optionally encrypted) file under
+.IR $DATA_DIR/<host>/<database>/ .
+When
+.I database
+is omitted, every database declared for
+.I host
+in
+.I config.json
+is backed up sequentially.
+.PP
+The dump runs inside the managed Docker container matched to the
+source flavor and major version (Postgres) or flavor + major.minor
+(MySQL / MariaDB). No local
+.B pg_dump
+or
+.B mysqldump
+is required.
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Surface per-table progress and helper diagnostics. For MySQL backups,
+tees
+.B mysqldump
+.B \-\-verbose
+stderr live to the terminal (per-table "Retrieving table structure"
+lines) and prints the sanitized
+.B mysqldump
+target. Also enables
+.B mysql_detect_server_version
+diagnostics under
+.B DBX_VERBOSE=1.
+.TP
+.B \-\-upload
+After the backup writes successfully, also upload it to the configured
+remote storage (S3 / MinIO). Requires
+.B dbx storage
+to be configured.
+.SH EXAMPLES
+Back up the
+.I myapp
+database on host
+.IR production :
+.PP
+.RS
+.nf
+dbx backup production myapp
+.fi
+.RE
+.PP
+Back up every database declared for
+.I staging :
+.PP
+.RS
+.nf
+dbx backup staging
+.fi
+.RE
+.PP
+Verbose MySQL backup with live mysqldump progress:
+.PP
+.RS
+.nf
+dbx backup -v production b2c
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B DBX_VERBOSE
+Set to 1 to enable diagnostic logging from helpers
+.RB ( mysql_detect_server_version ,
+post-restore hook tracers, etc.).
+.TP
+.B DBX_MYSQL_IMAGE
+Override the
+.B mysql-dbx
+container image (e.g.
+.IR percona:8.0 ).
+Pairs with
+.B defaults.mysql_image
+in
+.IR config.json .
+.TP
+.B DBX_POSTGRES_IMAGE
+Override the
+.B postgres-dbx
+container image.
+.SH FILES
+.TP
+.I ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst
+The backup itself. Encrypted backups have an additional
+.B .age
+or
+.B .gpg
+suffix.
+.TP
+.I ~/.data/dbx/<host>/<database>/<file>.meta.json
+Sidecar with file size, SHA-256 checksum, source flavor / version,
+.B dbx
+version, and other metadata.
+.SH EXIT STATUS
+.TP
+0
+Backup completed successfully.
+.TP
+non-zero
+.B pg_dump / mysqldump
+failed, the container couldn't be matched, encryption failed, or the
+post-backup upload (with
+.BR \-\-upload )
+failed.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-restore (1),
+.BR dbx-list (1),
+.BR dbx-clean (1),
+.BR dbx-schedule (1),
+.BR dbx-storage (1).
