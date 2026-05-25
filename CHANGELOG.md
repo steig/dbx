@@ -4,6 +4,11 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **`dbx wizard --remote`** — server-only mode for SSH-tunneled access. Skips the SSH-TTY auto-fallback and the local browser launch; prints the URL, the suggested `ssh -L` tunnel command, and the localhost open-URL so you can forward the port from your laptop. Bind stays on 127.0.0.1; transport is SSH.
+- **`dbx wizard --port N`** — pin the local port instead of letting the OS pick a free one. Pairs with `--remote` so the SSH-tunnel command is stable across runs. Validates the value is numeric, in range, and actually bindable before spawning the server.
+
 ## [0.12.0] - 2026-05-24
 
 Single-theme minor release: `dbx wizard` graduates from a one-shot config builder into a multi-view local control panel. The same CLI is still the source of truth; the browser shells out to it. No Chromium bundle, no Electron — the existing 127.0.0.1 + URL-token Python server gained an `/api/` surface and three new views.
