@@ -144,6 +144,7 @@
         <a @click="$store.dbx.view = 'restore'"  :class="{active: $store.dbx.view === 'restore'}">Restore</a>
         <a @click="$store.dbx.view = 'vault'"    :class="{active: $store.dbx.view === 'vault'}">Vault</a>
         <a @click="$store.dbx.view = 'schedule'" :class="{active: $store.dbx.view === 'schedule'}">Schedule</a>
+        <a @click="$store.dbx.view = 'storage'"  :class="{active: $store.dbx.view === 'storage'}">Storage</a>
       </nav>
     </aside>
     <main class="dbx-app__main">
@@ -174,6 +175,9 @@
       </section>
       <section x-data x-show="$store.dbx.view === 'schedule'">
         <!-- __DBX_SCHEDULE_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'storage'">
+        <!-- __DBX_STORAGE_FRAGMENT__ -->
       </section>
     </main>
   </div>

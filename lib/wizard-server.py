@@ -115,6 +115,11 @@ def parse_args():
         help="Path to wizard-vault.html (vault management view)",
     )
     p.add_argument(
+        "--storage-fragment",
+        required=True,
+        help="Path to wizard-storage.html (storage usage + retention sweep view)",
+    )
+    p.add_argument(
         "--audit-dir",
         default=os.environ.get(
             "DBX_AUDIT_DIR",
@@ -868,6 +873,207 @@ def compute_dashboard(data_dir, audit_dir, config_path, now=None):
     }
 
 
+def _enumerate_backup_files(data_dir):
+    """Yield every backup file under DATA_DIR as (host, db, path, stat).
+
+    Shared by the storage usage + clean-preview endpoints. Mirrors the walk
+    in `cmd_clean` (lib/core.sh): host_dir / db_dir / *.sql.zst[.age|.gpg],
+    skipping sidecars and non-backup files. Both host and db identifiers
+    are filtered through IDENT_RE so a stray dotfile or symlinked junk
+    doesn't sneak into the totals.
+
+    The caller decides whether to group by pair, sort by mtime, etc. — this
+    helper just emits files in a stable host/db/filename order.
+    """
+    if not os.path.isdir(data_dir):
+        return
+    for host in sorted(os.listdir(data_dir)):
+        host_dir = os.path.join(data_dir, host)
+        if not os.path.isdir(host_dir) or not IDENT_RE.match(host):
+            continue
+        for db in sorted(os.listdir(host_dir)):
+            db_dir = os.path.join(host_dir, db)
+            if not os.path.isdir(db_dir) or not IDENT_RE.match(db):
+                continue
+            for fname in sorted(os.listdir(db_dir)):
+                if not (fname.endswith(".sql.zst")
+                        or fname.endswith(".sql.zst.age")
+                        or fname.endswith(".sql.zst.gpg")):
+                    continue
+                path = os.path.join(db_dir, fname)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                yield host, db, path, st
+
+
+def _sidecar_bytes(path):
+    """Return the size of `<path>.meta.json` if it exists, else 0. Sidecar
+    bytes count toward `reclaim_bytes` (the user is freeing them too) but
+    NOT toward `reclaim_count` (those are user-facing backup files)."""
+    meta = path + ".meta.json"
+    try:
+        return os.path.getsize(meta)
+    except OSError:
+        return 0
+
+
+def compute_storage_usage(data_dir):
+    """Composed payload for `GET /api/storage/usage`.
+
+    Walks DATA_DIR, builds a per host/db table with per-pair totals + the
+    largest / oldest / newest backup, and a global summary. Also reports
+    the free space on DATA_DIR's filesystem (statvfs) so the UI can render
+    a "used / free" disk bar at the top of the view.
+
+    `free_bytes` is null when statvfs fails (e.g. DATA_DIR doesn't exist on
+    disk yet). The rest of the payload still degrades cleanly to empty.
+    """
+    # Per-pair accumulator. Each entry tracks count + total + biggest +
+    # oldest + newest so the UI can show all the useful columns in one
+    # round-trip without re-walking the tree client-side.
+    by_pair_map: dict = {}
+    total_bytes = 0
+    total_files = 0
+    for host, db, path, st in _enumerate_backup_files(data_dir):
+        key = (host, db)
+        entry = by_pair_map.get(key)
+        size = st.st_size
+        mtime = st.st_mtime
+        if entry is None:
+            entry = {
+                "host": host,
+                "database": db,
+                "count": 0,
+                "bytes": 0,
+                "largest_bytes": 0,
+                "oldest_mtime": mtime,
+                "newest_mtime": mtime,
+            }
+            by_pair_map[key] = entry
+        entry["count"] += 1
+        entry["bytes"] += size
+        if size > entry["largest_bytes"]:
+            entry["largest_bytes"] = size
+        if mtime < entry["oldest_mtime"]:
+            entry["oldest_mtime"] = mtime
+        if mtime > entry["newest_mtime"]:
+            entry["newest_mtime"] = mtime
+        total_bytes += size
+        total_files += 1
+
+    by_pair = []
+    for entry in by_pair_map.values():
+        oldest_dt = datetime.datetime.fromtimestamp(
+            entry.pop("oldest_mtime"), tz=datetime.timezone.utc
+        )
+        newest_dt = datetime.datetime.fromtimestamp(
+            entry.pop("newest_mtime"), tz=datetime.timezone.utc
+        )
+        entry["oldest_iso"] = oldest_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry["newest_iso"] = newest_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        by_pair.append(entry)
+    # Sort by bytes descending; tie-break alphabetically so the table is
+    # stable across reloads.
+    by_pair.sort(key=lambda r: (-r["bytes"], r["host"], r["database"]))
+
+    # statvfs needs a path that exists; fall back to the closest existing
+    # ancestor so a freshly-installed setup with no DATA_DIR still reports
+    # plausible disk free space.
+    free_bytes = None
+    probe = data_dir
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    if probe and os.path.exists(probe):
+        try:
+            stv = os.statvfs(probe)
+            free_bytes = stv.f_bavail * stv.f_frsize
+        except (OSError, AttributeError):
+            free_bytes = None
+
+    return {
+        "total_bytes": total_bytes,
+        "total_files": total_files,
+        "free_bytes": free_bytes,
+        "by_pair": by_pair,
+    }
+
+
+def compute_clean_preview(data_dir, keep, older_than, now=None):
+    """Mirror the bash `cmd_clean` selection logic and return the files that
+    would be deleted. Both `keep` and `older_than` may be None; the caller
+    enforces "at least one must be set". When both are set, the result is
+    the UNION of marked files (matches the bash side, which evaluates both
+    conditions independently and removes anything that matches either).
+
+    The bash side's mutually-exclusive-modes behaviour (#22) is subtly
+    different: passing both flags treats `--keep` as a floor inside age
+    mode. For the wizard preview we keep the union semantics so the UI is
+    predictable — the underlying `dbx clean` invocation we spawn for the
+    real run uses whichever single flag the user actually selected.
+
+    Returns `(would_delete, reclaim_bytes, reclaim_count)`. Sidecar
+    `.meta.json` bytes are folded into `reclaim_bytes` but the sidecars
+    themselves are NOT in `would_delete` and don't bump `reclaim_count`.
+    """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+    # Group files by pair, sorted newest-first (mtime descending). cmd_clean
+    # uses `ls -t`; we replicate that with explicit sort. Each entry is a
+    # dict so we can carry the size + sidecar info into the preview output.
+    by_pair: dict = {}
+    for host, db, path, st in _enumerate_backup_files(data_dir):
+        by_pair.setdefault((host, db), []).append({
+            "path": path,
+            "host": host,
+            "database": db,
+            "bytes": st.st_size,
+            "mtime": st.st_mtime,
+        })
+
+    marked: dict = {}   # path -> entry, used as a set with insertion order
+    for entries in by_pair.values():
+        entries.sort(key=lambda e: -e["mtime"])
+        if keep is not None and len(entries) > keep:
+            # Same as bash: backups[keep:] are removed (newest `keep` are
+            # preserved at the head of the list).
+            for e in entries[keep:]:
+                marked[e["path"]] = e
+        if older_than is not None:
+            cutoff = now - older_than * 86400
+            for e in entries:
+                if e["mtime"] < cutoff:
+                    marked[e["path"]] = e
+
+    would_delete = []
+    reclaim_bytes = 0
+    for e in marked.values():
+        sidecar = _sidecar_bytes(e["path"])
+        reclaim_bytes += e["bytes"] + sidecar
+        ts = datetime.datetime.fromtimestamp(
+            e["mtime"], tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        would_delete.append({
+            "path": e["path"],
+            "host": e["host"],
+            "database": e["database"],
+            "bytes": e["bytes"],
+            "timestamp": ts,
+        })
+
+    # Sort by mtime descending isn't user-friendly (newest-first removed
+    # files mixed across hosts); sort by host/db/timestamp so the user can
+    # scan the list and the largest pairs appear together.
+    would_delete.sort(key=lambda r: (r["host"], r["database"], r["timestamp"]))
+
+    return would_delete, reclaim_bytes, len(would_delete)
+
+
 def _coerce_int(v):
     """audit_log writes everything as strings (jq --arg), so size/duration
     arrive as numeric strings. Coerce to int when possible; pass null
@@ -1109,6 +1315,8 @@ def make_handler(args):
             dashboard = f.read()
         with open(args.vault_fragment) as f:
             vault = f.read()
+        with open(args.storage_fragment) as f:
+            storage = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
@@ -1119,6 +1327,7 @@ def make_handler(args):
                  .replace("<!-- __DBX_RUNS_FRAGMENT__ -->", runs)
                  .replace("<!-- __DBX_DASHBOARD_FRAGMENT__ -->", dashboard)
                  .replace("<!-- __DBX_VAULT_FRAGMENT__ -->", vault)
+                 .replace("<!-- __DBX_STORAGE_FRAGMENT__ -->", storage)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -1398,6 +1607,45 @@ def make_handler(args):
                     return
                 send_json(self, 200, state)
                 return
+            if path == "/api/storage/usage":
+                send_json(self, 200, compute_storage_usage(args.data_dir))
+                return
+            if path == "/api/storage/clean-preview":
+                qs = parse_query(self.path)
+                keep_raw = (qs.get("keep", [""]) or [""])[0]
+                older_raw = (qs.get("older_than", [""]) or [""])[0]
+                if not keep_raw and not older_raw:
+                    send_json(self, 400, {"error": "at least one of keep or older_than is required"})
+                    return
+                keep_n = None
+                older_n = None
+                if keep_raw:
+                    try:
+                        keep_n = int(keep_raw)
+                    except ValueError:
+                        send_json(self, 400, {"error": "keep must be an integer"})
+                        return
+                    if keep_n < 1 or keep_n > 1000:
+                        send_json(self, 400, {"error": "keep must be between 1 and 1000"})
+                        return
+                if older_raw:
+                    try:
+                        older_n = int(older_raw)
+                    except ValueError:
+                        send_json(self, 400, {"error": "older_than must be an integer"})
+                        return
+                    if older_n < 1 or older_n > 3650:
+                        send_json(self, 400, {"error": "older_than must be between 1 and 3650"})
+                        return
+                would_delete, reclaim_bytes, reclaim_count = compute_clean_preview(
+                    args.data_dir, keep_n, older_n
+                )
+                send_json(self, 200, {
+                    "would_delete": would_delete,
+                    "reclaim_bytes": reclaim_bytes,
+                    "reclaim_count": reclaim_count,
+                })
+                return
             if path == "/api/dashboard":
                 # Composed view: host/db pairs from DATA_DIR + per-pair
                 # last_success/last_failure from audit.log + schedules[]
@@ -1644,6 +1892,58 @@ def make_handler(args):
                     return
                 try:
                     job_id = spawn_dbx("test", [host])
+                except OSError as e:
+                    self._send(500, f"spawn failed: {e}")
+                    return
+                send_json(self, 200, {"job_id": job_id})
+                return
+
+            if path == "/api/storage/clean":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                keep_v = body.get("keep")
+                older_v = body.get("older_than")
+                # Same shape validation the GET preview uses — keep them in
+                # lockstep so a preview that succeeds also spawns cleanly.
+                if keep_v is None and older_v is None:
+                    send_json(self, 400, {"error": "at least one of keep or older_than is required"})
+                    return
+                argv = []
+                if keep_v is not None:
+                    if not isinstance(keep_v, int) or isinstance(keep_v, bool):
+                        send_json(self, 400, {"error": "keep must be an integer"})
+                        return
+                    if keep_v < 1 or keep_v > 1000:
+                        send_json(self, 400, {"error": "keep must be between 1 and 1000"})
+                        return
+                    argv += ["--keep", str(keep_v)]
+                if older_v is not None:
+                    if not isinstance(older_v, int) or isinstance(older_v, bool):
+                        send_json(self, 400, {"error": "older_than must be an integer"})
+                        return
+                    if older_v < 1 or older_v > 3650:
+                        send_json(self, 400, {"error": "older_than must be between 1 and 3650"})
+                        return
+                    argv += ["--older-than", str(older_v)]
+                dry = body.get("dry_run")
+                if dry is True:
+                    argv.append("--dry-run")
+                elif dry is not None and dry is not False:
+                    send_json(self, 400, {"error": "dry_run must be a boolean"})
+                    return
+                try:
+                    job_id = spawn_dbx("clean", argv)
                 except OSError as e:
                     self._send(500, f"spawn failed: {e}")
                     return
