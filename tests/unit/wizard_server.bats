@@ -262,6 +262,20 @@ JSON
   [[ "$output" == *"cmd=backup -v prod myapp"* ]]
 }
 
+@test "POST /api/backup accepts real dict-shaped hosts (alias-keyed)" {
+  # Production configs use hosts={"alias":{...}} (an object keyed by
+  # alias), not an array of objects. The earlier array shape tests cover
+  # the defensive fallback; this one exercises the actual shape we're
+  # likely to see in $HOME/.config/dbx/config.json.
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{"hosts":{"prod-mysql":{"type":"mysql","user":"u","databases":{"b2b":{},"b2c":{}}}}}
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod-mysql"}' "$(api /api/backup)"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ \"job_id\":\ ?\"[0-9a-f]{32}\" ]]
+}
+
 @test "POST /api/jobs/<bad-id>/cancel returns 404" {
   run curl -s -o /dev/null -w "%{http_code}" -X POST \
     "$(api /api/jobs/00000000000000000000000000000000/cancel)"

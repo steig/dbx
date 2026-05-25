@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wizard Backup + Schedule views: now read `config.json` correctly.** PR-W (Backup view) and PR-X (Schedule dropdowns) both assumed `config.json`'s `hosts` was an array of `{alias, databases}` objects. Real schema is an object keyed by alias (`{"prod-mysql": {"type": "mysql", "databases": {"b2b": {}, "b2c": {}}, ...}}`), and `databases` is similarly keyed by db name. The result: against a real working config, the Backup view rendered "No hosts configured yet" and the Schedule view rendered empty dropdowns. Both client-side loaders + the server-side `list_configured_hosts` validator now read the object-keyed shape correctly (with defensive array-shape fallback for hand-edited / informal configs). Added a wizard_server test against the real dict shape.
+
 ## [0.14.0] - 2026-05-25
 
 ### Added
