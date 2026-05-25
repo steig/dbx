@@ -89,10 +89,10 @@
     <aside class="dbx-app__sidebar">
       <div class="dbx-app__brand">dbx<small>local control panel</small></div>
       <nav class="dbx-app__nav" x-data>
-        <a @click="$store.dbx.view = 'config'"  :class="{active: $store.dbx.view === 'config'}">Config</a>
-        <a @click="$store.dbx.view = 'backups'" :class="{active: $store.dbx.view === 'backups'}">Backups</a>
-        <a @click="$store.dbx.view = 'restore'" :class="{active: $store.dbx.view === 'restore'}">Restore</a>
-        <a class="disabled" title="Lands in PR-2">Schedule<small>PR-2</small></a>
+        <a @click="$store.dbx.view = 'config'"   :class="{active: $store.dbx.view === 'config'}">Config</a>
+        <a @click="$store.dbx.view = 'backups'"  :class="{active: $store.dbx.view === 'backups'}">Backups</a>
+        <a @click="$store.dbx.view = 'restore'"  :class="{active: $store.dbx.view === 'restore'}">Restore</a>
+        <a @click="$store.dbx.view = 'schedule'" :class="{active: $store.dbx.view === 'schedule'}">Schedule</a>
       </nav>
     </aside>
     <main class="dbx-app__main">
@@ -108,6 +108,9 @@
       </section>
       <section x-data x-show="$store.dbx.view === 'restore'">
         <!-- __DBX_RESTORE_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'schedule'">
+        <!-- __DBX_SCHEDULE_FRAGMENT__ -->
       </section>
     </main>
   </div>

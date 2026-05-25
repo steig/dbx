@@ -1,0 +1,238 @@
+<!--
+  Schedule view fragment. Loaded by `dbx wizard` only.
+  Shows:
+    - the declarative schedules[] block in config.json (editable)
+    - the installed launchd/systemd units (read-only)
+    - the sync plan diff (read-only; same logic as `dbx schedule sync`)
+  Save button POSTs the edited declarative table to /api/schedules, which
+  rewrites the schedules[] block in config.json in place (other keys
+  preserved). Reconciling units to disk still happens via `dbx schedule
+  sync` from the CLI — the write path is deliberately not in the UI yet.
+-->
+<style>
+  .dbx-sched__section { margin-bottom: 1.75rem; }
+  .dbx-sched__title { font-size: 0.95rem; font-weight: 600; margin: 0 0 0.5rem; }
+  .dbx-sched__hint  { font-size: 0.8125rem; color: var(--md-default-fg-color--light); margin: 0 0 0.5rem; }
+  .dbx-sched__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  .dbx-sched__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
+  .dbx-sched__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
+  .dbx-sched__table input { width: 100%; padding: 0.35rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
+  .dbx-sched__table input:invalid { border-color: #c43d3d; }
+  .dbx-sched__actions { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.75rem; }
+  .dbx-sched__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
+  .dbx-sched__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .dbx-sched__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
+  .dbx-sched__btn--danger { background: #c43d3d; padding: 0.25rem 0.5rem; font-size: 0.75rem; }
+  .dbx-sched__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 500; }
+  .dbx-sched__chip--install  { background: rgba(74, 158, 76, 0.15); color: #2f7d31; }
+  .dbx-sched__chip--update   { background: rgba(11, 107, 203, 0.15); color: var(--md-accent-fg-color); }
+  .dbx-sched__chip--orphan   { background: rgba(196, 61, 61, 0.15); color: #a83232; }
+  .dbx-sched__chip--nochange { background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color--light); }
+  .dbx-sched__status { padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.875rem; }
+  .dbx-sched__status--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
+  .dbx-sched__status--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
+  .dbx-sched__empty { padding: 1rem; color: var(--md-default-fg-color--light); font-style: italic; font-size: 0.875rem; }
+</style>
+
+<div x-data="dbxSchedule()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Schedule</h2>
+    <p class="dbx-view__subtitle">
+      Declarative schedules live in <code>config.json</code>'s <code>schedules[]</code> block.
+      Save here, then run <code>dbx schedule sync</code> from the terminal to install /
+      update / orphan the launchd or systemd units.
+    </p>
+  </header>
+
+  <template x-if="status">
+    <div class="dbx-sched__status" :class="statusClass" x-text="status"></div>
+  </template>
+
+  <section class="dbx-sched__section">
+    <h3 class="dbx-sched__title">Declarative (<code>config.json</code>)</h3>
+    <p class="dbx-sched__hint">Add / edit / remove rows then click <strong>Save</strong>. <code>when</code> accepts <code>hourly</code>, <code>daily</code>, <code>daily@H</code>, <code>weekly</code>, <code>weekly@D:H</code>, or a raw cron expression.</p>
+    <template x-if="declarative.length === 0">
+      <p class="dbx-sched__empty">No declarative schedules yet. Click "Add row" to start.</p>
+    </template>
+    <template x-if="declarative.length > 0">
+      <table class="dbx-sched__table">
+        <thead>
+          <tr>
+            <th style="width: 28%">Host</th>
+            <th style="width: 28%">Database</th>
+            <th style="width: 36%">When</th>
+            <th style="width: 8%"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="(row, i) in declarative" :key="i">
+            <tr>
+              <td><input type="text" x-model.trim="row.host" placeholder="production" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"></td>
+              <td><input type="text" x-model.trim="row.database" placeholder="myapp" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"></td>
+              <td><input type="text" x-model.trim="row.when" placeholder="daily@2" maxlength="128"></td>
+              <td><button class="dbx-sched__btn dbx-sched__btn--danger" @click="removeRow(i)">Remove</button></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </template>
+    <div class="dbx-sched__actions">
+      <button class="dbx-sched__btn dbx-sched__btn--secondary" @click="addRow()">Add row</button>
+      <button class="dbx-sched__btn" @click="save()" :disabled="saving || !dirty || !isValid()">
+        <span x-show="!saving">Save</span>
+        <span x-show="saving">Saving…</span>
+      </button>
+      <button class="dbx-sched__btn dbx-sched__btn--secondary" @click="reload()" :disabled="loading">Reload</button>
+      <span x-show="dirty && isValid()" style="color: var(--md-default-fg-color--light); font-size: 0.8125rem;">unsaved changes</span>
+      <span x-show="dirty && !isValid()" style="color: #c43d3d; font-size: 0.8125rem;">invalid rows (see fields)</span>
+    </div>
+  </section>
+
+  <section class="dbx-sched__section">
+    <h3 class="dbx-sched__title">Installed units</h3>
+    <p class="dbx-sched__hint">launchd plists on macOS, systemd timers on Linux. Units installed before the <code>DbxScheduleExpression</code> marker show <code>?</code> for <code>when</code>.</p>
+    <template x-if="installed.length === 0">
+      <p class="dbx-sched__empty">No units installed.</p>
+    </template>
+    <template x-if="installed.length > 0">
+      <table class="dbx-sched__table">
+        <thead>
+          <tr><th>Host</th><th>Database</th><th>When</th></tr>
+        </thead>
+        <tbody>
+          <template x-for="row in installed" :key="row.host + '/' + row.database">
+            <tr>
+              <td x-text="row.host"></td>
+              <td x-text="row.database"></td>
+              <td><code x-text="row.when"></code></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </template>
+  </section>
+
+  <section class="dbx-sched__section">
+    <h3 class="dbx-sched__title">Sync plan</h3>
+    <p class="dbx-sched__hint">
+      What <code>dbx schedule sync</code> would do given the saved declarative + installed state.
+      Reflects the last <em>saved</em> declarative, not the unsaved edits above. Run
+      <code>dbx schedule sync --apply</code> from the CLI to act on it.
+    </p>
+    <template x-if="plan.length === 0">
+      <p class="dbx-sched__empty">Nothing to reconcile.</p>
+    </template>
+    <template x-if="plan.length > 0">
+      <table class="dbx-sched__table">
+        <thead>
+          <tr><th style="width: 14%">Action</th><th>Host</th><th>Database</th><th>When</th></tr>
+        </thead>
+        <tbody>
+          <template x-for="row in plan" :key="row.action + '/' + row.host + '/' + row.database">
+            <tr>
+              <td><span class="dbx-sched__chip" :class="`dbx-sched__chip--${row.action}`" x-text="row.action"></span></td>
+              <td x-text="row.host"></td>
+              <td x-text="row.database"></td>
+              <td><code x-text="row.when"></code></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </template>
+  </section>
+</div>
+
+<script>
+  function dbxSchedule() {
+    return {
+      declarative: [],   // editable working copy
+      saved: [],         // baseline for dirty-check (last server-truth)
+      installed: [],
+      plan: [],
+      loading: false,
+      saving: false,
+      status: '',
+      statusClass: '',
+
+      init() {
+        // Refresh whenever the user lands on this tab.
+        this.$watch('$store.dbx.view', (v) => { if (v === 'schedule') this.reload(); });
+        if (Alpine.store('dbx').view === 'schedule') this.reload();
+      },
+
+      async reload() {
+        this.loading = true;
+        this.status = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/schedules'));
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+            this.status = `Failed to load: ${err.error || r.status}`;
+            this.statusClass = 'dbx-sched__status--err';
+            return;
+          }
+          const data = await r.json();
+          this.declarative = (data.declarative || []).map(r => ({ ...r }));
+          this.saved       = JSON.parse(JSON.stringify(this.declarative));
+          this.installed   = data.installed || [];
+          this.plan        = data.plan || [];
+        } catch (e) {
+          this.status = `Network error: ${e}`;
+          this.statusClass = 'dbx-sched__status--err';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      addRow() {
+        this.declarative.push({ host: '', database: '', when: 'daily@2' });
+      },
+
+      removeRow(i) {
+        this.declarative.splice(i, 1);
+      },
+
+      get dirty() {
+        return JSON.stringify(this.declarative) !== JSON.stringify(this.saved);
+      },
+
+      isValid() {
+        const ident = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+        return this.declarative.every(r =>
+          ident.test(r.host || '') &&
+          ident.test(r.database || '') &&
+          typeof r.when === 'string' &&
+          r.when.length >= 1 && r.when.length <= 128
+        );
+      },
+
+      async save() {
+        if (!this.isValid()) return;
+        this.saving = true;
+        this.status = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/schedules'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedules: this.declarative }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+            this.status = `Save failed: ${err.error || r.status}`;
+            this.statusClass = 'dbx-sched__status--err';
+            return;
+          }
+          this.status = 'Saved. Run `dbx schedule sync` from the terminal to reconcile units.';
+          this.statusClass = 'dbx-sched__status--ok';
+          // Refresh so the plan/installed reflect server-truth.
+          await this.reload();
+        } catch (e) {
+          this.status = `Network error: ${e}`;
+          this.statusClass = 'dbx-sched__status--err';
+        } finally {
+          this.saving = false;
+        }
+      },
+    };
+  }
+</script>
