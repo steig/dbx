@@ -585,6 +585,20 @@
             </template>
           </div>
 
+          <div class="dbx-builder__row" style="margin-top: 0.75rem;">
+            <div>
+              <label>Safety</label>
+              <select x-model="host.safety">
+                <option value="local">Local (writes allowed)</option>
+                <option value="stage">Stage (writes allowed)</option>
+                <option value="prod">Production (read-only — refuses writes, restore --into, hooks)</option>
+              </select>
+              <div class="dbx-builder__hint">
+                Production hosts are treated as read sources only. <code>dbx backup</code>, <code>dbx list</code>, and <code>dbx scrub init/check</code> still work. <code>dbx query</code> opens read-only; <code>dbx restore --into</code> against a prod-source backup is refused.
+              </div>
+            </div>
+          </div>
+
           <!-- Databases -->
           <div style="margin-top: 1rem;">
             <label style="font-size: 0.9rem;">Databases</label>
@@ -1007,6 +1021,11 @@
           if (h.type === 'mysql' && h.definer_handling && h.definer_handling !== 'strip') {
             block.definer_handling = h.definer_handling;
           }
+          // Emit safety only when non-default so existing local configs
+          // round-trip cleanly (no churn from absent field becoming "local").
+          if (h.safety && h.safety !== 'local') {
+            block.safety = h.safety;
+          }
           block.password_cmd = `dbx vault get ${h.alias}`;
           if (h.databases.length) {
             block.databases = {};
@@ -1142,6 +1161,7 @@
       host: '', port: '',
       jump_host: '', target_host: '', target_port: '',
       user: '', definer_handling: 'strip',
+      safety: 'local',
       databases: [{ name: '', exclude_data: '' }],
       post_restore_raw: ''
     };

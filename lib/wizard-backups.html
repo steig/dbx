@@ -29,6 +29,7 @@
       <thead>
         <tr>
           <th>Host</th>
+          <th>Safety</th>
           <th>Database</th>
           <th>Backup</th>
           <th>Size</th>
@@ -43,6 +44,17 @@
         <template x-for="b in filtered()" :key="b.path">
           <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
             <td x-text="b.host"></td>
+            <td>
+              <template x-if="b.safety === 'prod'">
+                <span class="dbx-backups__chip dbx-backups__chip--prod">PROD</span>
+              </template>
+              <template x-if="b.safety === 'stage'">
+                <span class="dbx-backups__chip dbx-backups__chip--stage">STAGE</span>
+              </template>
+              <template x-if="!b.safety || b.safety === 'local'">
+                <span style="color: var(--md-default-fg-color--light); font-size: 0.75rem;">local</span>
+              </template>
+            </td>
             <td x-text="b.database"></td>
             <td><code x-text="b.filename"></code></td>
             <td x-text="formatSize(b.size)"></td>

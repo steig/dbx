@@ -199,6 +199,37 @@ host_exists() {
   [[ "$found" == "true" ]]
 }
 
+# Echo the safety level for a host alias. One of `prod`, `stage`, `local`.
+# Falls back to `local` if the field is missing OR set to anything outside
+# the allowed set (defense in depth — `config validate` catches malformed
+# values up front, but a typo'd hand-edit shouldn't silently promote a
+# host to a level the user didn't mean).
+# Args: $1 = host alias
+host_safety() {
+  local alias="${1:-}"
+  [[ -z "$alias" ]] && { echo "local"; return; }
+  local s
+  s=$(jq -r --arg a "$alias" '.hosts[$a].safety // "local"' "$CONFIG_FILE" 2>/dev/null || echo "local")
+  case "$s" in
+    prod|stage|local) echo "$s" ;;
+    *) echo "local" ;;
+  esac
+}
+
+# Die with a clear error if the host is marked prod. Used at write-shaped
+# call sites (restore --into, post-restore hooks, scrub apply). Reads are
+# never blocked — pg_dump / SELECT-only flows don't call this.
+# Args: $1 = host alias, $2 = action description (e.g. "restore", "post-restore hooks")
+require_writable_host() {
+  local alias="${1:-}" action="${2:-write}"
+  [[ -z "$alias" ]] && return 0
+  local safety
+  safety=$(host_safety "$alias")
+  if [[ "$safety" == "prod" ]]; then
+    die "Refusing $action against host '$alias' (safety=prod). Remove the safety flag in config.json if this is intentional."
+  fi
+}
+
 # ============================================================================
 # Keychain/Vault Functions (cross-platform credential storage)
 # ============================================================================
