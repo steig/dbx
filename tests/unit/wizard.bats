@@ -86,3 +86,68 @@ setup() {
   b=$(wizard_make_token)
   [ "$a" != "$b" ]
 }
+
+# ----------------------------------------------------------------------------
+# wizard_port_available
+# ----------------------------------------------------------------------------
+
+@test "wizard_port_available: succeeds on a free port" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not on PATH"
+  local port
+  port=$(wizard_find_free_port)
+  run wizard_port_available "$port"
+  [ "$status" -eq 0 ]
+}
+
+@test "wizard_port_available: fails on a port currently bound" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not on PATH"
+  # Bind a port in a background python process, then assert the helper fails.
+  python3 -c "
+import socket, sys, time
+s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()
+print(s.getsockname()[1], flush=True)
+time.sleep(5)
+" > "$BATS_TEST_TMPDIR/port.out" 2>&1 &
+  local bg_pid=$!
+  # Wait for the bind to actually happen (poll the output file).
+  local port=""
+  local _
+  for _ in $(seq 1 30); do
+    port=$(cat "$BATS_TEST_TMPDIR/port.out" 2>/dev/null | head -1)
+    [[ -n "$port" && "$port" =~ ^[0-9]+$ ]] && break
+    sleep 0.1
+  done
+  [ -n "$port" ]
+
+  run wizard_port_available "$port"
+  [ "$status" -ne 0 ]
+
+  kill "$bg_pid" 2>/dev/null
+  wait "$bg_pid" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------------
+# cmd_wizard argument handling (smoke-test for the new --remote / --port flags)
+# ----------------------------------------------------------------------------
+
+@test "dbx wizard --help advertises --remote and --port" {
+  run "$DBX_BIN" wizard --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--remote"* ]]
+  [[ "$output" == *"--port"* ]]
+  [[ "$output" == *"ssh -L"* ]]
+}
+
+@test "dbx wizard --port with non-numeric value errors with 'Invalid --port'" {
+  # --no-browser short-circuits before port validation, so we use --remote
+  # to force the path into server-mode where the numeric check fires.
+  run "$DBX_BIN" wizard --remote --port abc
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid --port"* ]] || [[ "$output" == *"Port out of range"* ]]
+}
+
+@test "dbx wizard --port out-of-range errors clearly" {
+  run "$DBX_BIN" wizard --remote --port 99999
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"out of range"* ]]
+}
