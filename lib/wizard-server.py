@@ -7,6 +7,7 @@
 # process on exit.
 
 import argparse
+import datetime
 import http.server
 import json
 import os
@@ -90,6 +91,11 @@ def parse_args():
         "--runs-fragment",
         required=True,
         help="Path to wizard-runs.html (audit-log Runs view)",
+    )
+    p.add_argument(
+        "--dashboard-fragment",
+        required=True,
+        help="Path to wizard-dashboard.html (landing-tab health view)",
     )
     p.add_argument(
         "--audit-dir",
@@ -434,6 +440,349 @@ def write_schedules_block(config_path: str, schedules):
     return True, None
 
 
+def _parse_iso8601_utc(ts):
+    """Parse an ISO 8601 timestamp with a trailing 'Z' (the audit_log format)
+    into a timezone-aware UTC datetime. Returns None if the string can't be
+    parsed — callers treat a None as "no successful/failed run seen yet"
+    rather than failing the whole dashboard render."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    # `datetime.fromisoformat` accepts the "+00:00" form natively; rewrite
+    # the trailing Z. This avoids pulling in dateutil for one timestamp shape.
+    s = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _compute_next_schedule_fire(when, now):
+    """Return the next ISO 8601 UTC timestamp this schedule expression should
+    fire at, given the current time. Mirrors lib/schedule.sh:parse_schedule's
+    grammar (hourly | daily[@H] | weekly[@D:H] | raw cron). For raw cron we
+    return tomorrow at 00:00 UTC — the v1 goal is "show the user something
+    plausible" rather than full cron evaluation. Returns None if `when` is
+    not a recognisable shape."""
+    if not isinstance(when, str) or not when:
+        return None
+
+    s = when.strip()
+    # `now` is timezone-aware UTC; align all comparisons there.
+
+    def at(year, month, day, hour, minute=0):
+        return datetime.datetime(
+            year, month, day, hour, minute, 0, tzinfo=datetime.timezone.utc
+        )
+
+    if s == "hourly":
+        # Next top of the hour.
+        nxt = now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+        return nxt
+
+    if s == "daily" or s.startswith("daily@"):
+        hour = 2
+        if s.startswith("daily@"):
+            tail = s[len("daily@"):]
+            try:
+                hour = int(tail)
+            except ValueError:
+                return None
+            if not (0 <= hour <= 23):
+                return None
+        today = at(now.year, now.month, now.day, hour)
+        if today <= now:
+            today = today + datetime.timedelta(days=1)
+        return today
+
+    if s == "weekly" or s.startswith("weekly@"):
+        day = 0
+        hour = 2
+        if s.startswith("weekly@"):
+            tail = s[len("weekly@"):]
+            # weekly@<D>:<H> — D is 0..6 (Sun..Sat) per parse_schedule's docstring.
+            if ":" not in tail:
+                return None
+            d_str, _, h_str = tail.partition(":")
+            try:
+                day = int(d_str)
+                hour = int(h_str)
+            except ValueError:
+                return None
+            if not (0 <= day <= 6) or not (0 <= hour <= 23):
+                return None
+        # Python's weekday(): Monday=0..Sunday=6. cron's: Sunday=0..Saturday=6.
+        # Map cron-D → Python weekday: Sun(0)→6, Mon(1)→0, ..., Sat(6)→5.
+        py_weekday = (day + 6) % 7
+        candidate = at(now.year, now.month, now.day, hour)
+        delta_days = (py_weekday - now.weekday()) % 7
+        candidate = candidate + datetime.timedelta(days=delta_days)
+        if candidate <= now:
+            candidate = candidate + datetime.timedelta(days=7)
+        return candidate
+
+    # Raw cron expression — return tomorrow at midnight as a "you have
+    # something scheduled" placeholder. Better than null; honest about
+    # being approximate.
+    tomorrow = (now + datetime.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return tomorrow
+
+
+def _read_audit_log_full(audit_dir):
+    """Read every line of audit.log, parse, return list of dicts (oldest
+    first). Returns [] if the file's missing. Used by the dashboard, which
+    needs all-time per-pair last_success/last_failure, not just a tail."""
+    audit_path = os.path.join(audit_dir, "audit.log")
+    if not os.path.isfile(audit_path):
+        return []
+    try:
+        with open(audit_path) as f:
+            raw = f.read()
+    except OSError:
+        return []
+    entries = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _read_schedules_block(config_path):
+    """Return the schedules[] array from config.json (or []). Tolerant of
+    missing/malformed config so the dashboard can still render."""
+    if not config_path or not os.path.isfile(config_path):
+        return []
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(cfg, dict):
+        return []
+    schedules = cfg.get("schedules", [])
+    if not isinstance(schedules, list):
+        return []
+    return schedules
+
+
+def compute_dashboard(data_dir, audit_dir, config_path, now=None):
+    """Compose the dashboard payload from DATA_DIR + audit.log + schedules[].
+
+    Walks DATA_DIR for host/db pairs that have at least one backup file;
+    finds the most recent success and most recent failure for each from the
+    audit log; matches schedules; computes a status bucket from the most
+    recent backup's age (fresh <24h, aging <7d, else stale).
+
+    Sort: stale → aging → fresh (broken first). Within a bucket, oldest-
+    backup first so the user sees the worst-off pairs at the top of each
+    bucket.
+
+    Pass `now` (timezone-aware UTC) for test determinism."""
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+    # 1. Enumerate host/db pairs that have actual backup files on disk.
+    pairs = {}   # (host, db) -> {newest_file: dict, total_bytes: int, count: int}
+    if os.path.isdir(data_dir):
+        for host in sorted(os.listdir(data_dir)):
+            host_dir = os.path.join(data_dir, host)
+            if not os.path.isdir(host_dir) or not IDENT_RE.match(host):
+                continue
+            for db in sorted(os.listdir(host_dir)):
+                db_dir = os.path.join(host_dir, db)
+                if not os.path.isdir(db_dir) or not IDENT_RE.match(db):
+                    continue
+                newest = None
+                total_bytes = 0
+                count = 0
+                for fname in os.listdir(db_dir):
+                    if not (fname.endswith(".sql.zst")
+                            or fname.endswith(".sql.zst.age")
+                            or fname.endswith(".sql.zst.gpg")):
+                        continue
+                    path = os.path.join(db_dir, fname)
+                    try:
+                        stat = os.stat(path)
+                    except OSError:
+                        continue
+                    count += 1
+                    total_bytes += stat.st_size
+                    if newest is None or stat.st_mtime > newest["mtime"]:
+                        newest = {
+                            "file": path,
+                            "filename": fname,
+                            "mtime": stat.st_mtime,
+                            "size": stat.st_size,
+                        }
+                if newest is not None:
+                    pairs[(host, db)] = {
+                        "newest": newest,
+                        "total_bytes": total_bytes,
+                        "count": count,
+                    }
+
+    # 2. Walk audit.log once and index newest success + newest failure per pair.
+    audit_entries = _read_audit_log_full(audit_dir)
+    last_success = {}   # (host, db) -> entry
+    last_failure = {}
+    for entry in audit_entries:
+        if entry.get("action") != "backup":
+            continue
+        host = entry.get("db_host")
+        db = entry.get("database")
+        if not isinstance(host, str) or not isinstance(db, str):
+            continue
+        key = (host, db)
+        ts = _parse_iso8601_utc(entry.get("timestamp"))
+        if ts is None:
+            continue
+        outcome = entry.get("outcome")
+        bucket = last_success if outcome == "success" else last_failure if outcome == "failure" else None
+        if bucket is None:
+            continue
+        existing = bucket.get(key)
+        if existing is None or ts > existing[0]:
+            bucket[key] = (ts, entry)
+
+    # 3. Schedules[] from config.json, indexed by (host, db) → when.
+    schedules = _read_schedules_block(config_path)
+    sched_by_pair = {}
+    for s in schedules:
+        if not isinstance(s, dict):
+            continue
+        h = s.get("host")
+        d = s.get("database")
+        w = s.get("when")
+        if isinstance(h, str) and isinstance(d, str) and isinstance(w, str):
+            sched_by_pair[(h, d)] = w
+
+    # 4. Build the per-pair card payload.
+    cards = []
+    for (host, db), info in pairs.items():
+        newest = info["newest"]
+        newest_ts = datetime.datetime.fromtimestamp(
+            newest["mtime"], tz=datetime.timezone.utc
+        )
+
+        # Prefer the audit-log success row for last_success (it carries the
+        # original ISO 8601 timestamp + size) but fall back to filesystem
+        # mtime when no audit entry exists. Either way `age_seconds` drives
+        # the status chip.
+        success_entry = last_success.get((host, db))
+        if success_entry is not None:
+            ts_dt, audit_row = success_entry
+            age_sec = int((now - ts_dt).total_seconds())
+            last_success_payload = {
+                "timestamp": ts_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "age_seconds": max(0, age_sec),
+                "size": _coerce_int(audit_row.get("size")),
+                "file": audit_row.get("file") or newest["file"],
+            }
+        else:
+            age_sec = int((now - newest_ts).total_seconds())
+            last_success_payload = {
+                "timestamp": newest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "age_seconds": max(0, age_sec),
+                "size": newest["size"],
+                "file": newest["file"],
+            }
+
+        # Status from age of most recent SUCCESS we can attest to.
+        if age_sec < 86400:
+            status = "fresh"
+        elif age_sec < 86400 * 7:
+            status = "aging"
+        else:
+            status = "stale"
+
+        # Failure → expose the error field if the audit row carried one.
+        # audit_backup() doesn't write `error` today but failures may, and
+        # the spec asks us to surface it when present.
+        failure_entry = last_failure.get((host, db))
+        if failure_entry is not None:
+            f_ts, f_row = failure_entry
+            last_failure_payload = {
+                "timestamp": f_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "error": f_row.get("error") or "",
+            }
+        else:
+            last_failure_payload = None
+
+        when_expr = sched_by_pair.get((host, db))
+        if when_expr:
+            next_at = _compute_next_schedule_fire(when_expr, now)
+            next_scheduled_payload = {
+                "when": when_expr,
+                "next_at": next_at.strftime("%Y-%m-%dT%H:%M:%SZ") if next_at else None,
+            }
+        else:
+            next_scheduled_payload = None
+
+        cards.append({
+            "host": host,
+            "database": db,
+            "last_success": last_success_payload,
+            "last_failure": last_failure_payload,
+            "next_scheduled": next_scheduled_payload,
+            "status": status,
+        })
+
+    # 5. Sort: stale → aging → fresh, then oldest-backup first inside each
+    # bucket (highest risk first), then host/db alphabetic as a stable
+    # tiebreak. Negating age_seconds gives descending age within a bucket.
+    status_rank = {"stale": 0, "aging": 1, "fresh": 2}
+    cards.sort(key=lambda c: (
+        status_rank.get(c["status"], 99),
+        -c["last_success"]["age_seconds"],
+        c["host"], c["database"],
+    ))
+
+    # 6. Top-line summary strip.
+    total_backups = sum(p["count"] for p in pairs.values())
+    total_bytes = sum(p["total_bytes"] for p in pairs.values())
+    hosts = len({host for (host, _) in pairs})
+    databases = len(pairs)
+    fresh = sum(1 for c in cards if c["status"] == "fresh")
+    aging = sum(1 for c in cards if c["status"] == "aging")
+    stale = sum(1 for c in cards if c["status"] == "stale")
+
+    return {
+        "summary": {
+            "total_backups": total_backups,
+            "total_bytes": total_bytes,
+            "hosts": hosts,
+            "databases": databases,
+            "fresh": fresh,
+            "aging": aging,
+            "stale": stale,
+        },
+        "cards": cards,
+    }
+
+
+def _coerce_int(v):
+    """audit_log writes everything as strings (jq --arg), so size/duration
+    arrive as numeric strings. Coerce to int when possible; pass null
+    through; return null for un-coercible strings."""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
@@ -456,6 +805,8 @@ def make_handler(args):
             schedule = f.read()
         with open(args.runs_fragment) as f:
             runs = f.read()
+        with open(args.dashboard_fragment) as f:
+            dashboard = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
@@ -464,6 +815,7 @@ def make_handler(args):
                  .replace("<!-- __DBX_RESTORE_FRAGMENT__ -->", restore)
                  .replace("<!-- __DBX_SCHEDULE_FRAGMENT__ -->", schedule)
                  .replace("<!-- __DBX_RUNS_FRAGMENT__ -->", runs)
+                 .replace("<!-- __DBX_DASHBOARD_FRAGMENT__ -->", dashboard)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -689,6 +1041,16 @@ def make_handler(args):
                     send_json(self, 500, {"error": str(e)})
                     return
                 send_json(self, 200, state)
+                return
+            if path == "/api/dashboard":
+                # Composed view: host/db pairs from DATA_DIR + per-pair
+                # last_success/last_failure from audit.log + schedules[]
+                # from config.json. Always returns 200; missing audit log
+                # / config / data dir all degrade to empty payloads rather
+                # than 5xx.
+                send_json(self, 200, compute_dashboard(
+                    args.data_dir, args.audit_dir, args.config_path
+                ))
                 return
             if path == "/api/config":
                 # Used by the Config view to pre-populate the form with the

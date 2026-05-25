@@ -128,7 +128,7 @@ EOF
 
   require_jq
 
-  local token port done_marker html_template form_fragment backups_fragment backup_fragment restore_fragment schedule_fragment runs_fragment dbx_bin audit_dir
+  local token port done_marker html_template form_fragment backups_fragment backup_fragment restore_fragment schedule_fragment runs_fragment dashboard_fragment dbx_bin audit_dir
   token=$(wizard_make_token)
   if [[ -n "$user_port" ]]; then
     [[ "$user_port" =~ ^[0-9]+$ ]] || die "Invalid --port value: $user_port"
@@ -146,6 +146,7 @@ EOF
   restore_fragment="$LIB_DIR/wizard-restore.html"
   schedule_fragment="$LIB_DIR/wizard-schedule.html"
   runs_fragment="$LIB_DIR/wizard-runs.html"
+  dashboard_fragment="$LIB_DIR/wizard-dashboard.html"
   # AUDIT_LOG_DIR is exported by core.sh (line 646) and already respects
   # $DBX_AUDIT_DIR, so it's the single source of truth for the audit-log
   # location across the CLI and the wizard server.
@@ -162,6 +163,7 @@ EOF
   [[ -f "$restore_fragment"  ]] || die "Wizard restore fragment missing: $restore_fragment (re-run install.sh to repair)"
   [[ -f "$schedule_fragment" ]] || die "Wizard schedule fragment missing: $schedule_fragment (re-run install.sh to repair)"
   [[ -f "$runs_fragment"     ]] || die "Wizard runs fragment missing: $runs_fragment (re-run install.sh to repair)"
+  [[ -f "$dashboard_fragment" ]] || die "Wizard dashboard fragment missing: $dashboard_fragment (re-run install.sh to repair)"
 
   mkdir -p "$(dirname "$CONFIG_FILE")"
 
@@ -180,6 +182,7 @@ EOF
     --restore-fragment "$restore_fragment" \
     --schedule-fragment "$schedule_fragment" \
     --runs-fragment "$runs_fragment" \
+    --dashboard-fragment "$dashboard_fragment" \
     --config-path "$CONFIG_FILE" \
     --data-dir "$DATA_DIR" \
     --audit-dir "$audit_dir" \
