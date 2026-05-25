@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>dbx config wizard</title>
+  <title>dbx</title>
   <style>
     :root {
       --md-default-bg-color: #fff;
@@ -17,6 +17,9 @@
       --md-accent-bg-color: #fff;
       --md-code-bg-color: #f4f5f7;
       --md-code-font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --dbx-sidebar-bg: #f8f9fb;
+      --dbx-sidebar-fg: #2a2d33;
+      --dbx-sidebar-active-bg: #e8ecf3;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -28,23 +31,85 @@
         --md-accent-fg-color: #4ea8de;
         --md-accent-bg-color: #14161a;
         --md-code-bg-color: #1d2027;
+        --dbx-sidebar-bg: #1a1d22;
+        --dbx-sidebar-fg: #d4d7dd;
+        --dbx-sidebar-active-bg: #2b313a;
       }
     }
     html, body { margin: 0; padding: 0; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.5; }
-    .dbx-shell { max-width: 1280px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
-    .dbx-shell__header { margin-bottom: 1.5rem; }
-    .dbx-shell__title { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.25rem; }
-    .dbx-shell__subtitle { color: var(--md-default-fg-color--light); margin: 0; }
+
+    .dbx-app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .dbx-app__sidebar { background: var(--dbx-sidebar-bg); color: var(--dbx-sidebar-fg); padding: 1.5rem 0; border-right: 1px solid var(--md-default-fg-color--lightest); }
+    .dbx-app__brand { font-size: 1.25rem; font-weight: 700; padding: 0 1.5rem 1.5rem; letter-spacing: -0.02em; }
+    .dbx-app__brand small { display: block; font-size: 0.75rem; font-weight: 400; color: var(--md-default-fg-color--light); letter-spacing: 0; }
+    .dbx-app__nav { display: flex; flex-direction: column; }
+    .dbx-app__nav a { cursor: pointer; padding: 0.5rem 1.5rem; color: inherit; text-decoration: none; border-left: 3px solid transparent; }
+    .dbx-app__nav a:hover:not(.disabled) { background: var(--dbx-sidebar-active-bg); }
+    .dbx-app__nav a.active { background: var(--dbx-sidebar-active-bg); border-left-color: var(--md-accent-fg-color); font-weight: 600; }
+    .dbx-app__nav a.disabled { color: var(--md-default-fg-color--light); cursor: not-allowed; }
+    .dbx-app__nav a.disabled small { display: block; font-size: 0.7rem; }
+    .dbx-app__main { padding: 1.5rem 1.75rem 4rem; max-width: 1200px; }
+
+    .dbx-view__header { margin-bottom: 1.5rem; }
+    .dbx-view__title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.25rem; }
+    .dbx-view__subtitle { color: var(--md-default-fg-color--light); margin: 0; }
+
+    /* Backups view */
+    .dbx-backups__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
+    .dbx-backups__search { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); }
+    .dbx-backups__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+    .dbx-backups__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .dbx-backups__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
+    .dbx-backups__table td { padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
+    .dbx-backups__table tbody tr:hover { background: var(--md-code-bg-color); }
+    .dbx-backups__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color); }
+    .dbx-backups__chip--age { background: rgba(74, 158, 76, 0.15); color: #2f7d31; }
+    .dbx-backups__chip--gpg { background: rgba(11, 107, 203, 0.15); color: var(--md-accent-fg-color); }
+    .dbx-backups__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.375rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; }
+    .dbx-backups__btn:hover { opacity: 0.92; }
+    .dbx-backups__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script>
+    // Shared app state lives here so child views (Backups / Restore) can
+    // coordinate without prop-drilling. Read by every view via $store.dbx.
+    document.addEventListener('alpine:init', () => {
+      const token = new URLSearchParams(window.location.search).get('token') || '';
+      Alpine.store('dbx', {
+        view: 'config',
+        token,
+        api(path) { return `/api${path}?token=${this.token}`; },
+        selectedBackup: null,   // populated by Backups view, read by Restore view (PR-1 follow-up)
+      });
+    });
+  </script>
 </head>
 <body>
-  <div class="dbx-shell">
-    <header class="dbx-shell__header">
-      <h1 class="dbx-shell__title">dbx config wizard</h1>
-      <p class="dbx-shell__subtitle">Build your <code>~/.config/dbx/config.json</code> here, then click <strong>Save &amp; exit</strong> — the terminal will pick it up and finish.</p>
-    </header>
-    <!-- __DBX_FORM_FRAGMENT__ -->
+  <div class="dbx-app">
+    <aside class="dbx-app__sidebar">
+      <div class="dbx-app__brand">dbx<small>local control panel</small></div>
+      <nav class="dbx-app__nav" x-data>
+        <a @click="$store.dbx.view = 'config'"  :class="{active: $store.dbx.view === 'config'}">Config</a>
+        <a @click="$store.dbx.view = 'backups'" :class="{active: $store.dbx.view === 'backups'}">Backups</a>
+        <a @click="$store.dbx.view = 'restore'" :class="{active: $store.dbx.view === 'restore'}">Restore</a>
+        <a class="disabled" title="Lands in PR-2">Schedule<small>PR-2</small></a>
+      </nav>
+    </aside>
+    <main class="dbx-app__main">
+      <section x-data x-show="$store.dbx.view === 'config'">
+        <header class="dbx-view__header">
+          <h2 class="dbx-view__title">Config</h2>
+          <p class="dbx-view__subtitle">Build your <code>~/.config/dbx/config.json</code>, then click <strong>Save &amp; exit</strong>.</p>
+        </header>
+        <!-- __DBX_FORM_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'backups'">
+        <!-- __DBX_BACKUPS_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'restore'">
+        <!-- __DBX_RESTORE_FRAGMENT__ -->
+      </section>
+    </main>
   </div>
 </body>
 </html>

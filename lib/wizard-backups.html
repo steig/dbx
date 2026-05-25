@@ -1,0 +1,141 @@
+<!--
+  Backups view fragment. Loaded by `dbx wizard` only (NOT embedded in mkdocs).
+  Fetches /api/backups on mount and renders a filterable table. The "Restore"
+  button stages the row in $store.dbx.selectedBackup and switches view — the
+  Restore view itself lands in a follow-up commit.
+-->
+<div x-data="dbxBackups()" x-init="load()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Backups</h2>
+    <p class="dbx-view__subtitle" x-text="subtitle()"></p>
+  </header>
+
+  <div class="dbx-backups__toolbar">
+    <input type="search" class="dbx-backups__search" x-model="filter"
+           placeholder="Filter by host or database…">
+    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
+  </div>
+
+  <template x-if="loading">
+    <p class="dbx-backups__empty">Loading…</p>
+  </template>
+
+  <template x-if="!loading && rows.length === 0">
+    <p class="dbx-backups__empty">No backups found under <code x-text="dataDir() || '~/.data/dbx'"></code>.</p>
+  </template>
+
+  <template x-if="!loading && rows.length > 0">
+    <table class="dbx-backups__table">
+      <thead>
+        <tr>
+          <th>Host</th>
+          <th>Database</th>
+          <th>Backup</th>
+          <th>Size</th>
+          <th>Encryption</th>
+          <th>Source</th>
+          <th>When</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="b in filtered()" :key="b.path">
+          <tr>
+            <td x-text="b.host"></td>
+            <td x-text="b.database"></td>
+            <td><code x-text="b.filename"></code></td>
+            <td x-text="formatSize(b.size)"></td>
+            <td>
+              <span class="dbx-backups__chip"
+                    :class="{ 'dbx-backups__chip--age': b.encryption === 'age',
+                              'dbx-backups__chip--gpg': b.encryption === 'gpg' }"
+                    x-text="b.encryption"></span>
+            </td>
+            <td x-text="sourceLabel(b)"></td>
+            <td x-text="formatWhen(b)"></td>
+            <td>
+              <button class="dbx-backups__btn" @click="restore(b)"
+                      title="Restore view lands in a follow-up commit">Restore</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </template>
+</div>
+
+<script>
+  function dbxBackups() {
+    return {
+      rows: [],
+      loading: true,
+      filter: '',
+
+      async load() {
+        this.loading = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/backups'));
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          this.rows = await r.json();
+        } catch (e) {
+          this.rows = [];
+          console.error('Failed to load backups:', e);
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      filtered() {
+        const f = this.filter.trim().toLowerCase();
+        if (!f) return this.rows;
+        return this.rows.filter(b =>
+          b.host.toLowerCase().includes(f) || b.database.toLowerCase().includes(f)
+        );
+      },
+
+      subtitle() {
+        if (this.loading) return 'Reading from your DATA_DIR…';
+        const n = this.rows.length;
+        if (n === 0) return 'No backups yet.';
+        const filtered = this.filtered().length;
+        return filtered === n
+          ? `${n} backup${n === 1 ? '' : 's'} across ${this.uniqueHosts()} host${this.uniqueHosts() === 1 ? '' : 's'}.`
+          : `${filtered} of ${n} backups matching the filter.`;
+      },
+
+      uniqueHosts() {
+        return new Set(this.rows.map(r => r.host)).size;
+      },
+
+      dataDir() {
+        return null;   // server doesn't expose DATA_DIR yet; default subtitle copy
+      },
+
+      formatSize(n) {
+        if (n == null) return '—';
+        if (n < 1024) return n + ' B';
+        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
+        return (n / 1024 ** 3).toFixed(2) + ' GB';
+      },
+
+      formatWhen(b) {
+        if (b.timestamp) return b.timestamp;
+        if (b.mtime) return new Date(b.mtime * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
+        return '—';
+      },
+
+      sourceLabel(b) {
+        const flavor = b.source_flavor || '';
+        const major  = b.source_major_version || '';
+        if (!flavor && !major) return '—';
+        return `${flavor} ${major}`.trim();
+      },
+
+      restore(b) {
+        Alpine.store('dbx').selectedBackup = b;
+        Alpine.store('dbx').view = 'restore';
+      },
+    };
+  }
+</script>

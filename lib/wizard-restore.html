@@ -1,0 +1,243 @@
+<!--
+  Restore view fragment. Loaded by `dbx wizard` only.
+  Wraps `dbx restore` with a form + EventSource log stream + cancel.
+-->
+<style>
+  /* Restore-view styles, scoped via the wrapper class. */
+  .dbx-restore__source { padding: 0.75rem 1rem; background: var(--md-code-bg-color); border-radius: 6px; margin-bottom: 1rem; font-family: var(--md-code-font-family); font-size: 0.875rem; }
+  .dbx-restore__source--empty { color: var(--md-default-fg-color--light); font-style: italic; font-family: inherit; }
+  .dbx-restore__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem 1.25rem; margin-bottom: 1rem; }
+  .dbx-restore__field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .dbx-restore__field label { font-size: 0.8125rem; font-weight: 500; color: var(--md-default-fg-color); }
+  .dbx-restore__field input, .dbx-restore__field select { padding: 0.4rem 0.6rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
+  .dbx-restore__field small { font-size: 0.75rem; color: var(--md-default-fg-color--light); }
+  .dbx-restore__checks { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1.25rem; margin-bottom: 1rem; }
+  .dbx-restore__checks label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
+  .dbx-restore__actions { display: flex; gap: 0.75rem; margin-bottom: 1rem; }
+  .dbx-restore__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
+  .dbx-restore__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .dbx-restore__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
+  .dbx-restore__btn--danger { background: #c43d3d; }
+  .dbx-restore__log { background: #1a1d22; color: #d4d7dd; font-family: var(--md-code-font-family); font-size: 0.8125rem; padding: 1rem; border-radius: 6px; min-height: 200px; max-height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .dbx-restore__log--empty { color: #666; font-style: italic; }
+  .dbx-restore__status { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.875rem; }
+  .dbx-restore__status--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
+  .dbx-restore__status--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
+  .dbx-restore__status--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
+</style>
+
+<div x-data="dbxRestore()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Restore</h2>
+    <p class="dbx-view__subtitle">
+      Wraps <code>dbx restore</code> against a local backup. Output streams live;
+      the restore keeps running if you close the browser.
+    </p>
+  </header>
+
+  <div class="dbx-restore__source">
+    <template x-if="!source">
+      <span class="dbx-restore__source--empty">Pick a backup from the Backups tab to begin.</span>
+    </template>
+    <template x-if="source">
+      <span>
+        <strong x-text="source.host"></strong> /
+        <strong x-text="source.database"></strong> &nbsp;·&nbsp;
+        <code x-text="source.filename"></code> &nbsp;·&nbsp;
+        <span x-text="source.encryption" class="dbx-backups__chip"
+              :class="{ 'dbx-backups__chip--age': source.encryption === 'age',
+                        'dbx-backups__chip--gpg': source.encryption === 'gpg' }"></span>
+      </span>
+    </template>
+  </div>
+
+  <template x-if="source">
+    <div>
+      <div class="dbx-restore__grid">
+        <div class="dbx-restore__field">
+          <label for="dbx-r-name">Target database name</label>
+          <input id="dbx-r-name" type="text" x-model="form.name"
+                 placeholder="(auto: e.g. myapp_v1_20260524)"
+                 pattern="[A-Za-z0-9][A-Za-z0-9_-]*">
+          <small>Letters, numbers, <code>_</code> and <code>-</code>. Leave blank to let dbx auto-generate.</small>
+        </div>
+        <div class="dbx-restore__field">
+          <label for="dbx-r-into">Restore into container</label>
+          <select id="dbx-r-into" x-model="form.into" :disabled="!containers.length">
+            <option value="">(default: managed postgres-dbx / mysql-dbx)</option>
+            <template x-for="name in containers" :key="name">
+              <option :value="name" x-text="name"></option>
+            </template>
+          </select>
+          <small>Optional. Postgres only; restore aborts if you point at a MySQL container.</small>
+        </div>
+      </div>
+
+      <div class="dbx-restore__checks">
+        <label><input type="checkbox" x-model="form.no_post_restore"> Skip post-restore hooks</label>
+        <label><input type="checkbox" x-model="form.hooks_only">       Re-run hooks only (no engine restore)</label>
+        <label><input type="checkbox" x-model="form.no_scrub">          Skip PII scrub gate (break-glass)</label>
+        <label><input type="checkbox" x-model="form.keep_download">     Keep downloaded backup after restore</label>
+      </div>
+
+      <div class="dbx-restore__actions">
+        <button class="dbx-restore__btn" @click="start()" :disabled="running || !source">
+          <span x-show="!running">Start restore</span>
+          <span x-show="running">Restoring…</span>
+        </button>
+        <button class="dbx-restore__btn dbx-restore__btn--danger" @click="cancel()" :disabled="!running">
+          Cancel
+        </button>
+        <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="clearLog()" :disabled="running || !log.length">
+          Clear log
+        </button>
+      </div>
+
+      <template x-if="status">
+        <div class="dbx-restore__status"
+             :class="statusClass()" x-text="status"></div>
+      </template>
+
+      <div class="dbx-restore__log" :class="{ 'dbx-restore__log--empty': !log.length }">
+        <template x-if="!log.length">
+          <span>(no output yet — click "Start restore" to begin)</span>
+        </template>
+        <template x-for="(line, i) in log" :key="i">
+          <div x-text="line"></div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<script>
+  function dbxRestore() {
+    return {
+      source: null,
+      containers: [],
+      form: { name: '', into: '', no_post_restore: false, hooks_only: false, no_scrub: false, keep_download: false },
+      log: [],
+      jobId: null,
+      eventSource: null,
+      running: false,
+      status: '',
+      exitCode: null,
+
+      init() {
+        // Re-read the selected backup whenever the user switches into the
+        // Restore view. Cheaper than a Watch on $store.dbx.selectedBackup
+        // and keeps the form snapshot of what was clicked in Backups.
+        this.$watch('$store.dbx.view', (v) => { if (v === 'restore') this.refresh(); });
+        this.refresh();
+      },
+
+      async refresh() {
+        this.source = Alpine.store('dbx').selectedBackup;
+        if (!this.source) return;
+        // Reset form + log when the source changes.
+        if (!this.running) {
+          this.log = [];
+          this.status = '';
+          this.exitCode = null;
+        }
+        // Pull container list for the --into picker.
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/containers'));
+          if (r.ok) this.containers = await r.json();
+        } catch (e) { this.containers = []; }
+      },
+
+      buildBody() {
+        const body = { source: this.source.path };
+        if (this.form.name)            body.name = this.form.name;
+        if (this.form.into)            body.into = this.form.into;
+        if (this.form.no_post_restore) body.no_post_restore = true;
+        if (this.form.hooks_only)      body.hooks_only = true;
+        if (this.form.no_scrub)        body.no_scrub = true;
+        if (this.form.keep_download)   body.keep_download = true;
+        return body;
+      },
+
+      async start() {
+        if (this.running) return;
+        this.log = [];
+        this.status = 'Starting restore…';
+        this.running = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/restore'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this.buildBody()),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+            this.status = `Failed to start: ${err.error || r.status}`;
+            this.running = false;
+            return;
+          }
+          const { job_id } = await r.json();
+          this.jobId = job_id;
+          this.attachStream(job_id);
+        } catch (e) {
+          this.status = `Network error: ${e}`;
+          this.running = false;
+        }
+      },
+
+      attachStream(jobId) {
+        // EventSource handles reconnects on transient drops automatically.
+        const url = Alpine.store('dbx').api(`/jobs/${jobId}/events`);
+        const es = new EventSource(url);
+        this.eventSource = es;
+        es.onmessage = (ev) => {
+          try {
+            const { line } = JSON.parse(ev.data);
+            if (line !== undefined) this.log.push(line);
+          } catch (e) { /* ignore */ }
+        };
+        es.addEventListener('done', (ev) => {
+          try {
+            const { exit_code } = JSON.parse(ev.data);
+            this.exitCode = exit_code;
+            this.status = exit_code === 0
+              ? 'Restore completed successfully.'
+              : `Restore failed (exit ${exit_code}).`;
+          } catch (e) {
+            this.status = 'Restore finished (unknown exit code).';
+          } finally {
+            this.running = false;
+            es.close();
+            this.eventSource = null;
+          }
+        });
+        es.onerror = () => {
+          // EventSource auto-reconnects; only treat as fatal if the job has
+          // ended on the server side (closed stream + no done event seen).
+          if (!this.running) { es.close(); this.eventSource = null; }
+        };
+      },
+
+      async cancel() {
+        if (!this.jobId) return;
+        try {
+          await fetch(Alpine.store('dbx').api(`/jobs/${this.jobId}/cancel`), { method: 'POST' });
+        } catch (e) { /* swallow */ }
+        // The server's done event will arrive shortly after SIGTERM and
+        // flip running=false. No need to do it here.
+      },
+
+      clearLog() {
+        this.log = [];
+        this.status = '';
+        this.exitCode = null;
+      },
+
+      statusClass() {
+        if (this.running) return 'dbx-restore__status--running';
+        if (this.exitCode === 0) return 'dbx-restore__status--ok';
+        if (this.exitCode != null) return 'dbx-restore__status--err';
+        return '';
+      },
+    };
+  }
+</script>
