@@ -17,6 +17,7 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
   - Status chip backgrounds (`--age`, `--gpg`, `--complete`, `--incomplete`, `--prod`, `--stage`) bumped from ~15% alpha to ~28-30% so they read as filled chips, not whisper-tints. Dark-mode chip text is lightened to keep legibility on the more-saturated fills.
   - Section dividers in main views: `.dbx-view__header` now has a bottom border so the header reliably separates from the table/form below.
   - Active sidebar nav item is rendered in the accent color (in addition to the left-edge accent bar) so the current tab is unmistakable.
+- **`dbx restore <TAB>` shows only `<host>/<db>/latest` rows by default.** Previously the completion brain emitted every backup filename for every host/db pair *as well as* the `latest` alias — for a moderately-used data dir that was hundreds of timestamped rows in the TAB ring, and the `latest` alias (which is what the user wants ~95% of the time) was buried in the middle. Now the default list is one `<host>/<db>/latest` per pair. Drill-down still works: once you've typed `host/db/<prefix>`, TAB emits the specific filenames for that one host/db so you can complete a timestamp. Lifts a small UX friction on every restore.
 
 ### Fixed
 

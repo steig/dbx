@@ -132,14 +132,48 @@ weekly@1:3
 EOF
 }
 
-# Echo restore candidates from $DATA_DIR. Two shapes per host/db pair:
-#   <host>/<db>/latest             (the "newest backup" alias)
-#   <host>/<db>/<backup-filename>  (the specific file shape)
+# Echo restore candidates from $DATA_DIR.
+#
+# Default shape (no partial / 1-2 path components): emit only the
+# `<host>/<db>/latest` alias per host/db pair. Listing every backup
+# filename for every host/db floods the TAB ring with hundreds of
+# timestamped filenames the user almost never wants to type.
+#
+# Drill-down shape: when the user has typed a partial with 3+ slash
+# components (e.g. `prod/myapp/myapp_2026`), they've already picked a
+# host+db and are looking for a specific timestamp — emit the actual
+# filenames for that host/db so TAB can narrow them.
+#
 # Walk is bounded to depth=2 under DATA_DIR (host/, host/db/) so this
 # stays fast even with thousands of backups.
+#
+# Args (optional): $1=current partial — used to decide drill-down.
 _dbx_restore_candidates() {
   [[ -d "$DATA_DIR" ]] || return 0
+  local partial="${1:-}"
   local host_dir db_dir host db backup
+
+  # Drill-down: partial like `host/db/<prefix>` — emit specific files
+  # for that one host/db pair only. We count slashes to detect the
+  # third-component case. `latest` typed as the third component still
+  # gets the alias suggestion via the default branch below if compgen
+  # filters down to it from the full latest list.
+  if [[ "$partial" == */*/* ]]; then
+    local target_host="${partial%%/*}"
+    local rest="${partial#*/}"
+    local target_db="${rest%%/*}"
+    local db_path="$DATA_DIR/$target_host/$target_db"
+    if [[ -n "$target_host" && -n "$target_db" && -d "$db_path" ]]; then
+      printf '%s/%s/latest\n' "$target_host" "$target_db"
+      for backup in "$db_path"/*.sql.zst "$db_path"/*.sql.zst.age "$db_path"/*.sql.zst.gpg; do
+        [[ -f "$backup" ]] || continue
+        printf '%s/%s/%s\n' "$target_host" "$target_db" "$(basename "$backup")"
+      done
+      return 0
+    fi
+  fi
+
+  # Default: one `<host>/<db>/latest` per pair, nothing else.
   for host_dir in "$DATA_DIR"/*/; do
     [[ -d "$host_dir" ]] || continue
     host=$(basename "$host_dir")
@@ -147,13 +181,6 @@ _dbx_restore_candidates() {
       [[ -d "$db_dir" ]] || continue
       db=$(basename "$db_dir")
       printf '%s/%s/latest\n' "$host" "$db"
-      # List the actual backup files, but only emit the relative
-      # `<host>/<db>/<filename>` form — absolute paths would clutter
-      # the TAB ring without adding value for non-power-users.
-      for backup in "$db_dir"*.sql.zst "$db_dir"*.sql.zst.age "$db_dir"*.sql.zst.gpg; do
-        [[ -f "$backup" ]] || continue
-        printf '%s/%s/%s\n' "$host" "$db" "$(basename "$backup")"
-      done
     done
   done
 }
@@ -218,10 +245,12 @@ dbx_complete() {
       ;;
 
     restore)
-      # `dbx restore <source>` — source is `<host>/<db>/latest` or
-      # a specific backup file under DATA_DIR.
+      # `dbx restore <source>` — source is `<host>/<db>/latest` by
+      # default. If the user has already typed `host/db/<prefix>`,
+      # _dbx_restore_candidates drills into that host/db and emits
+      # specific filenames so they can TAB-complete a timestamp.
       if [[ $count -eq 2 ]]; then
-        _dbx_restore_candidates
+        _dbx_restore_candidates "$cur"
       fi
       ;;
 
@@ -304,8 +333,10 @@ dbx_complete() {
         _dbx_subactions scrub
       elif [[ $count -eq 3 ]]; then
         # `dbx scrub <action> <host>/<db>` — emit the host/db form.
+        # Re-uses the restore candidate walk (which now emits only
+        # `<host>/<db>/latest` rows) and trims the trailing `/latest`.
         case "${words[1]}" in
-          init|check) _dbx_restore_candidates | grep -v '/latest$' \
+          init|check) _dbx_restore_candidates \
                         | awk -F'/' '{print $1"/"$2}' | sort -u ;;
           validate)   _dbx_hosts ;;
         esac

@@ -131,20 +131,64 @@ assert_line_eq() {
   assert_line_eq "staging/cache/latest" "$result"
 }
 
-@test "dbx_complete restore <empty> includes specific backup files" {
+@test "dbx_complete restore <empty> does NOT include specific backup filenames" {
+  # The cluttery `<host>/<db>/<file>` rows used to dominate the TAB
+  # ring and overwhelmed users. They're omitted by default; type the
+  # `host/db/` prefix to drill down (see test below).
   mkdir -p "$DBX_DATA_DIR/prod/app"
   : > "$DBX_DATA_DIR/prod/app/2025-01-01.sql.zst"
+  : > "$DBX_DATA_DIR/prod/app/2025-01-02.sql.zst.age"
   result=$(dbx_complete restore "")
-  assert_line_eq "prod/app/2025-01-01.sql.zst" "$result"
+  assert_line_eq "prod/app/latest" "$result"
+  echo "$result" | grep -q "prod/app/2025-01-01.sql.zst" \
+    && { echo "expected NO specific-file rows by default; got:"; echo "$result"; return 1; } || true
+  echo "$result" | grep -q "prod/app/2025-01-02.sql.zst.age" \
+    && { echo "expected NO specific-file rows by default; got:"; echo "$result"; return 1; } || true
 }
 
-@test "dbx_complete restore handles age-encrypted and gpg-encrypted backups" {
+@test "dbx_complete restore prod/app/ drills into specific filenames for that host/db" {
+  # Once the user has typed `host/db/<anything>`, they've already
+  # picked the host+db and are looking for a specific timestamp.
+  # Emit the actual filenames AND keep the `latest` alias so they
+  # can TAB to either shape.
+  mkdir -p "$DBX_DATA_DIR/prod/app" "$DBX_DATA_DIR/prod/users"
+  : > "$DBX_DATA_DIR/prod/app/2025-01-01.sql.zst"
+  : > "$DBX_DATA_DIR/prod/app/2025-01-02.sql.zst.age"
+  : > "$DBX_DATA_DIR/prod/users/should-not-appear.sql.zst"
+  result=$(dbx_complete restore "prod/app/")
+  assert_line_eq "prod/app/latest"             "$result"
+  assert_line_eq "prod/app/2025-01-01.sql.zst" "$result"
+  assert_line_eq "prod/app/2025-01-02.sql.zst.age" "$result"
+  # Other host/db pairs must not leak into the drill-down output.
+  echo "$result" | grep -q "should-not-appear" \
+    && { echo "unrelated host/db leaked into drill-down:"; echo "$result"; return 1; } || true
+  echo "$result" | grep -q "prod/users" \
+    && { echo "unrelated host/db leaked into drill-down:"; echo "$result"; return 1; } || true
+}
+
+@test "dbx_complete restore drill-down handles age and gpg-encrypted backups" {
   mkdir -p "$DBX_DATA_DIR/prod/app"
   : > "$DBX_DATA_DIR/prod/app/2025-01-01.sql.zst.age"
   : > "$DBX_DATA_DIR/prod/app/2025-01-02.sql.zst.gpg"
-  result=$(dbx_complete restore "")
+  result=$(dbx_complete restore "prod/app/2025-01")
   assert_line_eq "prod/app/2025-01-01.sql.zst.age" "$result"
   assert_line_eq "prod/app/2025-01-02.sql.zst.gpg" "$result"
+}
+
+@test "dbx_complete restore prod/missing/ for unknown db falls back to host/db/latest list" {
+  # If the partial points at a host/db that doesn't exist on disk,
+  # fall back to the default (latest-per-pair) list. compgen on the
+  # caller side filters against the partial so the user sees no
+  # suggestions, which is the correct UX for a typo — but emitting
+  # the default list also keeps the surface area predictable for
+  # tools that drive completion programmatically.
+  mkdir -p "$DBX_DATA_DIR/prod/app"
+  : > "$DBX_DATA_DIR/prod/app/2025-01-01.sql.zst"
+  result=$(dbx_complete restore "prod/nope/")
+  assert_line_eq "prod/app/latest" "$result"
+  # And no specific filenames leak in, even via the fallback.
+  echo "$result" | grep -q ".sql.zst" \
+    && { echo "specific filename leaked into fallback:"; echo "$result"; return 1; } || true
 }
 
 # ----------------------------------------------------------------------------
