@@ -1409,11 +1409,28 @@ EOF
 }
 
 cmd_analyze() {
-  local host="${1:-}"
-  local database="${2:-}"
+  local host="" database="" suggest_scrub=false no_pii_scan=false manifest_output=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --suggest-scrub)   suggest_scrub=true; shift ;;
+      --no-pii-scan)     no_pii_scan=true; shift ;;
+      --manifest-output) manifest_output="$2"; shift 2 ;;
+      --*|-*) die "Unknown analyze option: $1" ;;
+      *)
+        if [[ -z "$host" ]]; then
+          host="$1"
+        elif [[ -z "$database" ]]; then
+          database="$1"
+        else
+          die "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
 
-  [[ -z "$host" ]] && die "Usage: dbx analyze <host> <database>"
-  [[ -z "$database" ]] && die "Usage: dbx analyze <host> <database>"
+  [[ -z "$host" ]] && die "Usage: dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan] [--manifest-output FILE]"
+  [[ -z "$database" ]] && die "Usage: dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan] [--manifest-output FILE]"
 
   require_config
   require_jq
@@ -1431,6 +1448,31 @@ cmd_analyze() {
   local db_type
   db_type=$(get_db_type "$host")
 
+  # PII pre-scan: walk information_schema, dictionary-match each column,
+  # surface candidates BEFORE the existing exclude-data picker. Cheap
+  # (one schema query) and additive — the picker behavior is unchanged.
+  # Skip on --no-pii-scan for the rare case where the user wants the
+  # original flow only.
+  local pii_tsv=""
+  if [[ "$no_pii_scan" != "true" ]]; then
+    log_step "Scanning $database@$host for PII candidates..."
+    local schema_tsv schema_json manifest_json
+    schema_tsv=$(_scrub_query_live_schema_tsv "$host" "$database" 2>/dev/null || true)
+    if [[ -n "$schema_tsv" ]]; then
+      schema_json=$(printf '%s\n' "$schema_tsv" | scrub_schema_tsv_to_json)
+      # Use the host's manifest (if any) so user-extended/excluded
+      # patterns are respected. Falls back to {} for an unconfigured host.
+      manifest_json=$(scrub_read_manifest "$host")
+      pii_tsv=$(scrub_pii_summary_tsv "$schema_json" "$manifest_json")
+    fi
+    _analyze_print_pii_summary "$pii_tsv"
+  fi
+
+  # Optionally write a draft scrub manifest with the suggested strategies.
+  if [[ "$suggest_scrub" == "true" ]]; then
+    _analyze_write_scrub_suggestion "$host" "$database" "$manifest_output"
+  fi
+
   case "$db_type" in
     mysql|mariadb)
       analyze_mysql "$host" "$database"
@@ -1442,6 +1484,69 @@ cmd_analyze() {
       die "Unknown database type: $db_type"
       ;;
   esac
+}
+
+# Print the PII pre-scan summary block. Empty TSV → "No PII candidates".
+# Args: $1 PII summary TSV (table\tcol1,col2,...)
+_analyze_print_pii_summary() {
+  local tsv="$1"
+  echo ""
+  if [[ -z "$tsv" ]]; then
+    log_info "PII pre-scan: no dictionary matches in this schema."
+    echo ""
+    return
+  fi
+  local count
+  count=$(printf '%s\n' "$tsv" | grep -c '	' || true)
+  echo "PII candidates ($count table(s)):"
+  while IFS=$'\t' read -r tbl cols; do
+    [[ -z "$tbl" ]] && continue
+    # Count entries by splitting on comma. bash 3.2-safe: use tr -d to
+    # remove commas and compare lengths instead of `${cols//,/}` which
+    # has known macOS quirks.
+    local n
+    n=$(printf '%s' "$cols" | awk -F',' '{print NF}')
+    printf "  %-30s %d candidate(s): %s\n" "$tbl" "$n" "$cols"
+  done <<< "$tsv"
+  echo ""
+  log_info "Tip: dbx analyze $host $database --suggest-scrub --manifest-output dbx.scrub.json"
+  log_info "     writes a draft manifest with suggested strategies for these columns."
+  echo ""
+}
+
+# Write a draft scrub manifest with suggested strategies for the given
+# (host, database). When --manifest-output is empty, defaults to
+# dbx.scrub.json in the config directory.
+# Args: $1 host, $2 database, $3 output path (may be empty)
+_analyze_write_scrub_suggestion() {
+  local host="$1" database="$2" out="$3"
+  if [[ -z "$out" ]]; then
+    out="$(dirname "$CONFIG_FILE")/dbx.scrub.json"
+  fi
+
+  log_step "Writing suggested scrub manifest to $out..."
+  local schema_tsv schema_json draft pretty
+  schema_tsv=$(_scrub_query_live_schema_tsv "$host" "$database" 2>/dev/null || true)
+  if [[ -z "$schema_tsv" ]]; then
+    log_warn "Skipping --suggest-scrub: schema query returned no rows."
+    return 0
+  fi
+  schema_json=$(printf '%s\n' "$schema_tsv" | scrub_schema_tsv_to_json)
+
+  # Inherit seed_env from existing manifest if configured.
+  local seed_env="DBX_SCRUB_SEED"
+  if scrub_manifest_exists "$host"; then
+    local existing cfgured
+    existing=$(scrub_read_manifest "$host")
+    cfgured=$(jq -r '.seed_env // empty' <<<"$existing")
+    [[ -n "$cfgured" ]] && seed_env="$cfgured"
+  fi
+
+  draft=$(scrub_init_draft_from_schema "$schema_json" "$seed_env" "false")
+  pretty=$(jq '.' <<<"$draft")
+  printf '%s\n' "$pretty" > "$out"
+  log_success "Draft manifest written: $out"
+  log_info "Review, edit, then point hosts.$host.scrub.manifest at this file."
 }
 
 cmd_verify() {
@@ -1804,7 +1909,7 @@ cmd_scrub() {
       cat <<EOF
 Usage:
   dbx scrub init <host>/<database> [--include-empty] [--output FILE]
-  dbx scrub check <host>/<database> [--quiet] [--json]
+  dbx scrub check <host>/<database> [--quiet] [--json] [--manifest FILE]
   dbx scrub validate <host>
 
   init       Connect to source, walk information_schema, emit a draft
@@ -1814,6 +1919,17 @@ Usage:
              2 on drift (new PII columns, undeclared JSON, missing
              declared columns), 1 on error. Use in CI nightly.
   validate   Schema-validate the configured manifest file.
+
+  <host>     A host configured in your dbx config, OR the pseudo-host
+             'local' (alias: 'localhost') to query a database that lives
+             in postgres-dbx / mysql-dbx. Local mode skips host config
+             and uses the container's root credentials. For 'check',
+             local mode requires --manifest <path>.
+
+Examples:
+  dbx scrub init prod/myapp --output dbx.scrub.json
+  dbx scrub init local/myapp_v1 --output dbx.scrub.json
+  dbx scrub check local/myapp_v1 --manifest dbx.scrub.json
 EOF
       ;;
     *)
@@ -1837,9 +1953,15 @@ _parse_scrub_target() {
 }
 
 # Dispatch the engine-specific schema query, emitting TSV on stdout.
+# Honors the `local/<db>` pseudo-host by routing to the managed
+# container that owns the database (no host config needed).
 # Args: $1 host, $2 database
 _scrub_query_live_schema_tsv() {
   local host="$1" db="$2"
+  if scrub_is_local_host "$host"; then
+    scrub_local_schema_tsv "$db"
+    return
+  fi
   local dbtype
   dbtype=$(get_db_type "$host")
   case "$dbtype" in
@@ -1860,12 +1982,17 @@ _cmd_scrub_init() {
     esac
   done
 
-  require_config
+  # require_config is needed only for configured hosts. The local/<db>
+  # shape works against a managed container and needs no config.json.
   require_jq
   require_docker
 
   local host database
   { read -r host; read -r database; } < <(_parse_scrub_target "$target")
+
+  if ! scrub_is_local_host "$host"; then
+    require_config
+  fi
 
   log_step "scrub init: querying schema of $database@$host..."
   local tsv schema draft
@@ -1877,8 +2004,9 @@ _cmd_scrub_init() {
 
   # Inherit the configured seed_env name (if any) from the existing
   # manifest, so re-running init doesn't fight the user's choice.
+  # Local mode has no host config to inherit from; always use default.
   local seed_env="DBX_SCRUB_SEED"
-  if scrub_manifest_exists "$host"; then
+  if ! scrub_is_local_host "$host" && scrub_manifest_exists "$host"; then
     local existing
     existing=$(scrub_read_manifest "$host")
     local cfgured
@@ -1894,7 +2022,11 @@ _cmd_scrub_init() {
   if [[ -n "$output" ]]; then
     printf '%s\n' "$pretty" > "$output"
     log_success "Draft manifest written: $output"
-    log_info "Review, edit, then point hosts.$host.scrub.manifest at the file."
+    if scrub_is_local_host "$host"; then
+      log_info "Review, edit, then point hosts.<host>.scrub.manifest at this file when you wire it to a real source."
+    else
+      log_info "Review, edit, then point hosts.$host.scrub.manifest at the file."
+    fi
   else
     printf '%s\n' "$pretty"
     log_info "Re-run with --output PATH to save the draft to a file."
@@ -1902,36 +2034,56 @@ _cmd_scrub_init() {
 }
 
 _cmd_scrub_check() {
-  local target="" quiet=false as_json=false
+  local target="" quiet=false as_json=false manifest_override=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --quiet|-q) quiet=true; shift ;;
       --json)     as_json=true; shift ;;
+      --manifest) manifest_override="$2"; shift 2 ;;
       --*|-*)     die "Unknown option: $1" ;;
       *) [[ -z "$target" ]] && target="$1" || die "Unexpected argument: $1"; shift ;;
     esac
   done
 
-  require_config
   require_jq
   require_docker
 
   local host database
   { read -r host; read -r database; } < <(_parse_scrub_target "$target")
 
-  if ! scrub_manifest_exists "$host"; then
+  if ! scrub_is_local_host "$host"; then
+    require_config
+  fi
+
+  local mf=""
+  if [[ -n "$manifest_override" ]]; then
+    if [[ ! -f "$manifest_override" ]]; then
+      log_error "scrub check: --manifest file not found: $manifest_override"
+      return 1
+    fi
+    mf="$manifest_override"
+  elif scrub_is_local_host "$host"; then
+    log_error "scrub check: local/<db> requires --manifest <path> (no host config to resolve)"
+    log_info "Run: dbx scrub init $target --output dbx.scrub.json"
+    log_info "Then: dbx scrub check $target --manifest dbx.scrub.json"
+    return 1
+  elif ! scrub_manifest_exists "$host"; then
     log_error "scrub check: no manifest configured for host '$host'"
     log_info "Run: dbx scrub init $target --output dbx.scrub.json"
     log_info "Then set hosts.$host.scrub.manifest to that path in your config."
     return 1
+  else
+    mf=$(scrub_manifest_path "$host")
   fi
 
-  local mf
-  mf=$(scrub_manifest_path "$host")
   # Schema-validate the manifest before drift-checking. A malformed
   # manifest cannot be meaningfully compared against a live schema.
   if ! scrub_validate_manifest "$mf" >/dev/null 2>&1; then
-    log_error "scrub check: manifest is invalid — run 'dbx scrub validate $host' for details"
+    if [[ -n "$manifest_override" ]]; then
+      log_error "scrub check: manifest is invalid — run 'jq . $mf' to inspect"
+    else
+      log_error "scrub check: manifest is invalid — run 'dbx scrub validate $host' for details"
+    fi
     return 1
   fi
 
@@ -1943,7 +2095,7 @@ _cmd_scrub_check() {
     die "scrub check: schema query returned no rows"
   fi
   schema=$(printf '%s\n' "$tsv" | scrub_schema_tsv_to_json)
-  manifest=$(scrub_read_manifest "$host")
+  manifest=$(jq -c '.' "$mf" 2>/dev/null || printf '{}\n')
   report=$(scrub_check_diff "$schema" "$manifest")
 
   if [[ "$as_json" == "true" ]]; then
