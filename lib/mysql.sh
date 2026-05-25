@@ -144,6 +144,35 @@ mysql_backup() {
     die "Schema dump failed"
   fi
 
+  # ALWAYS surface mysqldump's stderr (even on exit 0), filtering only the
+  # cosmetic password warning. mysqldump SILENTLY SKIPS tables the backup
+  # user can't SELECT on, emitting a `mysqldump: Got error: 1142: ...
+  # when using LOCK TABLES` or `Access denied` warning to stderr — the
+  # exit code is 0 so the previous `die`-on-failure path never fires.
+  # Result: an "OK" backup is missing tables, views fail at restore time
+  # ("Table 'b2b.udropship_po' doesn't exist"), and the user has no idea
+  # why. Surfacing these warnings at backup time makes the problem
+  # obvious BEFORE the restore goes sideways.
+  _dbx_mysqldump_surface_warnings() {
+    local label="$1"
+    local err="$2"
+    [[ -s "$err" ]] || return 0
+    local count
+    count=$(grep -cE '^(mysqldump: )?(Got error|\[?[Ww]arning\]?|Error)' "$err" 2>/dev/null || echo "0")
+    # Skip the all-cosmetic case (just the password warning).
+    if [[ "$count" -gt 0 ]] \
+       && ! grep -qE '^(mysqldump: )?(Got error|Error)' "$err" \
+       && ! grep -qvE 'Using a password' "$err"; then
+      return 0
+    fi
+    log_warn "mysqldump ($label) emitted warnings/errors:"
+    grep -vE '^(mysqldump: )?\[?[Ww]arning\]?.*Using a password' "$err" \
+      | grep -v '^$' \
+      | sed 's/^/  /' \
+      >&2 || true
+  }
+  _dbx_mysqldump_surface_warnings "schema pass" "$err_file"
+
   if [[ ! -s "$tmpdir/schema.sql" ]]; then
     cat "$err_file" >&2
     docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
@@ -175,6 +204,7 @@ mysql_backup() {
     audit_backup "$host" "$database" "failure"
     die "Data dump failed"
   fi
+  _dbx_mysqldump_surface_warnings "data pass" "$err_file"
 
   # Clean up credential file in container
   docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
@@ -305,9 +335,15 @@ mysql_restore_backup() {
     # with ERROR 1064 (42000) — turning a valid dump into a fake syntax
     # error. Surfaced after PR #59 stopped silencing mysql stderr; the
     # previous 2>/dev/null had been hiding this for months.
+    #
+    # LC_ALL=C: BSD sed (macOS default) errors `RE error: illegal byte
+    # sequence` on binary input under UTF-8 locales. Forcing the C locale
+    # makes sed treat each byte as opaque and lets the regex match on
+    # ASCII content without choking on the binary surrounding it.
     (echo "SET foreign_key_checks=0; SET unique_checks=0;" && \
-     grep -av "^mysqldump: \[Warning\]" | grep -av "^Warning: Using a password" | \
-     command sed 's/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g')
+     LC_ALL=C grep -av "^mysqldump: \[Warning\]" \
+     | LC_ALL=C grep -av "^Warning: Using a password" \
+     | LC_ALL=C command sed 's/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g')
   }
 
   # Check if using remote mode
@@ -425,8 +461,9 @@ mysql_restore_backup_streaming() {
   # essential — grep otherwise emits "Binary file (standard input) matches"
   # into the pipe and mysql chokes with ERROR 1064.
   local filter_sql_cmd='(printf "SET foreign_key_checks=0; SET unique_checks=0;\n" &&
-    grep -av "^mysqldump: \[Warning\]" | grep -av "^Warning: Using a password" |
-    sed "s/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g")'
+    LC_ALL=C grep -av "^mysqldump: \[Warning\]" |
+    LC_ALL=C grep -av "^Warning: Using a password" |
+    LC_ALL=C sed "s/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g")'
 
   log_info "Streaming restore → transform → target..."
   local rc=0
