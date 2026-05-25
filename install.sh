@@ -69,9 +69,13 @@ main() {
   # HTML assets for the browser-based `dbx wizard` config builder. Same
   # form fragment also powers the static docs builder; downloading both
   # gives offline-capable wizard mode.
-  for asset in wizard.html wizard-form.html; do
+  for asset in wizard.html wizard-form.html wizard-backups.html wizard-restore.html; do
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$asset" -o "$LIB_DIR/$asset"
   done
+
+  # Python HTTP server backing the wizard. Standalone file so it stays
+  # readable and unit-testable; lib/wizard.sh spawns it via argparse flags.
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/wizard-server.py" -o "$LIB_DIR/wizard-server.py"
 
   # Update lib path in main script to use installed location.
   # Avoid `sed -i` — its argument shape differs between BSD and GNU sed, and

@@ -94,100 +94,43 @@ EOF
 
   require_jq
 
-  local token port done_marker html_template form_fragment
+  local token port done_marker html_template form_fragment backups_fragment restore_fragment dbx_bin
   token=$(wizard_make_token)
   port=$(wizard_find_free_port)
   done_marker=$(mktemp -t dbx-wizard.XXXXXX)
   html_template="$LIB_DIR/wizard.html"
   form_fragment="$LIB_DIR/wizard-form.html"
+  backups_fragment="$LIB_DIR/wizard-backups.html"
+  restore_fragment="$LIB_DIR/wizard-restore.html"
+  # Resolve the dbx binary so the wizard server can spawn `dbx restore` even
+  # when this clone isn't on PATH (common in dev: `./dbx wizard`). SCRIPT_DIR
+  # is set at the top of the dbx script and is always absolute.
+  dbx_bin="$SCRIPT_DIR/dbx"
 
-  [[ -f "$html_template" ]] || die "Wizard HTML missing: $html_template (re-run install.sh to repair)"
-  [[ -f "$form_fragment" ]] || die "Wizard form fragment missing: $form_fragment (re-run install.sh to repair)"
+  [[ -f "$html_template"     ]] || die "Wizard HTML missing: $html_template (re-run install.sh to repair)"
+  [[ -f "$form_fragment"     ]] || die "Wizard form fragment missing: $form_fragment (re-run install.sh to repair)"
+  [[ -f "$backups_fragment"  ]] || die "Wizard backups fragment missing: $backups_fragment (re-run install.sh to repair)"
+  [[ -f "$restore_fragment"  ]] || die "Wizard restore fragment missing: $restore_fragment (re-run install.sh to repair)"
 
   mkdir -p "$(dirname "$CONFIG_FILE")"
 
-  local server_log
+  local server_log server_script
   server_log=$(mktemp -t dbx-wizard-srv.XXXXXX)
-  DBX_WIZARD_TOKEN="$token" \
-  DBX_WIZARD_PORT="$port" \
-  DBX_WIZARD_HTML="$html_template" \
-  DBX_WIZARD_FRAGMENT="$form_fragment" \
-  DBX_WIZARD_OUTPUT="$CONFIG_FILE" \
-  DBX_WIZARD_DONE="$done_marker" \
-  python3 - <<'PY' >"$server_log" 2>&1 &
-import http.server, json, os, sys, urllib.parse
+  server_script="$LIB_DIR/wizard-server.py"
+  [[ -f "$server_script" ]] || die "Wizard server missing: $server_script (re-run install.sh to repair)"
 
-TOKEN    = os.environ["DBX_WIZARD_TOKEN"]
-PORT     = int(os.environ["DBX_WIZARD_PORT"])
-HTML     = os.environ["DBX_WIZARD_HTML"]
-FRAGMENT = os.environ["DBX_WIZARD_FRAGMENT"]
-OUTPUT   = os.environ["DBX_WIZARD_OUTPUT"]
-DONE     = os.environ["DBX_WIZARD_DONE"]
-
-def parse_query(path):
-    q = urllib.parse.urlparse(path).query
-    return urllib.parse.parse_qs(q)
-
-def valid_token(path):
-    qs = parse_query(path)
-    return qs.get("token", [None])[0] == TOKEN
-
-def compose_html():
-    with open(HTML) as f: shell = f.read()
-    with open(FRAGMENT) as f: frag = f.read()
-    save_url = f"http://127.0.0.1:{PORT}/save?token={TOKEN}"
-    return shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", frag) \
-                .replace("__DBX_SAVE_URL__", save_url)
-
-class H(http.server.BaseHTTPRequestHandler):
-    def _send(self, code, body=b"", ctype="text/plain"):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        if body: self.wfile.write(body if isinstance(body, bytes) else body.encode())
-
-    def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path
-        if path == "/" and valid_token(self.path):
-            try: html = compose_html()
-            except Exception as e:
-                self._send(500, f"compose failed: {e}"); return
-            self._send(200, html, "text/html; charset=utf-8")
-            return
-        if path == "/":
-            self._send(403, "missing or bad token"); return
-        self._send(404, "not found")
-
-    def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path
-        if path != "/save" or not valid_token(self.path):
-            self._send(403, "forbidden"); return
-        length = int(self.headers.get("Content-Length", 0))
-        if length <= 0 or length > 1_000_000:
-            self._send(400, "bad length"); return
-        raw = self.rfile.read(length)
-        try:
-            cfg = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
-            self._send(400, f"invalid json: {e}"); return
-        try:
-            os.makedirs(os.path.dirname(OUTPUT), exist_ok=True)
-            with open(OUTPUT, "w") as f:
-                json.dump(cfg, f, indent=2)
-                f.write("\n")
-            os.chmod(OUTPUT, 0o600)
-        except OSError as e:
-            self._send(500, f"write failed: {e}"); return
-        with open(DONE, "w") as f: f.write("ok\n")
-        self._send(200, '{"ok":true}', "application/json")
-
-    def log_message(self, *args, **kwargs): pass
-
-httpd = http.server.HTTPServer(("127.0.0.1", PORT), H)
-try: httpd.serve_forever()
-except KeyboardInterrupt: pass
-PY
+  python3 "$server_script" \
+    --port "$port" \
+    --token "$token" \
+    --html "$html_template" \
+    --form-fragment "$form_fragment" \
+    --backups-fragment "$backups_fragment" \
+    --restore-fragment "$restore_fragment" \
+    --config-path "$CONFIG_FILE" \
+    --data-dir "$DATA_DIR" \
+    --dbx-bin "$dbx_bin" \
+    --done-marker "$done_marker" \
+    >"$server_log" 2>&1 &
   local srv_pid=$!
 
   trap 'kill '"$srv_pid"' 2>/dev/null; rm -f '"$done_marker"' '"$server_log"'' EXIT INT TERM

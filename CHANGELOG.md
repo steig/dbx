@@ -4,6 +4,17 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **`dbx wizard` becomes a multi-view control panel.** Previously a one-shot config builder, the local browser-driven wizard now ships with three views: **Config** (existing), **Backups** (new), and **Restore** (new). The sidebar only appears in CLI mode — the static online builder at `https://steig.github.io/dbx/config-builder/` continues to show only the Config form, unchanged. (#TBD, PR-1 of 2; Schedule editor lands in PR-2.)
+  - **Backups view**: filesystem walk of `$DATA_DIR/<host>/<db>/*.sql.zst[.age|.gpg]` with sidecar `.meta.json` enrichment (timestamp, source flavor, source version). Filter + refresh. Click any row to stage it for restore.
+  - **Restore view**: full form binding to `dbx restore` (target name, `--into` container picker, `--no-post-restore`, `--hooks-only`, `--no-scrub`, `--keep-download`). Spawns `dbx restore` server-side; output streams to the browser via Server-Sent Events (text/event-stream). Cancel button SIGTERMs the running restore. `--transform` is intentionally NOT exposed (browser-triggered exec of host scripts is the wrong attack surface).
+  - **Security**: every endpoint is gated by the same 32-hex URL token as the existing wizard. `/api/restore` strictly validates input (`source` must match `<host>/<db>/latest|<file>` shape or resolve to a file under `$DATA_DIR`; `name` must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; `--into` must reference a currently running container; booleans are type-checked). `subprocess.Popen(..., shell=False)` is used everywhere.
+
+### Changed
+
+- The Python HTTP server backing `dbx wizard` moved out of a 200-line heredoc in `lib/wizard.sh` into a standalone `lib/wizard-server.py` invoked via argparse flags. No behavior change on the existing config-save path; the extraction made room for the multi-view server logic and unlocked unit tests against the server itself (`tests/unit/wizard_server.bats`, 14 new tests).
+
 ## [0.11.0] - 2026-05-24
 
 Two-feature minor release: streaming restore-time sanitize / sidecar-container restore (#41, #45), and declarative schedules with a read-only sync preview (#39 part 1). Plus a `dbx --help` cleanup that fixes a long-standing first-line error and trims the help to a one-screen reference.
