@@ -541,9 +541,11 @@
       editTables: [],
       editManifest: null,
 
+      // Mirror lib/scrub.sh's strategy allowlist. The bash validator
+      // rejects anything not here, so the UI dropdown must not offer
+      // strategies the CLI would refuse on the next `dbx scrub validate`.
       strategies: [
-        'fake_email', 'fake_phone', 'fake_ip', 'fake_name', 'fake_company',
-        'fake_address', 'fake_city', 'fake_username',
+        'fake_email', 'fake_phone', 'fake_ip', 'fake_name',
         'redact', 'truncate', 'shift_date', 'passthrough', 'jsonb_scrub_paths',
       ],
 

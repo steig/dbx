@@ -280,10 +280,11 @@ def read_scrub_manifest(config_path: str, host: str):
 # Strategy names recognised by lib/scrub.sh:scrub_validate_manifest. Match
 # the case-arm list at scrub.sh:467-498. Used to gate /api/scrub/save before
 # we touch the filesystem.
+# Must match the case-arm list in lib/scrub.sh:scrub_validate_manifest.
+# Drift here means the wizard accepts a manifest the CLI then rejects.
 SCRUB_STRATEGIES = {
-    "fake_email", "fake_phone", "fake_ip", "fake_name", "fake_company",
-    "fake_address", "fake_city", "fake_username", "redact", "truncate",
-    "shift_date", "passthrough", "jsonb_scrub_paths",
+    "fake_email", "fake_phone", "fake_ip", "fake_name",
+    "redact", "truncate", "shift_date", "passthrough", "jsonb_scrub_paths",
 }
 
 
@@ -314,8 +315,14 @@ def _validate_manifest_shape(manifest) -> str | None:
                 return f"tables.{tname}: no_pii requires a non-empty reason"
             continue
         if not has_columns:
-            # Allowed: empty table block (will be filled in later)
-            continue
+            # Mirror lib/scrub.sh:scrub_validate_manifest which rejects
+            # tables with neither no_pii=true nor a non-empty columns
+            # object: "manifest: table 'X' has neither no_pii=true nor a
+            # 'columns' object". We have to reject here too — otherwise
+            # the wizard's save succeeds and the manifest then fails the
+            # CLI's validate step on the very next `dbx scrub` command.
+            return (f"tables.{tname}: must declare either no_pii=true (with a "
+                    f"reason) or at least one column under 'columns'")
         for cname, cbody in tbody["columns"].items():
             if not isinstance(cname, str) or not cname:
                 return f"tables.{tname}: column names must be non-empty strings"
@@ -341,6 +348,12 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
         return False, "manifest path is required"
     if "\x00" in target_path:
         return False, "manifest path contains NUL"
+    # Validate host_for_config BEFORE any disk I/O. The old order wrote
+    # the manifest first and then rejected a bad host alias, which left
+    # an orphaned file the user was told didn't save.
+    if host_for_config is not None and host_for_config != "":
+        if not isinstance(host_for_config, str) or not IDENT_RE.match(host_for_config):
+            return False, "host alias has invalid characters"
 
     config_dir = os.path.realpath(os.path.dirname(config_path))
     home_raw = os.environ.get("HOME") or ""
@@ -354,6 +367,19 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
         return False, "manifest path must be under the config directory or $HOME"
     if not abs_target.endswith(".json"):
         return False, "manifest path must end with .json"
+    # Also realpath the target itself when it already exists, so a symlink
+    # at abs_target pointing outside the allowed roots is caught (only the
+    # parent dir was being resolved before — a symlinked target slipped
+    # past the containment check). New files have no symlink to resolve.
+    if os.path.lexists(abs_target):
+        resolved_target = os.path.realpath(abs_target)
+        resolved_parent = os.path.dirname(resolved_target)
+        resolved_under_config = (resolved_parent == config_dir
+                                 or resolved_parent.startswith(config_dir + os.sep))
+        resolved_under_home = bool(home) and (resolved_parent == home
+                                              or resolved_parent.startswith(home + os.sep))
+        if not (resolved_under_config or resolved_under_home):
+            return False, "manifest path resolves (via symlink) outside $HOME / config dir"
 
     tmp_path = abs_target + ".wizard-tmp"
     try:
@@ -370,10 +396,10 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
             pass
         return False, f"write failed: {e}"
 
+    # host_for_config was validated at the top of the function. Treat
+    # missing/empty as "manifest saved, don't touch config.json".
     if not isinstance(host_for_config, str) or not host_for_config:
         return True, None
-    if not IDENT_RE.match(host_for_config):
-        return False, "host alias has invalid characters"
 
     try:
         if os.path.isfile(config_path):

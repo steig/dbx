@@ -1660,3 +1660,78 @@ JSON
   [[ "$output" == *"dbxScrub()"* ]]
   [[ "$output" == *"Per-host PII manifests"* ]]
 }
+
+# Code-review follow-ups: catch the three classes of drift between the
+# Python pre-validator and lib/scrub.sh's authoritative validator.
+
+@test "POST /api/scrub/save rejects strategies bash doesn't recognize" {
+  # fake_company/fake_address/fake_city/fake_username are NOT in
+  # lib/scrub.sh's case arm. Accepting them in the wizard would mean a
+  # successful save followed by a CLI rejection on the next scrub run.
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "scrub/bad.json",
+      "manifest": {
+        "tables": { "users": { "columns": { "co": { "strategy": "fake_company" } } } }
+      }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strategy must be one of"* ]]
+}
+
+@test "POST /api/scrub/save rejects tables with neither no_pii nor columns" {
+  # lib/scrub.sh:scrub_validate_manifest errors out with "table 'X' has
+  # neither no_pii=true nor a 'columns' object". The wizard must reject
+  # the same shape so a save doesn't leave behind a CLI-invalid file.
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "scrub/empty.json",
+      "manifest": { "tables": { "users": {} } }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"must declare either no_pii=true"* ]]
+  [ ! -f "$WIZ_SCRATCH/scrub/empty.json" ]   # not even partially written
+}
+
+@test "POST /api/scrub/save rejects a bad host alias BEFORE writing the file" {
+  # Old order wrote the manifest, then validated host alias, leaving an
+  # orphaned file when the alias was invalid. The Save UI told the user
+  # "save failed" while a file sat on disk.
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "host": "../etc/evil",
+      "manifest_path": "scrub/orphan.json",
+      "manifest": {
+        "tables": { "users": { "columns": { "email": { "strategy": "fake_email" } } } }
+      }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"host alias has invalid characters"* ]]
+  [ ! -f "$WIZ_SCRATCH/scrub/orphan.json" ]
+}
+
+@test "POST /api/scrub/save rejects a target whose existing symlink escapes HOME" {
+  # Symlink TOCTOU mitigation: if a file already lives at the target path
+  # and it's a symlink resolving outside $HOME / config dir, reject before
+  # the write. (New files have no symlink to follow — safe by default.)
+  # We need the symlink TARGET to be outside both HOME (=$WIZ_SCRATCH/home,
+  # set in setup) AND the config dir (=$WIZ_SCRATCH, the config.json
+  # parent). A sibling mktemp tree fits that bill: it's not under the
+  # wizard's HOME and not under the wizard's config dir.
+  ESCAPE_DST=$(mktemp -d)
+  mkdir -p "$WIZ_SCRATCH/home/scrub"
+  ln -sf "$ESCAPE_DST/evil.json" "$WIZ_SCRATCH/home/scrub/escape.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "'"$WIZ_SCRATCH/home/scrub/escape.json"'",
+      "manifest": { "tables": { "users": { "columns": { "e": { "strategy": "fake_email" } } } } }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"resolves (via symlink) outside"* ]]
+  [ ! -e "$ESCAPE_DST/evil.json" ]
+  rm -rf "$ESCAPE_DST"
+}
