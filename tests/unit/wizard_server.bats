@@ -53,6 +53,7 @@ SH
     --restore-fragment  "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
     --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
     --runs-fragment     "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
+    --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
     --config-path       "$WIZ_SCRATCH/config.json" \
     --data-dir          "$WIZ_SCRATCH/data" \
     --audit-dir         "$WIZ_AUDIT_DIR" \
@@ -661,4 +662,129 @@ JSONL
   run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/audit-log?token=NOPE"
   [ "$status" -eq 0 ]
   [ "$output" = "403" ]
+}
+
+# ----------------------------------------------------------------------------
+# /api/dashboard  — composed landing-tab payload
+# ----------------------------------------------------------------------------
+
+@test "GET / now composes the dashboard fragment too" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxDashboard()"* ]]
+}
+
+@test "GET /api/dashboard with bad token returns 403" {
+  run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/dashboard?token=NOPE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
+@test "GET /api/dashboard returns empty cards when DATA_DIR is empty" {
+  # Strip the fixture so DATA_DIR is bare. The dir itself still exists.
+  rm -rf "$WIZ_SCRATCH/data"
+  mkdir -p "$WIZ_SCRATCH/data"
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"cards\": []"* ]]
+  [[ "$output" == *"\"total_backups\": 0"* ]]
+  [[ "$output" == *"\"hosts\": 0"* ]]
+  [[ "$output" == *"\"databases\": 0"* ]]
+}
+
+@test "GET /api/dashboard returns one card per host/db pair on disk" {
+  # The default fixture has prod/myapp with one file.
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"host\": \"prod\""* ]]
+  [[ "$output" == *"\"database\": \"myapp\""* ]]
+  [[ "$output" == *"\"total_backups\": 1"* ]]
+  [[ "$output" == *"\"databases\": 1"* ]]
+}
+
+@test "GET /api/dashboard reports status=fresh when audit-log success is <24h old" {
+  # Touch the fixture file so its mtime is recent (some test environments
+  # set mtime to the install time, which would already be stale).
+  touch "$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  # Audit-log row within the last 24h.
+  local recent_ts
+  recent_ts=$(python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<JSONL
+{"timestamp":"$recent_ts","action":"backup","outcome":"success","db_host":"prod","database":"myapp","size":"1234","file":"/data/prod/myapp/recent.sql.zst"}
+JSONL
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"status\": \"fresh\""* ]]
+  [[ "$output" == *"\"fresh\": 1"* ]]
+}
+
+@test "GET /api/dashboard reports status=stale when most recent backup is >7d old" {
+  # The fixture's file is named myapp_20260520_120000 but its mtime is
+  # whatever `touch` produced during setup (== now-ish). Force the mtime
+  # to 10 days ago so the on-disk side reads stale even without an audit
+  # row. Use python to avoid BSD vs GNU touch flag differences.
+  python3 -c "
+import os, time
+p = '$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst'
+ten_days_ago = time.time() - 86400 * 10
+os.utime(p, (ten_days_ago, ten_days_ago))
+"
+  # Audit-log row from 10 days ago so the timestamp also reads stale.
+  local stale_ts
+  stale_ts=$(python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=10)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<JSONL
+{"timestamp":"$stale_ts","action":"backup","outcome":"success","db_host":"prod","database":"myapp","size":"1234","file":"/data/prod/myapp/old.sql.zst"}
+JSONL
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"status\": \"stale\""* ]]
+  [[ "$output" == *"\"stale\": 1"* ]]
+}
+
+@test "GET /api/dashboard surfaces next_scheduled from config.json schedules[]" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{
+  "hosts": { "prod": { "type": "postgres" } },
+  "schedules": [ { "host": "prod", "database": "myapp", "when": "daily@2" } ]
+}
+JSON
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"next_scheduled\":"* ]]
+  [[ "$output" == *"\"when\": \"daily@2\""* ]]
+  # next_at must be a future ISO 8601 Z timestamp.
+  [[ "$output" =~ \"next_at\":\ \"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:00:00Z\" ]]
+}
+
+@test "GET /api/dashboard sorts stale cards before fresh cards" {
+  # Two pairs: prod/myapp (already in fixture) becomes the stale one,
+  # staging/recent gets touched with a fresh mtime.
+  python3 -c "
+import os, time
+p = '$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst'
+os.utime(p, (time.time() - 86400 * 10, time.time() - 86400 * 10))
+"
+  mkdir -p "$WIZ_SCRATCH/data/staging/recent"
+  touch "$WIZ_SCRATCH/data/staging/recent/r.sql.zst"
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  # Stale prod row appears earlier in the body than the fresh staging row.
+  local pos_stale pos_fresh
+  pos_stale=$(awk -v s="$output" 'BEGIN{print index(s, "\"host\": \"prod\"")}')
+  pos_fresh=$(awk -v s="$output" 'BEGIN{print index(s, "\"host\": \"staging\"")}')
+  [ "$pos_stale" -gt 0 ]
+  [ "$pos_fresh" -gt 0 ]
+  [ "$pos_stale" -lt "$pos_fresh" ]
+}
+
+@test "GET /api/dashboard exposes last_failure when audit log has a failure row" {
+  local fail_ts
+  fail_ts=$(python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<JSONL
+{"timestamp":"$fail_ts","action":"backup","outcome":"failure","db_host":"prod","database":"myapp","error":"pg_dump: connection refused"}
+JSONL
+  run curl -s "$(api /api/dashboard)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"last_failure\":"* ]]
+  [[ "$output" == *"pg_dump: connection refused"* ]]
 }

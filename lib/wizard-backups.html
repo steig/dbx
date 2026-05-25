@@ -4,7 +4,7 @@
   button stages the row in $store.dbx.selectedBackup and switches view — the
   Restore view itself lands in a follow-up commit.
 -->
-<div x-data="dbxBackups()" x-init="load()">
+<div x-data="dbxBackups()" x-init="init()">
   <header class="dbx-view__header">
     <h2 class="dbx-view__title">Backups</h2>
     <p class="dbx-view__subtitle" x-text="subtitle()"></p>
@@ -98,6 +98,29 @@
       loading: true,
       filter: '',
 
+      init() {
+        // The Dashboard view sets $store.dbx.backupFilter to "host/db" when
+        // the user clicks a card. Consume it here so the search input lands
+        // pre-populated, then clear the store value so manual navigation
+        // back to Backups doesn't re-apply a stale filter.
+        const incoming = Alpine.store('dbx').backupFilter;
+        if (incoming) {
+          this.filter = incoming;
+          Alpine.store('dbx').backupFilter = '';
+        }
+        // Re-consume the filter on every entry to this view. Watching the
+        // shared `view` flag is cheaper than a polling timer.
+        this.$watch('$store.dbx.view', (v) => {
+          if (v !== 'backups') return;
+          const f = Alpine.store('dbx').backupFilter;
+          if (f) {
+            this.filter = f;
+            Alpine.store('dbx').backupFilter = '';
+          }
+        });
+        this.load();
+      },
+
       async load() {
         this.loading = true;
         try {
@@ -115,9 +138,15 @@
       filtered() {
         const f = this.filter.trim().toLowerCase();
         if (!f) return this.rows;
-        return this.rows.filter(b =>
-          b.host.toLowerCase().includes(f) || b.database.toLowerCase().includes(f)
-        );
+        // Dashboard hands us "host/db" — try the combined form first so a
+        // click from a card narrows to exactly that pair, then fall back
+        // to substring match on either field for free-typed filters.
+        return this.rows.filter(b => {
+          const hostDb = (b.host + '/' + b.database).toLowerCase();
+          return hostDb.includes(f)
+            || b.host.toLowerCase().includes(f)
+            || b.database.toLowerCase().includes(f);
+        });
       },
 
       subtitle() {

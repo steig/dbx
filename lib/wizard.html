@@ -119,10 +119,14 @@
     document.addEventListener('alpine:init', () => {
       const token = new URLSearchParams(window.location.search).get('token') || '';
       Alpine.store('dbx', {
-        view: 'config',
+        view: 'dashboard',
         token,
         api(path) { return `/api${path}?token=${this.token}`; },
         selectedBackup: null,   // populated by Backups view, read by Restore view (PR-1 follow-up)
+        // Dashboard cards set this to "host/db" before flipping to the
+        // Backups view; the Backups view consumes + clears it on mount so
+        // back/forward navigation doesn't re-apply a stale filter.
+        backupFilter: '',
       });
     });
   </script>
@@ -132,6 +136,7 @@
     <aside class="dbx-app__sidebar">
       <div class="dbx-app__brand">dbx<small>local control panel</small></div>
       <nav class="dbx-app__nav" x-data>
+        <a @click="$store.dbx.view = 'dashboard'" :class="{active: $store.dbx.view === 'dashboard'}">Dashboard</a>
         <a @click="$store.dbx.view = 'config'"   :class="{active: $store.dbx.view === 'config'}">Config</a>
         <a @click="$store.dbx.view = 'backup'"   :class="{active: $store.dbx.view === 'backup'}">Backup</a>
         <a @click="$store.dbx.view = 'backups'"  :class="{active: $store.dbx.view === 'backups'}">Backups</a>
@@ -141,6 +146,9 @@
       </nav>
     </aside>
     <main class="dbx-app__main">
+      <section x-data x-show="$store.dbx.view === 'dashboard'">
+        <!-- __DBX_DASHBOARD_FRAGMENT__ -->
+      </section>
       <section x-data x-show="$store.dbx.view === 'config'">
         <header class="dbx-view__header">
           <h2 class="dbx-view__title">Config</h2>

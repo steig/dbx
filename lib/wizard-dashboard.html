@@ -1,0 +1,256 @@
+<!--
+  Dashboard view fragment. Loaded by `dbx wizard` only (NOT embedded in mkdocs).
+  This is the wizard's landing tab — the first thing the user sees when they
+  open the control panel. Goal: surface backups that are at risk (stale or
+  failing) before the user has to dig through Backups/Runs to find out.
+
+  Reads /api/dashboard, which composes data from DATA_DIR + audit.log +
+  config.json schedules into a single payload — see lib/wizard-server.py's
+  compute_dashboard() for the shape.
+
+  Refreshes on tab entry. Clicking a card jumps to the Backups view filtered
+  to that host/db via $store.dbx.backupFilter (read by wizard-backups.html
+  on its next render).
+-->
+<style>
+  .dbx-dash__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+  .dbx-dash__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; margin-left: auto; }
+
+  .dbx-dash__summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
+  .dbx-dash__stat { padding: 0.75rem 1rem; border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-default-bg-color); }
+  .dbx-dash__stat-label { font-size: 0.75rem; color: var(--md-default-fg-color--light); text-transform: uppercase; letter-spacing: 0.05em; }
+  .dbx-dash__stat-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.125rem; letter-spacing: -0.02em; }
+  .dbx-dash__stat-value--fresh { color: #2f7d31; }
+  .dbx-dash__stat-value--aging { color: #8a4c10; }
+  .dbx-dash__stat-value--stale { color: #8a1f1f; }
+  @media (prefers-color-scheme: dark) {
+    .dbx-dash__stat-value--fresh { color: #6fd073; }
+    .dbx-dash__stat-value--aging { color: #ffbf6b; }
+    .dbx-dash__stat-value--stale { color: #ff8a8a; }
+  }
+
+  .dbx-dash__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+
+  .dbx-dash__card { border: 1px solid var(--md-default-fg-color--lightest); border-radius: 10px; padding: 1rem 1.125rem; background: var(--md-default-bg-color); cursor: pointer; transition: border-color 0.15s ease, transform 0.05s ease; display: flex; flex-direction: column; gap: 0.625rem; }
+  .dbx-dash__card:hover { border-color: var(--md-accent-fg-color); }
+  .dbx-dash__card:active { transform: translateY(1px); }
+  .dbx-dash__card--stale { border-left: 4px solid #c43d3d; }
+  .dbx-dash__card--aging { border-left: 4px solid #da8721; }
+  .dbx-dash__card--fresh { border-left: 4px solid #4a9e4c; }
+
+  .dbx-dash__card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+  .dbx-dash__card-title { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+  .dbx-dash__card-title small { font-weight: 400; color: var(--md-default-fg-color--light); font-size: 0.8125rem; }
+
+  .dbx-dash__row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.8125rem; }
+  .dbx-dash__row dt { color: var(--md-default-fg-color--light); margin: 0; }
+  .dbx-dash__row dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+  .dbx-dash__row--failure dd { color: #c43d3d; }
+  @media (prefers-color-scheme: dark) {
+    .dbx-dash__row--failure dd { color: #ff8a8a; }
+  }
+  .dbx-dash__error { font-size: 0.75rem; color: var(--md-default-fg-color--light); font-family: var(--md-code-font-family); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  .dbx-dash__empty { padding: 3rem 1rem; text-align: center; color: var(--md-default-fg-color--light); border: 1px dashed var(--md-default-fg-color--lightest); border-radius: 10px; }
+  .dbx-dash__empty a { color: var(--md-accent-fg-color); cursor: pointer; text-decoration: underline; }
+</style>
+
+<div x-data="dbxDashboard()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Dashboard</h2>
+    <p class="dbx-view__subtitle">
+      At-a-glance backup health across all configured host/database pairs.
+      Stale and failing backups appear first — click a card to drill into
+      its file list.
+    </p>
+  </header>
+
+  <div class="dbx-dash__toolbar">
+    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
+    <span class="dbx-dash__count" x-text="countLabel()"></span>
+  </div>
+
+  <template x-if="loading">
+    <p class="dbx-dash__empty">Loading…</p>
+  </template>
+
+  <template x-if="!loading && cards.length === 0">
+    <p class="dbx-dash__empty">
+      No backups yet. Go to the
+      <a @click="$store.dbx.view = 'backup'">Backup</a> tab to create one.
+    </p>
+  </template>
+
+  <template x-if="!loading && cards.length > 0">
+    <div>
+      <div class="dbx-dash__summary">
+        <div class="dbx-dash__stat">
+          <div class="dbx-dash__stat-label">Backups</div>
+          <div class="dbx-dash__stat-value" x-text="summary.total_backups"></div>
+        </div>
+        <div class="dbx-dash__stat">
+          <div class="dbx-dash__stat-label">On disk</div>
+          <div class="dbx-dash__stat-value" x-text="formatSize(summary.total_bytes)"></div>
+        </div>
+        <div class="dbx-dash__stat">
+          <div class="dbx-dash__stat-label">Hosts / DBs</div>
+          <div class="dbx-dash__stat-value" x-text="summary.hosts + ' / ' + summary.databases"></div>
+        </div>
+        <div class="dbx-dash__stat">
+          <div class="dbx-dash__stat-label">Fresh</div>
+          <div class="dbx-dash__stat-value dbx-dash__stat-value--fresh" x-text="summary.fresh"></div>
+        </div>
+        <div class="dbx-dash__stat">
+          <div class="dbx-dash__stat-label">Aging</div>
+          <div class="dbx-dash__stat-value dbx-dash__stat-value--aging" x-text="summary.aging"></div>
+        </div>
+        <div class="dbx-dash__stat">
+          <div class="dbx-dash__stat-label">Stale</div>
+          <div class="dbx-dash__stat-value dbx-dash__stat-value--stale" x-text="summary.stale"></div>
+        </div>
+      </div>
+
+      <div class="dbx-dash__grid">
+        <template x-for="c in cards" :key="c.host + '/' + c.database">
+          <div class="dbx-dash__card"
+               :class="{
+                 'dbx-dash__card--stale': c.status === 'stale',
+                 'dbx-dash__card--aging': c.status === 'aging',
+                 'dbx-dash__card--fresh': c.status === 'fresh',
+               }"
+               @click="openInBackups(c)"
+               role="button" tabindex="0"
+               @keydown.enter.prevent="openInBackups(c)"
+               @keydown.space.prevent="openInBackups(c)">
+            <div class="dbx-dash__card-head">
+              <h3 class="dbx-dash__card-title">
+                <span x-text="c.host"></span>
+                <small x-text="' / ' + c.database"></small>
+              </h3>
+              <template x-if="c.status === 'fresh'">
+                <span class="dbx-backups__chip dbx-backups__chip--complete">✓ fresh</span>
+              </template>
+              <template x-if="c.status === 'aging'">
+                <span class="dbx-backups__chip dbx-backups__chip--stage">⚠ aging</span>
+              </template>
+              <template x-if="c.status === 'stale'">
+                <span class="dbx-backups__chip dbx-backups__chip--incomplete">✗ stale</span>
+              </template>
+            </div>
+
+            <dl class="dbx-dash__row">
+              <dt>Last success</dt>
+              <dd x-text="lastSuccessLabel(c)"></dd>
+            </dl>
+
+            <template x-if="c.last_failure">
+              <dl class="dbx-dash__row dbx-dash__row--failure">
+                <dt>Last failure</dt>
+                <dd x-text="formatAge(c.last_failure.timestamp) + ' ago'"></dd>
+              </dl>
+            </template>
+            <template x-if="c.last_failure && c.last_failure.error">
+              <div class="dbx-dash__error" :title="c.last_failure.error" x-text="c.last_failure.error"></div>
+            </template>
+
+            <template x-if="c.next_scheduled">
+              <dl class="dbx-dash__row">
+                <dt>Next run</dt>
+                <dd>
+                  <span x-text="c.next_scheduled.when"></span>
+                  <span style="color: var(--md-default-fg-color--light);"
+                        x-text="' (' + formatNextAt(c.next_scheduled.next_at) + ')'"></span>
+                </dd>
+              </dl>
+            </template>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<script>
+  function dbxDashboard() {
+    return {
+      summary: { total_backups: 0, total_bytes: 0, hosts: 0, databases: 0, fresh: 0, aging: 0, stale: 0 },
+      cards: [],
+      loading: true,
+
+      init() {
+        // Dashboard is the landing view, so always load on first mount.
+        // Also refresh on tab re-entry so a backup taken in the Backup tab
+        // is reflected when the user navigates back.
+        this.$watch('$store.dbx.view', (v) => { if (v === 'dashboard') this.load(); });
+        this.load();
+      },
+
+      async load() {
+        this.loading = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/dashboard'));
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const payload = await r.json();
+          this.summary = payload.summary || this.summary;
+          this.cards = payload.cards || [];
+        } catch (e) {
+          this.cards = [];
+          console.error('Failed to load dashboard:', e);
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      openInBackups(c) {
+        // Surface the filter to the Backups view via the shared store. The
+        // Backups view reads it on next render and pre-populates its search
+        // input. We pass `host/db` so a multi-word filter still uniquely
+        // identifies the pair when host or db names happen to overlap.
+        Alpine.store('dbx').backupFilter = c.host + '/' + c.database;
+        Alpine.store('dbx').view = 'backups';
+      },
+
+      countLabel() {
+        const n = this.cards.length;
+        if (n === 0) return '';
+        return `${n} host/db pair${n === 1 ? '' : 's'}`;
+      },
+
+      lastSuccessLabel(c) {
+        if (!c.last_success) return '—';
+        return this.formatAge(c.last_success.timestamp) + ' ago';
+      },
+
+      formatAge(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return ts;
+        const ageSec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+        if (ageSec < 60) return `${ageSec}s`;
+        if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m`;
+        if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h`;
+        if (ageSec < 86400 * 14) return `${Math.floor(ageSec / 86400)}d`;
+        return `${Math.floor(ageSec / 86400)}d`;
+      },
+
+      formatNextAt(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return ts;
+        const deltaSec = Math.floor((d.getTime() - Date.now()) / 1000);
+        if (deltaSec < 0) return 'overdue';
+        if (deltaSec < 3600) return `in ${Math.floor(deltaSec / 60)}m`;
+        if (deltaSec < 86400) return `in ${Math.floor(deltaSec / 3600)}h`;
+        return `in ${Math.floor(deltaSec / 86400)}d`;
+      },
+
+      formatSize(n) {
+        if (n == null) return '—';
+        if (n < 1024) return n + ' B';
+        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
+        return (n / 1024 ** 3).toFixed(2) + ' GB';
+      },
+    };
+  }
+</script>
