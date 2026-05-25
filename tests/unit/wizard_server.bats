@@ -12,6 +12,13 @@ setup() {
   setup_dbx_env
 
   WIZ_SCRATCH="$BATS_TEST_TMPDIR/wiz"
+  # Sandbox HOME so /api/schedules' `schedule_installed_read` walks an
+  # empty launchd/systemd dir under the scratch tree rather than the
+  # developer's real ~/Library/LaunchAgents (which could contain real
+  # com.dbx.backup.* plists and contaminate the test).
+  mkdir -p "$WIZ_SCRATCH/home/Library/LaunchAgents" \
+           "$WIZ_SCRATCH/home/.config/systemd/user"
+  export HOME="$WIZ_SCRATCH/home"
   mkdir -p "$WIZ_SCRATCH/data/prod/myapp"
   touch    "$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
   cat > "$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst.meta.json" <<'JSON'
