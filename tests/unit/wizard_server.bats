@@ -277,6 +277,56 @@ JSON
   [[ "$output" =~ \"job_id\":\ ?\"[0-9a-f]{32}\" ]]
 }
 
+# ---------------------------------------------------------------------------
+# /api/host-test (PR-Y4) — wraps `dbx test <host>` as a streaming job so the
+# dashboard can show staged ssh/container/creds/query checks.
+# ---------------------------------------------------------------------------
+
+@test "POST /api/host-test rejects missing host" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" -d '{}' "$(api /api/host-test)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/host-test rejects host not in config.json" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"staging"}' "$(api /api/host-test)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not configured"* ]]
+}
+
+@test "POST /api/host-test rejects bad-shape host (shell metachar)" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"bad;rm -rf"}' "$(api /api/host-test)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invalid characters"* ]]
+}
+
+@test "POST /api/host-test with valid configured host returns a job_id" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod"}' "$(api /api/host-test)"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ \"job_id\":\ ?\"[0-9a-f]{32}\" ]]
+}
+
+@test "POST /api/host-test job stream contains the host name in argv echo" {
+  echo '{"hosts":[{"alias":"prod"}]}' > "$WIZ_SCRATCH/config.json"
+  local body job_id
+  body=$(curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod"}' "$(api /api/host-test)")
+  job_id=$(echo "$body" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+  [ -n "$job_id" ]
+  run curl -s -N --max-time 3 "http://127.0.0.1:$WIZ_PORT/api/jobs/$job_id/events?token=$WIZ_TOKEN"
+  # The fake dbx echoes `cmd=$*` on its first line.
+  [[ "$output" == *"cmd=test prod"* ]]
+  [[ "$output" == *"event: done"* ]]
+}
+
 @test "POST /api/jobs/<bad-id>/cancel returns 404" {
   run curl -s -o /dev/null -w "%{http_code}" -X POST \
     "$(api /api/jobs/00000000000000000000000000000000/cancel)"

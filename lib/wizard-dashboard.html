@@ -53,6 +53,26 @@
 
   .dbx-dash__empty { padding: 3rem 1rem; text-align: center; color: var(--md-default-fg-color--light); border: 1px dashed var(--md-default-fg-color--lightest); border-radius: 10px; }
   .dbx-dash__empty a { color: var(--md-accent-fg-color); cursor: pointer; text-decoration: underline; }
+
+  /* PR-Y4: per-card "Test connection" panel. Reuses the dark monospace pill
+     used by the Backup/Restore log areas. The button styles mirror
+     .dbx-backup__btn--secondary so the action visually defers to the card's
+     primary affordance (clicking the card opens Backups). */
+  .dbx-dash__test-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .dbx-dash__test-btn { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); padding: 0.3rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; }
+  .dbx-dash__test-btn:hover:not(:disabled) { background: var(--md-code-bg-color); }
+  .dbx-dash__test-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .dbx-dash__test-pill { font-size: 0.75rem; padding: 0.15rem 0.55rem; border-radius: 999px; font-variant-numeric: tabular-nums; }
+  .dbx-dash__test-pill--idle { background: var(--md-code-bg-color); color: var(--md-default-fg-color--light); }
+  .dbx-dash__test-pill--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
+  .dbx-dash__test-pill--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
+  .dbx-dash__test-pill--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
+  @media (prefers-color-scheme: dark) {
+    .dbx-dash__test-pill--ok { color: #6fd073; }
+    .dbx-dash__test-pill--err { color: #ff8a8a; }
+  }
+  .dbx-dash__test-log { background: #1a1d22; color: #d4d7dd; font-family: var(--md-code-font-family); font-size: 0.75rem; padding: 0.625rem 0.75rem; border-radius: 6px; max-height: 20rem; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .dbx-dash__test-log--empty { color: #666; font-style: italic; }
 </style>
 
 <div x-data="dbxDashboard()" x-init="init()">
@@ -163,6 +183,34 @@
                 </dd>
               </dl>
             </template>
+
+            <!--
+              PR-Y4: per-card "Test connection" affordance. Wraps `dbx test
+              <host>` so the user can validate connectivity (ssh → container
+              → creds → SELECT 1) without leaving the dashboard. The button
+              and panel stop click propagation so they don't also trigger
+              the card's openInBackups() handler.
+            -->
+            <div class="dbx-dash__test-row" @click.stop>
+              <button class="dbx-dash__test-btn"
+                      @click.stop="toggleTest(c)"
+                      x-text="testButtonLabel(c)"></button>
+              <span class="dbx-dash__test-pill"
+                    :class="testPillClass(c)"
+                    x-text="testPillLabel(c)"></span>
+            </div>
+            <template x-if="testState(c).expanded">
+              <div class="dbx-dash__test-log"
+                   :class="{ 'dbx-dash__test-log--empty': testState(c).log.length === 0 }"
+                   @click.stop>
+                <template x-if="testState(c).log.length === 0">
+                  <span>(starting…)</span>
+                </template>
+                <template x-for="(line, i) in testState(c).log" :key="i">
+                  <div x-text="line"></div>
+                </template>
+              </div>
+            </template>
           </div>
         </template>
       </div>
@@ -176,6 +224,11 @@
       summary: { total_backups: 0, total_bytes: 0, hosts: 0, databases: 0, fresh: 0, aging: 0, stale: 0 },
       cards: [],
       loading: true,
+      // PR-Y4: per-card connection-test state, keyed by `host/database` (the
+      // same key x-for uses on each card). Kept in a plain object rather
+      // than a Map so Alpine's reactivity catches new keys on first access.
+      // Shape: { expanded: bool, log: [str], jobId: str|null, status: 'idle'|'running'|'ok'|'err', exitCode: int|null, eventSource: EventSource|null }
+      tests: {},
 
       init() {
         // Dashboard is the landing view, so always load on first mount.
@@ -183,6 +236,132 @@
         // is reflected when the user navigates back.
         this.$watch('$store.dbx.view', (v) => { if (v === 'dashboard') this.load(); });
         this.load();
+      },
+
+      // PR-Y4: lookup-or-init helper. Returns a stable per-card object so
+      // Alpine bindings can reactively track its fields. Callers must
+      // always read state via this method (rather than `this.tests[k]`)
+      // so newly-created keys are reactive.
+      testState(c) {
+        const k = c.host + '/' + c.database;
+        if (!this.tests[k]) {
+          this.tests[k] = { expanded: false, log: [], jobId: null, status: 'idle', exitCode: null, eventSource: null };
+        }
+        return this.tests[k];
+      },
+
+      testButtonLabel(c) {
+        const s = this.testState(c);
+        if (s.status === 'running') return 'Cancel test';
+        if (s.expanded) return 'Hide log';
+        return 'Test connection';
+      },
+
+      testPillLabel(c) {
+        const s = this.testState(c);
+        if (s.status === 'idle')    return s.expanded ? 'Pending' : '';
+        if (s.status === 'running') return 'Testing…';
+        if (s.status === 'ok')      return '✓ Connected';
+        if (s.status === 'err')     return '✗ Failed (exit ' + (s.exitCode == null ? '?' : s.exitCode) + ')';
+        return '';
+      },
+
+      testPillClass(c) {
+        const s = this.testState(c);
+        if (s.status === 'running') return 'dbx-dash__test-pill--running';
+        if (s.status === 'ok')      return 'dbx-dash__test-pill--ok';
+        if (s.status === 'err')     return 'dbx-dash__test-pill--err';
+        return 'dbx-dash__test-pill--idle';
+      },
+
+      // PR-Y4: button is a tri-state — collapsed/idle → start; running →
+      // cancel; finished (collapsed open) → collapse back. We keep the log
+      // around when collapsing so re-opening shows the previous run.
+      toggleTest(c) {
+        const s = this.testState(c);
+        if (s.status === 'running') {
+          this.cancelTest(c);
+          return;
+        }
+        if (s.expanded) {
+          // Collapse the panel; preserve log/status so the user can
+          // re-expand and see the previous result without re-running.
+          s.expanded = false;
+          return;
+        }
+        this.startTest(c);
+      },
+
+      async startTest(c) {
+        const s = this.testState(c);
+        s.expanded = true;
+        s.log = [];
+        s.status = 'running';
+        s.exitCode = null;
+        s.jobId = null;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/host-test'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host: c.host }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+            s.log.push('Failed to start: ' + (err.error || r.status));
+            s.status = 'err';
+            s.exitCode = -1;
+            return;
+          }
+          const { job_id } = await r.json();
+          s.jobId = job_id;
+          this.attachTestStream(c, job_id);
+        } catch (e) {
+          s.log.push('Network error: ' + e);
+          s.status = 'err';
+          s.exitCode = -1;
+        }
+      },
+
+      attachTestStream(c, jobId) {
+        const s = this.testState(c);
+        const url = Alpine.store('dbx').api('/jobs/' + jobId + '/events');
+        const es = new EventSource(url);
+        s.eventSource = es;
+        es.onmessage = (ev) => {
+          try {
+            const { line } = JSON.parse(ev.data);
+            if (line !== undefined) s.log.push(line);
+          } catch (e) { /* ignore */ }
+        };
+        es.addEventListener('done', (ev) => {
+          try {
+            const { exit_code } = JSON.parse(ev.data);
+            s.exitCode = exit_code;
+            s.status = exit_code === 0 ? 'ok' : 'err';
+          } catch (e) {
+            s.status = 'err';
+          } finally {
+            es.close();
+            s.eventSource = null;
+          }
+        });
+        es.onerror = () => {
+          // EventSource auto-reconnects on transient drops; only close if
+          // the server side already finished (otherwise we'd cut the
+          // reconnect attempt and miss the `done` event).
+          if (s.status !== 'running') {
+            es.close();
+            s.eventSource = null;
+          }
+        };
+      },
+
+      async cancelTest(c) {
+        const s = this.testState(c);
+        if (!s.jobId) return;
+        try {
+          await fetch(Alpine.store('dbx').api('/jobs/' + s.jobId + '/cancel'), { method: 'POST' });
+        } catch (e) { /* swallow — server's done event will arrive shortly after SIGTERM */ }
       },
 
       async load() {

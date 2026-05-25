@@ -1202,6 +1202,46 @@ def make_handler(args):
                 send_json(self, 200, {"job_id": job_id})
                 return
 
+            if path == "/api/host-test":
+                # PR-Y4: per-host connection test from the dashboard. Wraps
+                # `dbx test <host>` as a streaming job so the UI can show the
+                # 4-step staged check (ssh / container / creds / query) live.
+                # Host must match IDENT_RE AND appear in the configured-hosts
+                # allowlist — same shape as /api/backup, since we're spawning
+                # the same kind of dbx subprocess against an alias the user
+                # claimed they own.
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    self._send(400, "body must be a JSON object")
+                    return
+                host = body.get("host")
+                if not isinstance(host, str) or not host:
+                    send_json(self, 400, {"error": "host is required"})
+                    return
+                if not IDENT_RE.match(host):
+                    send_json(self, 400, {"error": "host has invalid characters"})
+                    return
+                configured = list_configured_hosts()
+                if host not in configured:
+                    send_json(self, 400, {"error": f"host '{host}' is not configured"})
+                    return
+                try:
+                    job_id = spawn_dbx("test", [host])
+                except OSError as e:
+                    self._send(500, f"spawn failed: {e}")
+                    return
+                send_json(self, 200, {"job_id": job_id})
+                return
+
             if path == "/api/schedules":
                 length = int(self.headers.get("Content-Length", 0))
                 if length <= 0 or length > 256_000:
