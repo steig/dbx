@@ -47,6 +47,7 @@ source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/storage.sh"
 source "$LIB_DIR/update.sh"
 source "$LIB_DIR/wizard.sh"
+source "$LIB_DIR/completion.sh"
 
 # Install the EXIT/INT/TERM cleanup trap. Defined in core.sh but called
 # here so that sourcing libs in tests doesn't clobber the test runner's
@@ -2364,6 +2365,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}host add${NC}                      Interactively add a backup host
   ${CYAN}wizard${NC}                        Browser-based config wizard
   ${CYAN}update${NC}                        Upgrade dbx to the latest release
+  ${CYAN}completion${NC} <shell>            Print shell completion script (bash|zsh|fish)
 
 ${BOLD}QUICK START${NC}
   ${GREEN}dbx config init && dbx host add${NC}            # one-time setup
@@ -2437,6 +2439,23 @@ main() {
       ;;
     update|self-update|upgrade)
       cmd_update
+      ;;
+    completion)
+      local shell="${1:-bash}"
+      case "$shell" in
+        bash) dbx_completion_script_bash ;;
+        zsh)  dbx_completion_script_zsh ;;
+        fish) dbx_completion_script_fish ;;
+        *)    die "Unknown shell: $shell (use: bash, zsh, fish)" ;;
+      esac
+      ;;
+    __complete)
+      # Hidden internal subcommand invoked by the generated completion
+      # scripts on every TAB press. Prints newline-delimited candidates
+      # to stdout. Must stay fast: no docker, no network. Skip the
+      # post-command update notifier — TAB latency is sacred.
+      dbx_complete "$@"
+      return 0
       ;;
     *)
       die "Unknown command: $cmd (run 'dbx help' for usage)"
