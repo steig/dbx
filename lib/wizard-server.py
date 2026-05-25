@@ -28,6 +28,18 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SOURCE_HOSTDB_RE = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._-]{0,63})/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/(latest|[A-Za-z0-9._-]{1,128}\.sql\.zst(?:\.age|\.gpg)?)$"
 )
+# Vault key shape — slightly looser than IDENT_RE (no leading-char rule) so
+# users can store `_internal`-style keys if their existing config has them.
+# Length cap at 64 keeps argv + audit-log rows bounded.
+VAULT_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# age public-key recipient shape per the age spec (Bech32-encoded). Keeping
+# the range loose (50-80 chars after `age1`) covers the 58-char canonical
+# form and any future variant without becoming a length-counting hassle.
+AGE_RECIPIENT_RE = re.compile(r"^age1[a-z0-9]{50,80}$")
+# Cap vault values at 4096 bytes — matches the spec; the system keychain on
+# macOS can take longer values but 4KiB is sufficient for any reasonable
+# password / token / connection string.
+VAULT_VALUE_MAX_BYTES = 4096
 
 
 class Job:
@@ -96,6 +108,11 @@ def parse_args():
         "--dashboard-fragment",
         required=True,
         help="Path to wizard-dashboard.html (landing-tab health view)",
+    )
+    p.add_argument(
+        "--vault-fragment",
+        required=True,
+        help="Path to wizard-vault.html (vault management view)",
     )
     p.add_argument(
         "--audit-dir",
@@ -863,6 +880,209 @@ def _coerce_int(v):
         return None
 
 
+# Map dbx's internal backend names to the human-facing labels surfaced in
+# the Vault view + JSON payload. Anything else passes through verbatim.
+_BACKEND_LABELS = {
+    "keychain": "macos-keychain",
+    "secret-tool": "libsecret",
+    "pass": "pass",
+    "gpg-file": "gpg",
+    "none": "none",
+}
+
+
+def _detect_vault_backend(dbx_bin):
+    """Shell out to `dbx vault info` and parse the first 'Vault backend:' line.
+    Returns the human label (`macos-keychain` / `libsecret` / `gpg` / `pass`
+    / `none`) or `'unknown'` on failure. Single backend invocation per
+    /api/vault/list call — all rows share the same backend."""
+    try:
+        result = subprocess.run(
+            [dbx_bin, "vault", "info"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.lower().startswith("vault backend:"):
+            raw = line.split(":", 1)[1].strip()
+            return _BACKEND_LABELS.get(raw, raw or "unknown")
+    return "unknown"
+
+
+def _list_vault_keys(dbx_bin):
+    """Shell out to `dbx vault list` and parse the indented account lines.
+    The CLI format (lib/encrypt.sh + dbx:cmd_vault) is:
+
+        Stored credentials:
+          key1
+          key2
+          (none)
+
+    Plus an optional 'Encryption:' / 'Key is set' tail block for the
+    encryption-key marker, which we suppress. Returns [] when no keys
+    are stored or the command fails."""
+    try:
+        result = subprocess.run(
+            [dbx_bin, "vault", "list"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    keys = []
+    in_creds = False
+    for raw in result.stdout.splitlines():
+        line = raw.rstrip()
+        # Strip ANSI escape sequences (BOLD/NC) that cmd_vault prints
+        # around the section header. Strict-printable filter keeps the
+        # parse simple and robust.
+        cleaned = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+        if not cleaned:
+            continue
+        # Section markers. We only collect inside the 'Stored credentials:'
+        # block; the 'Encryption:' block lists the encryption key marker
+        # which is internal-only and should not appear in the wizard.
+        if cleaned.lower().startswith("stored credentials"):
+            in_creds = True
+            continue
+        if cleaned.lower().startswith("encryption"):
+            in_creds = False
+            continue
+        if not in_creds:
+            continue
+        # "(none)" sentinel means the list is empty. Other lines are
+        # accounts; cmd_vault already filtered out _dbx_encryption_key.
+        if cleaned == "(none)":
+            continue
+        if VAULT_KEY_RE.match(cleaned):
+            keys.append(cleaned)
+    return keys
+
+
+def _vault_last_set_map(audit_dir):
+    """Walk audit.log and return {account: most_recent_vault_set_timestamp}.
+    Only `vault_set` rows with outcome=success contribute. Returns {} when
+    the file is missing or unreadable — callers fall back to `null`."""
+    entries = _read_audit_log_full(audit_dir)
+    out = {}
+    for entry in entries:
+        if entry.get("action") != "vault_set":
+            continue
+        if entry.get("outcome") != "success":
+            continue
+        account = entry.get("account")
+        ts = entry.get("timestamp")
+        if not isinstance(account, str) or not isinstance(ts, str):
+            continue
+        # Newest wins. Timestamps are ISO 8601 Z strings — string compare
+        # is correct for that format.
+        prev = out.get(account)
+        if prev is None or ts > prev:
+            out[account] = ts
+    return out
+
+
+def _age_recipients_path():
+    """Return the path to the age recipients file, matching lib/encrypt.sh:13:
+    `${DBX_AGE_RECIPIENTS:-$CONFIG_DIR/age-recipients.txt}`. We honor the
+    DBX_AGE_RECIPIENTS env var so tests can sandbox the path under
+    BATS_TEST_TMPDIR."""
+    override = os.environ.get("DBX_AGE_RECIPIENTS")
+    if override:
+        return override
+    # CONFIG_DIR mirrors core.sh: $DBX_CONFIG_DIR ?: $HOME/.config/dbx.
+    config_dir = os.environ.get("DBX_CONFIG_DIR")
+    if not config_dir:
+        config_dir = os.path.join(os.environ.get("HOME", ""), ".config", "dbx")
+    return os.path.join(config_dir, "age-recipients.txt")
+
+
+def _read_age_recipients(path):
+    """Return (recipients, error). recipients is a list of non-comment,
+    non-blank lines from the file; comments (lines starting with #) are
+    silently dropped at read time but preserved on write."""
+    if not os.path.isfile(path):
+        return [], None
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        return [], str(e)
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        out.append(stripped)
+    return out, None
+
+
+def _write_age_recipients_atomic(path, lines):
+    """Atomic write: tmp file + os.replace, 0600 permissions. Caller is
+    responsible for assembling `lines` — we just persist them as-is."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError as e:
+        return False, f"could not create config dir: {e}"
+    tmp_path = path + ".wizard-tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            for line in lines:
+                f.write(line)
+                if not line.endswith("\n"):
+                    f.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return False, f"write failed: {e}"
+    return True, None
+
+
+def _add_age_recipient(path, recipient):
+    """Append `recipient` to the recipients file if not already present.
+    Preserves comments + blank lines. Returns (ok, error_or_None)."""
+    existing_lines = []
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                existing_lines = f.read().splitlines()
+        except OSError as e:
+            return False, f"could not read recipients: {e}"
+    # Already present? Idempotent no-op (return ok=True).
+    for line in existing_lines:
+        if line.strip() == recipient:
+            return True, None
+    existing_lines.append(recipient)
+    return _write_age_recipients_atomic(path, existing_lines)
+
+
+def _remove_age_recipient(path, recipient):
+    """Remove every line whose stripped form equals `recipient`. Preserves
+    comments + blank lines. Returns (ok, error_or_None). Removing a
+    non-existent recipient is a no-op (returns ok=True) so the UI doesn't
+    have to track ghost state."""
+    if not os.path.isfile(path):
+        return True, None
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        return False, f"could not read recipients: {e}"
+    new_lines = [line for line in lines if line.strip() != recipient]
+    if new_lines == lines:
+        return True, None  # nothing to do
+    return _write_age_recipients_atomic(path, new_lines)
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
@@ -887,6 +1107,8 @@ def make_handler(args):
             runs = f.read()
         with open(args.dashboard_fragment) as f:
             dashboard = f.read()
+        with open(args.vault_fragment) as f:
+            vault = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
@@ -896,6 +1118,7 @@ def make_handler(args):
                  .replace("<!-- __DBX_SCHEDULE_FRAGMENT__ -->", schedule)
                  .replace("<!-- __DBX_RUNS_FRAGMENT__ -->", runs)
                  .replace("<!-- __DBX_DASHBOARD_FRAGMENT__ -->", dashboard)
+                 .replace("<!-- __DBX_VAULT_FRAGMENT__ -->", vault)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -1199,6 +1422,65 @@ def make_handler(args):
                     return
                 send_json(self, 200, cfg if isinstance(cfg, dict) else {})
                 return
+            if path == "/api/vault/list":
+                # Shell out to `dbx vault list` for the keys + `dbx vault info`
+                # for the backend label. Audit log gives `last_set` per key
+                # via a single full-log scan (cheap; audit logs are tiny).
+                keys = _list_vault_keys(args.dbx_bin)
+                backend = _detect_vault_backend(args.dbx_bin)
+                last_set_map = _vault_last_set_map(args.audit_dir)
+                rows = [
+                    {
+                        "key": k,
+                        "backend": backend,
+                        "last_set": last_set_map.get(k),
+                    }
+                    for k in keys
+                ]
+                send_json(self, 200, rows)
+                return
+            if path == "/api/vault/get":
+                qs = parse_query(self.path)
+                key = (qs.get("key", [""]) or [""])[0]
+                if not VAULT_KEY_RE.match(key):
+                    send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
+                    return
+                # capture_output=True keeps stdout in memory so the value
+                # never lands on the wizard's stderr/log. The CLI's own
+                # `audit_vault "get"` is not emitted by cmd_vault get
+                # today, but if added later we won't be double-counting.
+                try:
+                    result = subprocess.run(
+                        [args.dbx_bin, "vault", "get", key],
+                        capture_output=True, text=True, timeout=10, check=False,
+                    )
+                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+                    send_json(self, 500, {"error": f"dbx vault get failed to spawn: {e}"})
+                    return
+                if result.returncode != 0:
+                    # Surface a generic error — stderr may carry the CLI's
+                    # 'No credentials found for: <key>' message; pass it
+                    # through trimmed so the UI can show it.
+                    err = (result.stderr or "").strip().splitlines()
+                    msg = err[-1] if err else f"exit {result.returncode}"
+                    send_json(self, 404, {"error": msg})
+                    return
+                # dbx vault get prints `echo "$pass"` — strip the trailing
+                # newline that echo adds. Do NOT strip whitespace because a
+                # legitimate password could be space-padded.
+                value = result.stdout
+                if value.endswith("\n"):
+                    value = value[:-1]
+                send_json(self, 200, {"key": key, "value": value})
+                return
+            if path == "/api/vault/age-recipients":
+                path_to_file = _age_recipients_path()
+                recipients, err = _read_age_recipients(path_to_file)
+                if err is not None:
+                    send_json(self, 500, {"error": err})
+                    return
+                send_json(self, 200, {"path": path_to_file, "recipients": recipients})
+                return
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/events$", path)
             if m:
                 with JOBS_LOCK:
@@ -1366,6 +1648,149 @@ def make_handler(args):
                 ok, err = delete_backup(args.data_dir, body.get("path"))
                 if not ok:
                     send_json(self, 400, {"error": err})
+                    return
+                send_json(self, 200, {"ok": True})
+                return
+
+            if path == "/api/vault/set":
+                length = int(self.headers.get("Content-Length", 0))
+                # Body cap: 8KB is plenty for key + 4KB value + JSON braces.
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                key = body.get("key")
+                value = body.get("value")
+                if not isinstance(key, str) or not VAULT_KEY_RE.match(key):
+                    send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
+                    return
+                if not isinstance(value, str):
+                    send_json(self, 400, {"error": "value must be a string"})
+                    return
+                # Length cap in BYTES (UTF-8) — the spec quotes 4096 bytes,
+                # which differs from Python len() for any non-ASCII content.
+                if len(value.encode("utf-8")) > VAULT_VALUE_MAX_BYTES:
+                    send_json(self, 400, {"error": f"value exceeds {VAULT_VALUE_MAX_BYTES} bytes"})
+                    return
+                if not value:
+                    send_json(self, 400, {"error": "value must not be empty"})
+                    return
+                # `dbx vault set <key>` does `read -rs password` from stdin.
+                # We pipe via stdin=PIPE so the value never enters argv (it
+                # would be visible to `ps`). capture_output=True keeps both
+                # streams in memory so nothing leaks to the wizard's log.
+                try:
+                    proc = subprocess.run(
+                        [args.dbx_bin, "vault", "set", key],
+                        input=value + "\n", capture_output=True, text=True,
+                        timeout=15, check=False,
+                    )
+                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+                    send_json(self, 500, {"error": f"dbx vault set failed to spawn: {e}"})
+                    return
+                if proc.returncode != 0:
+                    err = (proc.stderr or "").strip().splitlines()
+                    msg = err[-1] if err else f"exit {proc.returncode}"
+                    send_json(self, 400, {"error": msg})
+                    return
+                send_json(self, 200, {"ok": True})
+                return
+
+            if path == "/api/vault/delete":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 2_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                key = body.get("key")
+                if not isinstance(key, str) or not VAULT_KEY_RE.match(key):
+                    send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
+                    return
+                try:
+                    proc = subprocess.run(
+                        [args.dbx_bin, "vault", "delete", key],
+                        capture_output=True, text=True, timeout=10, check=False,
+                    )
+                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+                    send_json(self, 500, {"error": f"dbx vault delete failed to spawn: {e}"})
+                    return
+                # cmd_vault delete returns 0 even when the key doesn't
+                # exist (it just logs "No credentials found"). We forward
+                # 200 regardless so the UI's "remove and refresh" flow
+                # stays idempotent.
+                if proc.returncode != 0:
+                    err = (proc.stderr or "").strip().splitlines()
+                    msg = err[-1] if err else f"exit {proc.returncode}"
+                    send_json(self, 400, {"error": msg})
+                    return
+                send_json(self, 200, {"ok": True})
+                return
+
+            if path == "/api/vault/age-recipients/add":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 2_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                recipient = body.get("recipient")
+                if not isinstance(recipient, str) or not AGE_RECIPIENT_RE.match(recipient):
+                    send_json(self, 400, {"error": "recipient must match age1[a-z0-9]{50,80}"})
+                    return
+                ok, err = _add_age_recipient(_age_recipients_path(), recipient)
+                if not ok:
+                    send_json(self, 500, {"error": err})
+                    return
+                send_json(self, 200, {"ok": True})
+                return
+
+            if path == "/api/vault/age-recipients/remove":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 2_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                recipient = body.get("recipient")
+                # Permissive for remove — accept any string so the user can
+                # clean up a malformed line that snuck in via a manual edit.
+                # Cap length so a non-string or huge value can't trash the file.
+                if not isinstance(recipient, str) or not recipient or len(recipient) > 256:
+                    send_json(self, 400, {"error": "recipient must be a non-empty string ≤256 chars"})
+                    return
+                ok, err = _remove_age_recipient(_age_recipients_path(), recipient)
+                if not ok:
+                    send_json(self, 500, {"error": err})
                     return
                 send_json(self, 200, {"ok": True})
                 return

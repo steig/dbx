@@ -25,14 +25,79 @@ setup() {
 {"timestamp":"2026-05-20T12:00:00Z","source_flavor":"postgres","source_major_version":"17"}
 JSON
 
-  # Fake dbx that just echoes its argv and a few log lines, exit 0.
+  # Sandbox the age-recipients file under the scratch dir so the vault
+  # endpoints don't read/write the developer's real ~/.config/dbx/.
+  export DBX_AGE_RECIPIENTS="$WIZ_SCRATCH/age-recipients.txt"
+  export DBX_CONFIG_DIR="$WIZ_SCRATCH"
+
+  # Fake dbx that:
+  #   * echoes argv for the standard restore/backup runs the existing tests
+  #     already check ("[INFO] cmd=…")
+  #   * mocks `vault list`, `vault info`, `vault get`, `vault set`, `vault
+  #     delete` enough for the vault endpoint tests to assert on.
+  # The vault store is a flat file at $WIZ_SCRATCH/vault.tsv (key\tvalue).
   cat > "$WIZ_SCRATCH/dbx" <<'SH'
 #!/usr/bin/env bash
+# Path to the fake vault store. Lives under the test scratch dir so each
+# test gets a clean slate via setup_dbx_env + BATS_TEST_TMPDIR.
+VAULT_STORE="${WIZ_SCRATCH:-${BATS_TEST_TMPDIR:-/tmp}/wiz}/vault.tsv"
+mkdir -p "$(dirname "$VAULT_STORE")"
+[[ -f "$VAULT_STORE" ]] || : > "$VAULT_STORE"
+
+case "$1 $2" in
+  "vault list")
+    echo "Stored credentials:"
+    if [[ -s "$VAULT_STORE" ]]; then
+      while IFS=$'\t' read -r k _; do
+        [[ -n "$k" ]] && echo "  $k"
+      done < "$VAULT_STORE"
+    else
+      echo "  (none)"
+    fi
+    exit 0
+    ;;
+  "vault info")
+    echo "Vault backend: keychain"
+    echo "Location: macOS Keychain (service: test)"
+    exit 0
+    ;;
+  "vault get")
+    key="$3"
+    val=$(awk -F'\t' -v k="$key" '$1==k {print $2; exit}' "$VAULT_STORE")
+    if [[ -n "$val" ]]; then
+      echo "$val"
+      exit 0
+    fi
+    echo "No credentials found for: $key" >&2
+    exit 1
+    ;;
+  "vault set")
+    key="$3"
+    read -rs val
+    # remove any existing entry, append new
+    tmp=$(mktemp)
+    awk -F'\t' -v k="$key" '$1!=k' "$VAULT_STORE" > "$tmp" || true
+    printf '%s\t%s\n' "$key" "$val" >> "$tmp"
+    mv "$tmp" "$VAULT_STORE"
+    exit 0
+    ;;
+  "vault delete")
+    key="$3"
+    tmp=$(mktemp)
+    awk -F'\t' -v k="$key" '$1!=k' "$VAULT_STORE" > "$tmp" || true
+    mv "$tmp" "$VAULT_STORE"
+    exit 0
+    ;;
+esac
+
 echo "[INFO] cmd=$*"
 echo "[INFO] line 1"
 echo "[OK] done"
 SH
   chmod +x "$WIZ_SCRATCH/dbx"
+  # The fake dbx reads $WIZ_SCRATCH at runtime via env; bats setup_dbx_env
+  # exports it but make it explicit for clarity.
+  export WIZ_SCRATCH
 
   WIZ_TOKEN="testtoken1234567890abcdef00000000"
   WIZ_PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
@@ -54,6 +119,7 @@ SH
     --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
     --runs-fragment     "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
     --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
+    --vault-fragment    "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
     --config-path       "$WIZ_SCRATCH/config.json" \
     --data-dir          "$WIZ_SCRATCH/data" \
     --audit-dir         "$WIZ_AUDIT_DIR" \
@@ -789,6 +855,7 @@ JSONL
   [[ "$output" == *"pg_dump: connection refused"* ]]
 }
 
+
 # /api/audit-log new filters: date range, regex, outcome, result envelope.
 # Triggering ANY new param flips the response to the envelope shape:
 #   {"entries": [...], "total": N, "filtered": M}
@@ -874,4 +941,186 @@ JSONL
   [[ "$output" == *"\"entries\""* ]]
   [[ "$output" == *"\"total\": 2"* ]]
   [[ "$output" == *"\"filtered\": 2"* ]]
+}
+
+# ----------------------------------------------------------------------------
+# /api/vault/*  — vault management endpoints (PR-Y3)
+# ----------------------------------------------------------------------------
+
+@test "GET / now composes the vault fragment too" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxVault()"* ]]
+}
+
+@test "GET /api/vault/list returns an empty array when no credentials stored" {
+  # Fresh setup → fake vault store is empty.
+  run curl -s "$(api /api/vault/list)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+}
+
+@test "GET /api/vault/list returns rows after seeding the fake store" {
+  # Seed via the same POST endpoint that the UI uses.
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql","value":"hunter2"}' \
+    "$(api /api/vault/set)" >/dev/null
+  run curl -s "$(api /api/vault/list)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"key\": \"prod-mysql\""* ]]
+  [[ "$output" == *"\"backend\": \"macos-keychain\""* ]]
+}
+
+@test "GET /api/vault/get with valid key returns the stored value" {
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql","value":"hunter2"}' \
+    "$(api /api/vault/set)" >/dev/null
+  run curl -s "$(api /api/vault/get)&key=prod-mysql"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"key\": \"prod-mysql\""* ]]
+  [[ "$output" == *"\"value\": \"hunter2\""* ]]
+}
+
+@test "GET /api/vault/get rejects bad key shape with 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/vault/get)&key=bad;rm"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/vault/set rejects bad key shape with 400" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"key":"bad;rm","value":"x"}' "$(api /api/vault/set)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/vault/set rejects oversized value (>4096 bytes) with 400" {
+  # 5000-char payload — well over the 4096-byte cap.
+  local big
+  big=$(python3 -c "print('x' * 5000)")
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"key\":\"prod-mysql\",\"value\":\"$big\"}" "$(api /api/vault/set)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"exceeds"* ]] || [[ "$output" == *"4096"* ]]
+}
+
+@test "POST /api/vault/set with non-dict body returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d '"just-a-string"' "$(api /api/vault/set)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/vault/delete happy path returns 200" {
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql","value":"hunter2"}' \
+    "$(api /api/vault/set)" >/dev/null
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql"}' "$(api /api/vault/delete)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+}
+
+@test "POST /api/vault/delete rejects bad key shape with 400" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"key":"bad;rm"}' "$(api /api/vault/delete)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/vault/age-recipients returns {path, recipients} from the sandbox file" {
+  cat > "$DBX_AGE_RECIPIENTS" <<'TXT'
+# header comment, should be filtered out
+age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+TXT
+  run curl -s "$(api /api/vault/age-recipients)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"path\":"* ]]
+  [[ "$output" == *"age-recipients.txt"* ]]
+  [[ "$output" == *"age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"* ]]
+  [[ "$output" == *"age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"* ]]
+  # Comment must not appear.
+  [[ "$output" != *"header comment"* ]]
+}
+
+@test "GET /api/vault/age-recipients returns empty list when file is missing" {
+  [ ! -f "$DBX_AGE_RECIPIENTS" ]
+  run curl -s "$(api /api/vault/age-recipients)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"recipients\": []"* ]]
+}
+
+@test "POST /api/vault/age-recipients/add rejects invalid recipient shape" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"recipient":"not-an-age-key"}' "$(api /api/vault/age-recipients/add)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/vault/age-recipients/add happy path appends a line" {
+  local recipient="age1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmn0pqrs"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"recipient\":\"$recipient\"}" "$(api /api/vault/age-recipients/add)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [ -f "$DBX_AGE_RECIPIENTS" ]
+  run cat "$DBX_AGE_RECIPIENTS"
+  [[ "$output" == *"$recipient"* ]]
+}
+
+@test "POST /api/vault/age-recipients/add preserves comment lines on append" {
+  # Seed with a comment and one recipient.
+  cat > "$DBX_AGE_RECIPIENTS" <<'TXT'
+# managed by dbx
+age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+TXT
+  local new="age1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmn0pqrs"
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"recipient\":\"$new\"}" "$(api /api/vault/age-recipients/add)" >/dev/null
+  run cat "$DBX_AGE_RECIPIENTS"
+  [[ "$output" == *"# managed by dbx"* ]]
+  [[ "$output" == *"age1zzzz"* ]]
+  [[ "$output" == *"$new"* ]]
+}
+
+@test "POST /api/vault/age-recipients/remove removes a line" {
+  local r1="age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+  local r2="age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+  cat > "$DBX_AGE_RECIPIENTS" <<TXT
+$r1
+$r2
+TXT
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"recipient\":\"$r1\"}" "$(api /api/vault/age-recipients/remove)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  run cat "$DBX_AGE_RECIPIENTS"
+  [[ "$output" != *"$r1"* ]]
+  [[ "$output" == *"$r2"* ]]
+}
+
+@test "GET /api/vault/list with bad token returns 403" {
+  run curl -s -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:$WIZ_PORT/api/vault/list?token=NOPE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
+@test "GET /api/vault/list surfaces last_set from audit.log vault_set rows" {
+  # Seed an audit row for vault_set against `prod-mysql`, then store a
+  # credential so the list endpoint joins the two.
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-25T02:07:58Z","action":"vault_set","outcome":"success","account":"prod-mysql"}
+JSONL
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql","value":"hunter2"}' \
+    "$(api /api/vault/set)" >/dev/null
+  run curl -s "$(api /api/vault/list)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"last_set\": \"2026-05-25T02:07:58Z\""* ]]
 }

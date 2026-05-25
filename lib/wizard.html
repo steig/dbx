@@ -142,6 +142,7 @@
         <a @click="$store.dbx.view = 'backups'"  :class="{active: $store.dbx.view === 'backups'}">Backups</a>
         <a @click="$store.dbx.view = 'runs'"     :class="{active: $store.dbx.view === 'runs'}">Runs</a>
         <a @click="$store.dbx.view = 'restore'"  :class="{active: $store.dbx.view === 'restore'}">Restore</a>
+        <a @click="$store.dbx.view = 'vault'"    :class="{active: $store.dbx.view === 'vault'}">Vault</a>
         <a @click="$store.dbx.view = 'schedule'" :class="{active: $store.dbx.view === 'schedule'}">Schedule</a>
       </nav>
     </aside>
@@ -167,6 +168,9 @@
       </section>
       <section x-data x-show="$store.dbx.view === 'restore'">
         <!-- __DBX_RESTORE_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'vault'">
+        <!-- __DBX_VAULT_FRAGMENT__ -->
       </section>
       <section x-data x-show="$store.dbx.view === 'schedule'">
         <!-- __DBX_SCHEDULE_FRAGMENT__ -->
