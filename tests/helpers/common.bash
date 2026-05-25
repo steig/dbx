@@ -54,6 +54,8 @@ source_dbx_libs() {
   source "$DBX_REPO_ROOT/lib/update.sh"
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/wizard.sh"
+  # shellcheck source=/dev/null
+  source "$DBX_REPO_ROOT/lib/completion.sh"
 }
 
 # Write a config.json with the given content.
