@@ -38,6 +38,11 @@ SH
   WIZ_PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
   WIZ_DONE="$WIZ_SCRATCH/done"
 
+  # Sandbox the audit dir under the scratch tree so /api/audit-log doesn't
+  # read the developer's real ~/.local/share/dbx/audit.log.
+  mkdir -p "$WIZ_SCRATCH/audit"
+  WIZ_AUDIT_DIR="$WIZ_SCRATCH/audit"
+
   python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
     --port "$WIZ_PORT" \
     --token "$WIZ_TOKEN" \
@@ -46,8 +51,10 @@ SH
     --backups-fragment  "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
     --restore-fragment  "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
     --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
+    --runs-fragment     "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
     --config-path       "$WIZ_SCRATCH/config.json" \
     --data-dir          "$WIZ_SCRATCH/data" \
+    --audit-dir         "$WIZ_AUDIT_DIR" \
     --dbx-bin           "$WIZ_SCRATCH/dbx" \
     --lib-dir           "$WIZ_REPO_ROOT/lib" \
     --done-marker       "$WIZ_DONE" \
@@ -462,4 +469,114 @@ JSON
     -d '{}' "$(api /api/backups/delete)"
   [ "$status" -eq 0 ]
   [[ "$output" == *"required"* ]]
+}
+
+# ----------------------------------------------------------------------------
+# /api/audit-log  — recent audit-log entries for the Runs view
+# ----------------------------------------------------------------------------
+
+@test "GET / now composes the runs fragment too" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxRuns()"* ]]
+}
+
+@test "GET /api/audit-log returns [] when audit.log is missing" {
+  # Default setup creates the dir but no file inside it.
+  [ ! -f "$WIZ_AUDIT_DIR/audit.log" ]
+  run curl -s "$(api /api/audit-log)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+}
+
+@test "GET /api/audit-log returns parsed JSON entries newest first" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app","duration_sec":"42","size":"1234567","file":"/data/prod/app/app_20260501.sql.zst"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"restore","outcome":"success","target_db":"app_restore","duration_sec":"30"}
+{"timestamp":"2026-05-03T12:00:00Z","action":"backup","outcome":"failure","db_host":"prod","database":"app"}
+JSONL
+  run curl -s "$(api /api/audit-log)"
+  [ "$status" -eq 0 ]
+  # All three entries present.
+  [[ "$output" == *"2026-05-01"* ]]
+  [[ "$output" == *"2026-05-02"* ]]
+  [[ "$output" == *"2026-05-03"* ]]
+  # Newest first: 05-03 should appear before 05-01 in the response body.
+  local pos03 pos01
+  pos03=$(awk -v s="$output" 'BEGIN{print index(s, "2026-05-03")}')
+  pos01=$(awk -v s="$output" 'BEGIN{print index(s, "2026-05-01")}')
+  [ "$pos03" -lt "$pos01" ]
+}
+
+@test "GET /api/audit-log?action=backup filters to backup entries only" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"restore","outcome":"success","target_db":"app"}
+{"timestamp":"2026-05-03T12:00:00Z","action":"vault_set","outcome":"success","account":"prod"}
+JSONL
+  run curl -s "$(api /api/audit-log)&action=backup"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"action\": \"backup\""* ]]
+  # Other actions must not appear.
+  [[ "$output" != *"\"restore\""* ]]
+  [[ "$output" != *"vault_set"* ]]
+}
+
+@test "GET /api/audit-log?action=BOGUS returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/audit-log)&action=BOGUS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/audit-log?limit=99999 returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/audit-log)&limit=99999"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/audit-log?limit=0 returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/audit-log)&limit=0"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/audit-log?limit=notanumber returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/audit-log)&limit=abc"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/audit-log honors the limit parameter" {
+  # Write 10 entries; ask for 3; expect 3 newest.
+  : > "$WIZ_AUDIT_DIR/audit.log"
+  for i in 01 02 03 04 05 06 07 08 09 10; do
+    echo "{\"timestamp\":\"2026-05-${i}T10:00:00Z\",\"action\":\"backup\",\"outcome\":\"success\",\"db_host\":\"prod\",\"database\":\"app\"}" >> "$WIZ_AUDIT_DIR/audit.log"
+  done
+  run curl -s "$(api /api/audit-log)&limit=3"
+  [ "$status" -eq 0 ]
+  # 3 newest = 08, 09, 10 — must include them and NOT include 01.
+  [[ "$output" == *"2026-05-10"* ]]
+  [[ "$output" == *"2026-05-09"* ]]
+  [[ "$output" == *"2026-05-08"* ]]
+  [[ "$output" != *"2026-05-01"* ]]
+}
+
+@test "GET /api/audit-log silently skips malformed lines" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+this is not json at all
+{"timestamp":"2026-05-02T11:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+JSONL
+  run curl -s "$(api /api/audit-log)"
+  [ "$status" -eq 0 ]
+  # The two good lines are returned; the bad line is silently dropped.
+  [[ "$output" == *"2026-05-01"* ]]
+  [[ "$output" == *"2026-05-02"* ]]
+  [[ "$output" != *"not json"* ]]
+}
+
+@test "GET /api/audit-log with bad token returns 403" {
+  run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/audit-log?token=NOPE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
 }

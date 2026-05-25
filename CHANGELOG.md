@@ -4,6 +4,20 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **New wizard "Runs" view** (between Backups and Restore) renders the last 200 audit-log entries — `dbx backup`, `dbx restore`, and vault operations — as a sortable table with When / Action / Host-DB / Outcome / Duration / File columns. Failed runs get a soft red row wash and the `✗ failure` chip so you actually notice cron-driven backups that died silently. Filter by action (Backup / Restore / Other) and free-text host/db search. The backing `GET /api/audit-log` endpoint validates the `action` allowlist + clamps `limit` to 1-500, reads only the tail of `audit.log` so the request stays cheap even on multi-year accumulations, and returns `[]` (not 500) when the log doesn't exist yet. Closes the user's "if the backup fails I actually don't know" gap — until now, audit visibility required `cat ~/.local/share/dbx/audit.log | jq` from a terminal.
+
+### Changed
+
+- **Wizard UX polish: bumped contrast + saturation.** User feedback was "the UX of this wizard is awful, needs more color. It's so dark and hard to read." Conservative changes only — no redesign:
+  - Primary accent goes from a muted `#0b6bcb` to a vibrant `#0066ff` in light mode (dark mode's `#4ea8de` was already fine). Primary buttons and active sidebar items now pop instead of fading into the chrome.
+  - Sidebar background is now meaningfully distinct from the main content (light: `#eef1f7` vs `#fff`; dark: `#0e1014` vs `#14161a`) so the left nav reads as a separate region.
+  - `--md-default-fg-color--lightest` is darker / lighter in both modes so table dividers + section borders are actually visible (was nearly invisible at `#24272e` on `#14161a` in dark mode).
+  - Status chip backgrounds (`--age`, `--gpg`, `--complete`, `--incomplete`, `--prod`, `--stage`) bumped from ~15% alpha to ~28-30% so they read as filled chips, not whisper-tints. Dark-mode chip text is lightened to keep legibility on the more-saturated fills.
+  - Section dividers in main views: `.dbx-view__header` now has a bottom border so the header reliably separates from the table/form below.
+  - Active sidebar nav item is rendered in the accent color (in addition to the left-edge accent bar) so the current tab is unmistakable.
+
 ### Fixed
 
 - **Restore success line now says WHERE the data landed.** Previously `[OK] Restore complete: b2c_v1_20260524` left the user guessing whether the data went to the managed `mysql-dbx` container, a docker-compose `mysql` service, or a remote `DEV_SERVICES_MODE=remote` host. Now: `[OK] Restore complete: b2c_v1_20260524 on mysql:3306 (DEV_SERVICES_MODE=remote)` for remote mode or `… on container mysql-dbx` for the default. Applies to both MySQL and Postgres restore paths.
