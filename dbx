@@ -234,12 +234,22 @@ cmd_restore() {
   local transform_script=""
   local transform_inherit_env=false
   local into_container=""
+  local verbose=false
 
   # Mixed flag/positional parse: `source` is the only positional and
   # may appear before or after flags (or be absent entirely when the
   # user uses --from-remote).
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -v|--verbose)
+        # Currently surfaces mysql's per-statement output during import.
+        # Future: also enable pg_restore --verbose. Exported so the lib
+        # helpers (lib/mysql.sh, lib/postgres.sh) see it without needing
+        # an explicit arg.
+        verbose=true
+        export DBX_VERBOSE=1
+        shift
+        ;;
       --name|-n)
         target_name="$2"
         shift 2

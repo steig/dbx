@@ -4,6 +4,11 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **`dbx restore -v` / `--verbose`** now works (previously errored `Unknown option`). Surfaces verbose log paths into the restore code; also exports `DBX_VERBOSE=1` for downstream libs that gate output on it.
+- **`dbx backup -v` now tees mysqldump's stderr live** to the terminal instead of only capturing it for post-hoc inspection. mysqldump `--verbose` emits per-table progress (`-- Retrieving table structure for table X...`) — invaluable when diagnosing a missing-table situation since you can watch and see exactly which table doesn't appear. Without this, the only way to see the progress was to wait for the whole dump to finish and then read the captured file. Also prints `mysqldump target: user@host:port → database` at the start of each pass when verbose.
+
 ### Fixed
 
 - **`dbx backup <host> <mysqldb>` now surfaces mysqldump warnings even on exit-0.** Previously, mysqldump's stderr was captured into a tmpfile and only printed on non-zero exit. But mysqldump's default behavior on access-denied errors is to silently skip the inaccessible table and emit a `Got error: 1142` or `Access denied` warning to stderr — exit code 0. The backup was "successful" but missing tables, and the user only discovered this at restore time when views referencing the skipped tables failed with `ERROR 1146 ("Table 'b2b.udropship_po' doesn't exist")`. Now both passes always pipe their stderr through a filter that drops only the cosmetic "Using a password" warning and surfaces everything else as `[WARN] mysqldump (<pass>) emitted warnings/errors: …` so the missing-tables case is obvious at backup time. Affects: every MySQL backup where the backup user lacks SELECT on some table the rest of the schema references.
