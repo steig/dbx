@@ -1,0 +1,850 @@
+<!--
+  Scrub view fragment. Loaded by `dbx wizard` only.
+
+  Today the GUI's only scrub touchpoint is the "Skip PII scrub gate
+  (break-glass)" checkbox on the Restore view — the panic button without
+  the dashboard it implies. This view fixes that asymmetry: it lets the
+  user see each host's manifest status, draft one with `dbx scrub init`,
+  drift-check it with `dbx scrub check`, and edit per-column strategies
+  without leaving the browser. Backed by /api/scrub/* in wizard-server.py.
+
+  The "Init / Check" actions shell out to the dbx CLI synchronously — both
+  return in a few seconds and produce JSON, so the SSE machinery used by
+  backup/restore would be overkill. Manifest writes go through
+  /api/scrub/save which enforces the same path-under-HOME-or-config-dir
+  containment used by /api/backups/delete.
+-->
+<style>
+  .dbx-scrub__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+  .dbx-scrub__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; margin-bottom: 1.5rem; }
+  .dbx-scrub__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
+  .dbx-scrub__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
+  .dbx-scrub__table tbody tr:hover { background: var(--md-code-bg-color); }
+
+  .dbx-scrub__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
+  .dbx-scrub__path  { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
+  .dbx-scrub__path--missing { color: #c43d3d; }
+
+  /* Chips reuse Backups view's palette so the visual vocabulary stays consistent. */
+  .dbx-scrub__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .dbx-scrub__chip--ok      { background: rgba(74, 158, 76, 0.30); color: #1e5a20; }
+  .dbx-scrub__chip--missing { background: rgba(196, 61, 61, 0.30); color: #8a1f1f; }
+  .dbx-scrub__chip--required{ background: rgba(0, 102, 255, 0.22); color: var(--md-accent-fg-color); }
+  .dbx-scrub__chip--prod    { background: rgba(196, 61, 61, 0.28); color: #8a1f1f; letter-spacing: 0.03em; }
+  .dbx-scrub__chip--stage   { background: rgba(218, 135, 33, 0.30); color: #8a4c10; letter-spacing: 0.03em; }
+  @media (prefers-color-scheme: dark) {
+    .dbx-scrub__chip--ok      { color: #6fd073; }
+    .dbx-scrub__chip--missing { color: #ff8a8a; }
+    .dbx-scrub__chip--required{ color: #7cb9ff; }
+    .dbx-scrub__chip--prod    { color: #ff8a8a; }
+    .dbx-scrub__chip--stage   { color: #ffbf6b; }
+  }
+
+  .dbx-scrub__panel {
+    background: var(--md-code-bg-color);
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+  }
+  .dbx-scrub__panel h3 { margin: 0 0 0.75rem; font-size: 1rem; }
+  .dbx-scrub__close {
+    float: right;
+    background: transparent;
+    border: 0;
+    color: var(--md-default-fg-color--light);
+    cursor: pointer;
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  .dbx-scrub__row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; }
+  .dbx-scrub__row label { min-width: 140px; color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+  .dbx-scrub__input, .dbx-scrub__select {
+    flex: 1; min-width: 220px;
+    padding: 0.375rem 0.5rem; border-radius: 4px;
+    border: 1px solid var(--md-default-fg-color--lighter);
+    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
+    font-size: 0.875rem;
+  }
+  .dbx-scrub__select--narrow { min-width: 160px; flex: 0 1 auto; }
+
+  .dbx-scrub__textarea {
+    width: 100%; min-height: 240px;
+    padding: 0.5rem;
+    border: 1px solid var(--md-default-fg-color--lighter);
+    border-radius: 4px;
+    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
+    font-family: var(--md-code-font-family); font-size: 0.8125rem;
+  }
+
+  .dbx-scrub__error {
+    color: #8a1f1f;
+    background: rgba(196, 61, 61, 0.10);
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    margin: 0.5rem 0;
+    font-size: 0.875rem;
+  }
+  .dbx-scrub__note {
+    color: var(--md-default-fg-color--light);
+    font-size: 0.8125rem;
+    margin: 0.25rem 0 0.75rem;
+  }
+
+  /* Drift report formatting. */
+  .dbx-scrub__drift-section { margin-top: 0.75rem; }
+  .dbx-scrub__drift-section h4 { margin: 0 0 0.25rem; font-size: 0.9375rem; }
+  .dbx-scrub__drift-list { margin: 0; padding-left: 1.25rem; font-size: 0.875rem; }
+  .dbx-scrub__drift-list code { font-size: 0.8125rem; }
+
+  /* Editor: per-table card with per-column strategy rows. */
+  .dbx-scrub__editor-table {
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    background: var(--md-default-bg-color);
+  }
+  .dbx-scrub__editor-thead {
+    padding: 0.5rem 0.75rem;
+    background: var(--md-code-bg-color);
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
+  }
+  .dbx-scrub__editor-thead strong { font-family: var(--md-code-font-family); font-size: 0.9375rem; }
+  .dbx-scrub__editor-col { display: flex; gap: 0.5rem; align-items: center; padding: 0.375rem 0.75rem; font-size: 0.875rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); }
+  .dbx-scrub__editor-col:last-child { border-bottom: none; }
+  .dbx-scrub__editor-col code { font-family: var(--md-code-font-family); font-size: 0.8125rem; min-width: 180px; }
+  .dbx-scrub__editor-col .dbx-scrub__param {
+    flex: 1; min-width: 100px;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--md-default-fg-color--lighter);
+    border-radius: 4px;
+    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
+    font-size: 0.8125rem;
+  }
+  .dbx-scrub__no-pii { padding: 0.5rem 0.75rem; color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+</style>
+
+<div x-data="dbxScrub()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Scrub</h2>
+    <p class="dbx-view__subtitle">
+      Per-host PII manifests. <code>dbx scrub init</code> drafts one from
+      a live schema; <code>dbx scrub check</code> diffs the manifest
+      against the schema and refuses restores when it drifts. The
+      "Skip PII scrub gate" checkbox on the Restore view bypasses this
+      entirely — use it sparingly.
+    </p>
+  </header>
+
+  <div class="dbx-scrub__toolbar">
+    <button class="dbx-backups__btn" @click="loadStatus()" :disabled="loading">Refresh</button>
+    <span class="dbx-runs__count" x-text="hosts.length === 0 ? '' : `${hosts.length} host${hosts.length === 1 ? '' : 's'}`"></span>
+  </div>
+
+  <template x-if="error">
+    <p class="dbx-scrub__error" x-text="error"></p>
+  </template>
+
+  <template x-if="loading && hosts.length === 0">
+    <p class="dbx-scrub__empty">Loading…</p>
+  </template>
+
+  <template x-if="!loading && hosts.length === 0">
+    <p class="dbx-scrub__empty">
+      No hosts configured. Add one in the <a @click="$store.dbx.view = 'config'" style="cursor: pointer; color: var(--md-accent-fg-color);">Config view</a> first, then return here to draft a scrub manifest.
+    </p>
+  </template>
+
+  <template x-if="hosts.length > 0">
+    <table class="dbx-scrub__table">
+      <thead>
+        <tr>
+          <th>Host</th>
+          <th>Type</th>
+          <th>Safety</th>
+          <th>Manifest</th>
+          <th>Status</th>
+          <th style="width: 280px;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="h in hosts" :key="h.alias">
+          <tr>
+            <td><strong x-text="h.alias"></strong></td>
+            <td x-text="h.type || '—'"></td>
+            <td>
+              <template x-if="h.safety === 'prod'">
+                <span class="dbx-scrub__chip dbx-scrub__chip--prod">PROD</span>
+              </template>
+              <template x-if="h.safety === 'stage'">
+                <span class="dbx-scrub__chip dbx-scrub__chip--stage">STAGE</span>
+              </template>
+              <template x-if="h.safety === 'local' || !h.safety">
+                <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;">local</span>
+              </template>
+            </td>
+            <td>
+              <template x-if="h.manifest_path">
+                <span class="dbx-scrub__path" :class="{ 'dbx-scrub__path--missing': !h.manifest_exists }"
+                      x-text="h.manifest_path"></span>
+              </template>
+              <template x-if="!h.manifest_path">
+                <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;">(not configured)</span>
+              </template>
+            </td>
+            <td>
+              <template x-if="!h.manifest_path">
+                <span class="dbx-scrub__chip dbx-scrub__chip--missing">no manifest</span>
+              </template>
+              <template x-if="h.manifest_path && !h.manifest_exists">
+                <span class="dbx-scrub__chip dbx-scrub__chip--missing">file missing</span>
+              </template>
+              <template x-if="h.manifest_exists">
+                <span class="dbx-scrub__chip dbx-scrub__chip--ok">ready</span>
+              </template>
+              <template x-if="h.scrub_required">
+                <span class="dbx-scrub__chip dbx-scrub__chip--required" style="margin-left: 0.25rem;">required</span>
+              </template>
+            </td>
+            <td>
+              <button class="dbx-backups__btn dbx-backups__btn--secondary"
+                      @click="openInit(h)"
+                      :disabled="busyAlias === h.alias">Init…</button>
+              <button class="dbx-backups__btn"
+                      @click="openCheck(h)"
+                      :disabled="busyAlias === h.alias || !h.manifest_exists"
+                      :title="!h.manifest_exists ? 'Configure a manifest first via Init' : ''">Check</button>
+              <button class="dbx-backups__btn"
+                      @click="openEdit(h)"
+                      :disabled="busyAlias === h.alias || !h.manifest_exists"
+                      :title="!h.manifest_exists ? 'No manifest to edit yet' : ''">Edit…</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </template>
+
+  <!-- Init panel: pick a database, run scrub init, preview draft, save. -->
+  <template x-if="panel === 'init'">
+    <div class="dbx-scrub__panel">
+      <button class="dbx-scrub__close" @click="closePanel()">×</button>
+      <h3>Init manifest for <code x-text="active.alias"></code></h3>
+
+      <template x-if="!draft">
+        <div>
+          <div class="dbx-scrub__row">
+            <label for="dbx-scrub-init-db">Database</label>
+            <template x-if="active.databases && active.databases.length > 0">
+              <select id="dbx-scrub-init-db" class="dbx-scrub__select" x-model="initDatabase">
+                <option value="">(pick a database)</option>
+                <template x-for="db in active.databases" :key="db">
+                  <option :value="db" x-text="db"></option>
+                </template>
+                <option value="__custom__">Other / type a name…</option>
+              </select>
+            </template>
+            <template x-if="!active.databases || active.databases.length === 0">
+              <input id="dbx-scrub-init-db" class="dbx-scrub__input"
+                     x-model="initDatabase"
+                     placeholder="e.g. myapp_production">
+            </template>
+          </div>
+          <template x-if="initDatabase === '__custom__'">
+            <div class="dbx-scrub__row">
+              <label for="dbx-scrub-init-db-free">Custom name</label>
+              <input id="dbx-scrub-init-db-free" class="dbx-scrub__input"
+                     x-model="initDatabaseCustom"
+                     placeholder="myapp_production">
+            </div>
+          </template>
+          <div class="dbx-scrub__row">
+            <label></label>
+            <label style="min-width: auto;">
+              <input type="checkbox" x-model="initIncludeEmpty">
+              Include empty tables (marks them <code>no_pii: true</code>)
+            </label>
+          </div>
+          <p class="dbx-scrub__note">
+            Runs <code>dbx scrub init <span x-text="active.alias"></span>/<span
+              x-text="effectiveInitDb() || '&lt;db&gt;'"></span></code> and
+            shows the draft before writing anything. Requires docker — the
+            CLI connects to the host to walk <code>information_schema</code>.
+          </p>
+          <div class="dbx-scrub__row">
+            <button class="dbx-backups__btn" @click="runInit()"
+                    :disabled="!effectiveInitDb() || busyAlias === active.alias">
+              <span x-show="busyAlias !== active.alias">Run scrub init</span>
+              <span x-show="busyAlias === active.alias">Running…</span>
+            </button>
+            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Cancel</button>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="draft">
+        <div>
+          <p class="dbx-scrub__note">
+            Draft generated. Review the JSON, set a save path, and write it
+            to disk. We'll also set <code>hosts.<span x-text="active.alias"></span>.scrub.manifest</code>
+            in your config so future runs find it.
+          </p>
+          <div class="dbx-scrub__row">
+            <label for="dbx-scrub-save-path">Save to</label>
+            <input id="dbx-scrub-save-path" class="dbx-scrub__input" x-model="savePath">
+          </div>
+          <textarea class="dbx-scrub__textarea" x-model="draftText" spellcheck="false"></textarea>
+          <div class="dbx-scrub__row" style="margin-top: 0.5rem;">
+            <button class="dbx-backups__btn" @click="saveDraft()" :disabled="busyAlias === active.alias">
+              <span x-show="busyAlias !== active.alias">Save manifest</span>
+              <span x-show="busyAlias === active.alias">Saving…</span>
+            </button>
+            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="draft = null; draftText = ''">Back</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- Check panel: run scrub check, render drift report. -->
+  <template x-if="panel === 'check'">
+    <div class="dbx-scrub__panel">
+      <button class="dbx-scrub__close" @click="closePanel()">×</button>
+      <h3>Drift check for <code x-text="active.alias"></code></h3>
+
+      <template x-if="!checkResult">
+        <div>
+          <div class="dbx-scrub__row">
+            <label for="dbx-scrub-check-db">Database</label>
+            <template x-if="active.databases && active.databases.length > 0">
+              <select id="dbx-scrub-check-db" class="dbx-scrub__select" x-model="checkDatabase">
+                <option value="">(pick a database)</option>
+                <template x-for="db in active.databases" :key="db">
+                  <option :value="db" x-text="db"></option>
+                </template>
+              </select>
+            </template>
+            <template x-if="!active.databases || active.databases.length === 0">
+              <input id="dbx-scrub-check-db" class="dbx-scrub__input" x-model="checkDatabase"
+                     placeholder="e.g. myapp_production">
+            </template>
+          </div>
+          <p class="dbx-scrub__note">
+            Compares the configured manifest against the live schema.
+            Same exit semantics as <code>dbx scrub check --json</code>:
+            0 = clean, 2 = drift, 1 = error.
+          </p>
+          <div class="dbx-scrub__row">
+            <button class="dbx-backups__btn" @click="runCheck()"
+                    :disabled="!checkDatabase || busyAlias === active.alias">
+              <span x-show="busyAlias !== active.alias">Run check</span>
+              <span x-show="busyAlias === active.alias">Running…</span>
+            </button>
+            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Cancel</button>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="checkResult">
+        <div>
+          <template x-if="checkResult.ok">
+            <p>
+              <span class="dbx-scrub__chip dbx-scrub__chip--ok">no drift</span>
+              <span style="margin-left: 0.5rem;">The manifest matches the live schema.</span>
+            </p>
+          </template>
+          <template x-if="!checkResult.ok">
+            <div>
+              <p>
+                <span class="dbx-scrub__chip dbx-scrub__chip--missing">drift detected</span>
+                <span style="margin-left: 0.5rem;">This manifest does not cover the current schema. A clone scrubbed against it may leak PII.</span>
+              </p>
+
+              <template x-if="(checkResult.report.new_columns_with_dict_match || []).length > 0">
+                <div class="dbx-scrub__drift-section">
+                  <h4>New columns matching the PII dictionary</h4>
+                  <ul class="dbx-scrub__drift-list">
+                    <template x-for="c in checkResult.report.new_columns_with_dict_match" :key="`${c.table}.${c.column}`">
+                      <li>
+                        <code x-text="`${c.table}.${c.column}`"></code> —
+                        pattern <code x-text="c.pattern"></code>,
+                        suggested <code x-text="c.suggested?.strategy || '—'"></code>
+                      </li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <template x-if="(checkResult.report.new_tables_with_dict_matches || []).length > 0">
+                <div class="dbx-scrub__drift-section">
+                  <h4>New tables (not in manifest) with dictionary matches</h4>
+                  <ul class="dbx-scrub__drift-list">
+                    <template x-for="t in checkResult.report.new_tables_with_dict_matches" :key="t.table">
+                      <li>
+                        <code x-text="t.table"></code> —
+                        <span x-text="(t.matches || []).map(m => `${m.column} (${m.pattern})`).join(', ')"></span>
+                      </li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <template x-if="(checkResult.report.missing_declared_columns || []).length > 0">
+                <div class="dbx-scrub__drift-section">
+                  <h4>Missing declared columns (strategy would no-op — PII may leak)</h4>
+                  <ul class="dbx-scrub__drift-list">
+                    <template x-for="c in checkResult.report.missing_declared_columns" :key="`${c.table}.${c.column}`">
+                      <li><code x-text="`${c.table}.${c.column}`"></code></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <template x-if="(checkResult.report.json_columns_undeclared || []).length > 0">
+                <div class="dbx-scrub__drift-section">
+                  <h4>Undeclared JSON columns (declare jsonb_scrub_paths, redact, or passthrough)</h4>
+                  <ul class="dbx-scrub__drift-list">
+                    <template x-for="c in checkResult.report.json_columns_undeclared" :key="`${c.table}.${c.column}`">
+                      <li><code x-text="`${c.table}.${c.column}`"></code></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <div class="dbx-scrub__row" style="margin-top: 0.75rem;">
+            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="checkResult = null">Run again</button>
+            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Close</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- Edit panel: per-table column editor with strategy dropdowns. -->
+  <template x-if="panel === 'edit'">
+    <div class="dbx-scrub__panel">
+      <button class="dbx-scrub__close" @click="closePanel()">×</button>
+      <h3>Edit manifest for <code x-text="active.alias"></code></h3>
+      <p class="dbx-scrub__note">
+        Editing <code x-text="active.manifest_path"></code>. Per-column
+        strategies map to the SQL emitters in
+        <code>lib/scrub_strategies.sh</code>. Strategy-specific params
+        (length, max_days, replacement, reason) appear inline when
+        relevant. Complex shapes (<code>jsonb_scrub_paths</code>'s
+        <code>paths</code> object, <code>dictionary.extend</code>) keep
+        their existing values verbatim on save.
+      </p>
+
+      <template x-if="editTables.length === 0">
+        <p class="dbx-scrub__note">
+          This manifest has no tables. Run <code>dbx scrub init</code>
+          first, or hand-edit the JSON directly on disk.
+        </p>
+      </template>
+
+      <template x-for="t in editTables" :key="t.name">
+        <div class="dbx-scrub__editor-table">
+          <div class="dbx-scrub__editor-thead">
+            <strong x-text="t.name"></strong>
+            <label style="margin-left: auto; min-width: auto;">
+              <input type="checkbox" :checked="t.no_pii" @change="toggleNoPii(t, $event.target.checked)">
+              <span style="font-size: 0.8125rem;">no_pii (table contains no PII)</span>
+            </label>
+          </div>
+          <template x-if="t.no_pii">
+            <div class="dbx-scrub__no-pii">
+              Reason:
+              <input class="dbx-scrub__param" x-model="t.reason" placeholder="(required when no_pii is on)">
+            </div>
+          </template>
+          <template x-if="!t.no_pii">
+            <div>
+              <template x-if="t.columns.length === 0">
+                <div class="dbx-scrub__no-pii">No columns declared.</div>
+              </template>
+              <template x-for="col in t.columns" :key="col.name">
+                <div class="dbx-scrub__editor-col">
+                  <code x-text="col.name"></code>
+                  <select class="dbx-scrub__select dbx-scrub__select--narrow" x-model="col.strategy">
+                    <template x-for="s in strategies" :key="s">
+                      <option :value="s" x-text="s"></option>
+                    </template>
+                  </select>
+                  <template x-if="col.strategy === 'truncate'">
+                    <input type="number" class="dbx-scrub__param" min="1" max="65535"
+                           x-model.number="col.length" placeholder="length">
+                  </template>
+                  <template x-if="col.strategy === 'shift_date'">
+                    <input type="number" class="dbx-scrub__param" min="1" max="3650"
+                           x-model.number="col.max_days" placeholder="max_days">
+                  </template>
+                  <template x-if="col.strategy === 'redact'">
+                    <input type="text" class="dbx-scrub__param"
+                           x-model="col.replacement" placeholder="replacement (optional)">
+                  </template>
+                  <template x-if="col.strategy === 'passthrough'">
+                    <input type="text" class="dbx-scrub__param"
+                           x-model="col.reason" placeholder="reason (required)">
+                  </template>
+                  <template x-if="col.strategy === 'jsonb_scrub_paths'">
+                    <span class="dbx-scrub__path" style="flex: 1;">
+                      paths preserved verbatim — edit the JSON directly to change them
+                    </span>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <div class="dbx-scrub__row" style="margin-top: 0.75rem;">
+        <button class="dbx-backups__btn" @click="saveEdits()" :disabled="busyAlias === active.alias">
+          <span x-show="busyAlias !== active.alias">Save manifest</span>
+          <span x-show="busyAlias === active.alias">Saving…</span>
+        </button>
+        <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Cancel</button>
+      </div>
+    </div>
+  </template>
+</div>
+
+<script>
+  function dbxScrub() {
+    return {
+      hosts: [],
+      loading: true,
+      error: '',
+      busyAlias: '',
+
+      // Active panel: 'init' | 'check' | 'edit' | ''
+      panel: '',
+      active: { alias: '', databases: [], manifest_path: '' },
+
+      // Init state
+      initDatabase: '',
+      initDatabaseCustom: '',
+      initIncludeEmpty: false,
+      draft: null,
+      draftText: '',
+      savePath: '',
+
+      // Check state
+      checkDatabase: '',
+      checkResult: null,
+
+      // Edit state
+      editTables: [],
+      editManifest: null,
+
+      strategies: [
+        'fake_email', 'fake_phone', 'fake_ip', 'fake_name', 'fake_company',
+        'fake_address', 'fake_city', 'fake_username',
+        'redact', 'truncate', 'shift_date', 'passthrough', 'jsonb_scrub_paths',
+      ],
+
+      init() {
+        this.$watch('$store.dbx.view', (v) => { if (v === 'scrub') this.loadStatus(); });
+        if (Alpine.store('dbx').view === 'scrub') this.loadStatus();
+      },
+
+      async loadStatus() {
+        this.loading = true;
+        this.error = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/scrub/status'));
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          this.hosts = await r.json();
+        } catch (e) {
+          this.hosts = [];
+          this.error = `Failed to load scrub status: ${e.message || e}`;
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      effectiveInitDb() {
+        return this.initDatabase === '__custom__' ? this.initDatabaseCustom.trim()
+                                                  : this.initDatabase;
+      },
+
+      openInit(h) {
+        this.panel = 'init';
+        this.active = h;
+        this.initDatabase = (h.databases && h.databases.length === 1) ? h.databases[0] : '';
+        this.initDatabaseCustom = '';
+        this.initIncludeEmpty = false;
+        this.draft = null;
+        this.draftText = '';
+        this.error = '';
+        // Default save path: <config-dir>/scrub/<alias>.json (the server
+        // anchors relative paths to the config directory).
+        this.savePath = `scrub/${h.alias}.json`;
+      },
+
+      openCheck(h) {
+        this.panel = 'check';
+        this.active = h;
+        this.checkDatabase = (h.databases && h.databases.length === 1) ? h.databases[0] : '';
+        this.checkResult = null;
+        this.error = '';
+      },
+
+      async openEdit(h) {
+        this.panel = 'edit';
+        this.active = h;
+        this.editTables = [];
+        this.editManifest = null;
+        this.error = '';
+        try {
+          const url = Alpine.store('dbx').api('/scrub/manifest') + `&host=${encodeURIComponent(h.alias)}`;
+          const r = await fetch(url);
+          const body = await r.json();
+          if (!r.ok) {
+            this.error = body.error || `HTTP ${r.status}`;
+            return;
+          }
+          if (!body.manifest) {
+            this.error = 'No manifest configured for this host yet.';
+            return;
+          }
+          this.editManifest = body.manifest;
+          this.editTables = this._manifestToTables(body.manifest);
+        } catch (e) {
+          this.error = `Failed to load manifest: ${e.message || e}`;
+        }
+      },
+
+      closePanel() {
+        this.panel = '';
+        this.active = { alias: '', databases: [], manifest_path: '' };
+        this.draft = null;
+        this.draftText = '';
+        this.checkResult = null;
+        this.editTables = [];
+        this.editManifest = null;
+        this.error = '';
+      },
+
+      async runInit() {
+        const db = this.effectiveInitDb();
+        if (!db) return;
+        this.busyAlias = this.active.alias;
+        this.error = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/scrub/init'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              host: this.active.alias,
+              database: db,
+              include_empty: this.initIncludeEmpty,
+            }),
+          });
+          const body = await r.json();
+          if (!r.ok) {
+            // Surface stderr from the CLI verbatim — it usually points at
+            // the docker / credential / network problem in plain English.
+            this.error = body.error
+              ? `${body.error}${body.stderr ? '\n\n' + body.stderr : ''}`
+              : `HTTP ${r.status}`;
+            return;
+          }
+          this.draft = body.manifest;
+          this.draftText = JSON.stringify(body.manifest, null, 2);
+        } catch (e) {
+          this.error = `Init failed: ${e.message || e}`;
+        } finally {
+          this.busyAlias = '';
+        }
+      },
+
+      async saveDraft() {
+        let parsed;
+        try {
+          parsed = JSON.parse(this.draftText);
+        } catch (e) {
+          this.error = `Draft is not valid JSON: ${e.message || e}`;
+          return;
+        }
+        this.busyAlias = this.active.alias;
+        this.error = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/scrub/save'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              host: this.active.alias,
+              manifest_path: this.savePath,
+              manifest: parsed,
+            }),
+          });
+          const body = await r.json();
+          if (!r.ok) {
+            this.error = body.error || `HTTP ${r.status}`;
+            return;
+          }
+          this.closePanel();
+          await this.loadStatus();
+        } catch (e) {
+          this.error = `Save failed: ${e.message || e}`;
+        } finally {
+          this.busyAlias = '';
+        }
+      },
+
+      async runCheck() {
+        if (!this.checkDatabase) return;
+        this.busyAlias = this.active.alias;
+        this.error = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/scrub/check'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              host: this.active.alias,
+              database: this.checkDatabase,
+            }),
+          });
+          const body = await r.json();
+          if (!r.ok) {
+            this.error = body.error
+              ? `${body.error}${body.stderr ? '\n\n' + body.stderr : ''}`
+              : `HTTP ${r.status}`;
+            return;
+          }
+          this.checkResult = body;
+        } catch (e) {
+          this.error = `Check failed: ${e.message || e}`;
+        } finally {
+          this.busyAlias = '';
+        }
+      },
+
+      _manifestToTables(manifest) {
+        // Flatten the manifest.tables object into an array of { name,
+        // no_pii, reason, columns: [{name, strategy, length, max_days,
+        // replacement, reason, _extras}] }. _extras preserves any keys
+        // we don't render (paths, custom fields) so save round-trips.
+        const out = [];
+        const tables = (manifest && manifest.tables) || {};
+        for (const [name, body] of Object.entries(tables)) {
+          if (!body || typeof body !== 'object') continue;
+          const t = {
+            name,
+            no_pii: body.no_pii === true,
+            reason: typeof body.reason === 'string' ? body.reason : '',
+            columns: [],
+            _extras: { ...body },
+          };
+          delete t._extras.no_pii;
+          delete t._extras.reason;
+          delete t._extras.columns;
+          const cols = (body.columns && typeof body.columns === 'object') ? body.columns : {};
+          for (const [cname, cbody] of Object.entries(cols)) {
+            if (!cbody || typeof cbody !== 'object') continue;
+            const col = {
+              name: cname,
+              strategy: typeof cbody.strategy === 'string' ? cbody.strategy : 'passthrough',
+              length: typeof cbody.length === 'number' ? cbody.length : null,
+              max_days: typeof cbody.max_days === 'number' ? cbody.max_days : null,
+              replacement: typeof cbody.replacement === 'string' ? cbody.replacement : '',
+              reason: typeof cbody.reason === 'string' ? cbody.reason : '',
+              _extras: { ...cbody },
+            };
+            delete col._extras.strategy;
+            delete col._extras.length;
+            delete col._extras.max_days;
+            delete col._extras.replacement;
+            delete col._extras.reason;
+            t.columns.push(col);
+          }
+          out.push(t);
+        }
+        return out;
+      },
+
+      _tablesToManifest() {
+        const tables = {};
+        for (const t of this.editTables) {
+          if (t.no_pii) {
+            tables[t.name] = { ...(t._extras || {}), no_pii: true, reason: t.reason || '' };
+            continue;
+          }
+          const columns = {};
+          for (const col of t.columns) {
+            const out = { ...(col._extras || {}), strategy: col.strategy };
+            if (col.strategy === 'truncate' && col.length != null && col.length !== '') {
+              out.length = Number(col.length);
+            }
+            if (col.strategy === 'shift_date' && col.max_days != null && col.max_days !== '') {
+              out.max_days = Number(col.max_days);
+            }
+            if (col.strategy === 'redact' && col.replacement) {
+              out.replacement = col.replacement;
+            }
+            if (col.strategy === 'passthrough' && col.reason) {
+              out.reason = col.reason;
+            }
+            columns[col.name] = out;
+          }
+          tables[t.name] = { ...(t._extras || {}), columns };
+        }
+        const out = { ...(this.editManifest || {}) };
+        out.tables = tables;
+        return out;
+      },
+
+      toggleNoPii(t, on) {
+        t.no_pii = on;
+        // Tri-state: when toggling no_pii ON we keep the existing columns
+        // in _extras so flipping it back doesn't lose work.
+        if (on && t.columns.length > 0) {
+          t._extras = { ...(t._extras || {}), _saved_columns: t.columns };
+          t.columns = [];
+        } else if (!on && t._extras && t._extras._saved_columns) {
+          t.columns = t._extras._saved_columns;
+          const cleanedExtras = { ...t._extras };
+          delete cleanedExtras._saved_columns;
+          t._extras = cleanedExtras;
+        }
+      },
+
+      async saveEdits() {
+        if (!this.active.manifest_path) {
+          this.error = 'No manifest path to save to.';
+          return;
+        }
+        const manifest = this._tablesToManifest();
+        this.busyAlias = this.active.alias;
+        this.error = '';
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/scrub/save'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              host: this.active.alias,
+              manifest_path: this.active.manifest_path,
+              manifest,
+            }),
+          });
+          const body = await r.json();
+          if (!r.ok) {
+            this.error = body.error || `HTTP ${r.status}`;
+            return;
+          }
+          this.closePanel();
+          await this.loadStatus();
+        } catch (e) {
+          this.error = `Save failed: ${e.message || e}`;
+        } finally {
+          this.busyAlias = '';
+        }
+      },
+    };
+  }
+</script>

@@ -45,6 +45,50 @@ mkdir -p "$(dirname "$VAULT_STORE")"
 [[ -f "$VAULT_STORE" ]] || : > "$VAULT_STORE"
 
 case "$1 $2" in
+  "scrub init")
+    cat <<'JSON'
+{
+  "version": "1",
+  "seed_env": "DBX_SCRUB_SEED",
+  "tables": {
+    "users": {
+      "columns": {
+        "email": { "strategy": "fake_email" },
+        "id":    { "strategy": "passthrough", "reason": "primary key" }
+      }
+    }
+  }
+}
+JSON
+    exit 0
+    ;;
+  "scrub check")
+    if [[ "${DBX_FAKE_SCRUB_CHECK_DRIFT:-}" == "1" ]]; then
+      cat <<'JSON'
+{
+  "ok": false,
+  "new_columns_with_dict_match": [
+    { "table": "users", "column": "phone", "pattern": "phone",
+      "suggested": { "strategy": "fake_phone" } }
+  ],
+  "new_tables_with_dict_matches": [],
+  "missing_declared_columns": [],
+  "json_columns_undeclared": []
+}
+JSON
+      exit 2
+    fi
+    cat <<'JSON'
+{
+  "ok": true,
+  "new_columns_with_dict_match": [],
+  "new_tables_with_dict_matches": [],
+  "missing_declared_columns": [],
+  "json_columns_undeclared": []
+}
+JSON
+    exit 0
+    ;;
   "vault list")
     echo "Stored credentials:"
     if [[ -s "$VAULT_STORE" ]]; then
@@ -121,6 +165,7 @@ SH
     --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
     --vault-fragment    "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
     --storage-fragment   "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
+    --scrub-fragment    "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
     --config-path       "$WIZ_SCRATCH/config.json" \
     --data-dir          "$WIZ_SCRATCH/data" \
     --audit-dir         "$WIZ_AUDIT_DIR" \
@@ -1300,6 +1345,7 @@ for i, d in enumerate(['5','4','3','2','1']):
   [ "$status" -eq 0 ]
   [ "$output" = "403" ]
 }
+
 # ----------------------------------------------------------------------------
 # /api/restore/diff  — guided-restore step-3 preview
 # ----------------------------------------------------------------------------
@@ -1375,4 +1421,242 @@ JSON
     "http://127.0.0.1:$WIZ_PORT/api/restore/diff?token=NOPE&source=prod/myapp/latest&target=x"
   [ "$status" -eq 0 ]
   [ "$output" = "403" ]
+}
+
+# ---------------------------------------------------------------------------
+# Scrub endpoints
+# ---------------------------------------------------------------------------
+
+# Helper: write a config with a single host (+ optional scrub block) so each
+# scrub test starts from a known starting point.
+_plant_scrub_config() {
+  cat > "$WIZ_SCRATCH/config.json"
+}
+
+@test "GET /api/scrub/status returns [] when no hosts configured" {
+  run curl -s "$(api /api/scrub/status)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+}
+
+@test "GET /api/scrub/status surfaces per-host manifest status" {
+  _plant_scrub_config <<'JSON'
+{
+  "hosts": {
+    "prod": {
+      "type": "postgres",
+      "user": "u",
+      "safety": "prod",
+      "databases": { "myapp": {} },
+      "scrub": { "manifest": "scrub/prod.json", "required": true }
+    },
+    "stage": {
+      "type": "postgres",
+      "user": "u",
+      "databases": { "shop": {} }
+    }
+  }
+}
+JSON
+  # Plant the prod manifest file so manifest_exists flips true.
+  mkdir -p "$WIZ_SCRATCH/scrub"
+  echo '{"version":"1","tables":{}}' > "$WIZ_SCRATCH/scrub/prod.json"
+
+  run curl -s "$(api /api/scrub/status)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"alias\": \"prod\""* ]]
+  [[ "$output" == *"\"manifest_exists\": true"* ]]
+  [[ "$output" == *"\"scrub_required\": true"* ]]
+  [[ "$output" == *"\"safety\": \"prod\""* ]]
+  [[ "$output" == *"\"databases\": ["* ]]
+  [[ "$output" == *"\"myapp\""* ]]
+  # The stage host has no scrub block at all
+  [[ "$output" == *"\"alias\": \"stage\""* ]]
+  [[ "$output" == *"\"manifest_path\": null"* ]]
+}
+
+@test "GET /api/scrub/manifest returns the file contents for a configured host" {
+  _plant_scrub_config <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "scrub": { "manifest": "scrub/prod.json" } } } }
+JSON
+  mkdir -p "$WIZ_SCRATCH/scrub"
+  echo '{"version":"1","tables":{"users":{"columns":{"email":{"strategy":"fake_email"}}}}}' \
+    > "$WIZ_SCRATCH/scrub/prod.json"
+
+  run curl -s "$(api /api/scrub/manifest)&host=prod"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"host\": \"prod\""* ]]
+  [[ "$output" == *"\"manifest_path\":"* ]]
+  [[ "$output" == *"\"strategy\": \"fake_email\""* ]]
+}
+
+@test "GET /api/scrub/manifest returns null manifest when host is configured but file is missing" {
+  _plant_scrub_config <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "scrub": { "manifest": "scrub/prod.json" } } } }
+JSON
+  run curl -s "$(api /api/scrub/manifest)&host=prod"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"manifest\": null"* ]]
+}
+
+@test "GET /api/scrub/manifest rejects unconfigured host" {
+  _plant_scrub_config <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u" } } }
+JSON
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/scrub/manifest)&host=nope"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/scrub/init returns parsed manifest JSON from the fake dbx" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp"}' \
+    "$(api /api/scrub/init)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [[ "$output" == *"\"manifest\":"* ]]
+  [[ "$output" == *"\"fake_email\""* ]]
+}
+
+@test "POST /api/scrub/init rejects bad host shape" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d '{"host":"../etc","database":"myapp"}' \
+    "$(api /api/scrub/init)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/scrub/init accepts the 'local' pseudo-host" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"local","database":"myapp"}' \
+    "$(api /api/scrub/init)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+}
+
+@test "POST /api/scrub/check reports ok=true on clean schema" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp"}' \
+    "$(api /api/scrub/check)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [[ "$output" == *"\"report\":"* ]]
+}
+
+@test "POST /api/scrub/check reports ok=false on drift (exit 2)" {
+  # Pass the env signal through the server-spawned dbx by re-launching the
+  # server inside this test with DBX_FAKE_SCRUB_CHECK_DRIFT=1. The default
+  # server in setup() doesn't carry it. Easier: kill + relaunch.
+  kill "$WIZ_PID" 2>/dev/null
+  wait "$WIZ_PID" 2>/dev/null || true
+  DBX_FAKE_SCRUB_CHECK_DRIFT=1 python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
+    --port "$WIZ_PORT" --token "$WIZ_TOKEN" \
+    --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
+    --form-fragment    "$WIZ_REPO_ROOT/lib/wizard-form.html" \
+    --backups-fragment "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
+    --backup-fragment  "$WIZ_REPO_ROOT/lib/wizard-backup.html" \
+    --restore-fragment "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
+    --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
+    --runs-fragment    "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
+    --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
+    --vault-fragment   "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
+    --storage-fragment "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
+    --scrub-fragment   "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --config-path      "$WIZ_SCRATCH/config.json" \
+    --data-dir         "$WIZ_SCRATCH/data" \
+    --audit-dir        "$WIZ_AUDIT_DIR" \
+    --dbx-bin          "$WIZ_SCRATCH/dbx" \
+    --lib-dir          "$WIZ_REPO_ROOT/lib" \
+    --done-marker      "$WIZ_DONE" \
+    >"$WIZ_SCRATCH/server.log" 2>&1 &
+  WIZ_PID=$!
+  for _ in $(seq 1 20); do
+    if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"; then break; fi
+    sleep 0.1
+  done
+
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp"}' \
+    "$(api /api/scrub/check)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": false"* ]]
+  [[ "$output" == *"\"phone\""* ]]
+}
+
+@test "POST /api/scrub/save writes manifest and patches config" {
+  _plant_scrub_config <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u" } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "host": "prod",
+      "manifest_path": "scrub/prod.json",
+      "manifest": {
+        "version": "1",
+        "tables": { "users": { "columns": { "email": { "strategy": "fake_email" } } } }
+      }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [ -f "$WIZ_SCRATCH/scrub/prod.json" ]
+  # The file was written with our content
+  grep -q 'fake_email' "$WIZ_SCRATCH/scrub/prod.json"
+  # Config got patched
+  grep -q '"manifest": "scrub/prod.json"' "$WIZ_SCRATCH/config.json"
+}
+
+@test "POST /api/scrub/save without host writes manifest but leaves config alone" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "scrub/standalone.json",
+      "manifest": { "version": "1", "tables": {} }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  [ -f "$WIZ_SCRATCH/scrub/standalone.json" ]
+}
+
+@test "POST /api/scrub/save rejects manifests with unknown strategies" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "scrub/bad.json",
+      "manifest": {
+        "tables": { "t": { "columns": { "c": { "strategy": "make_stuff_up" } } } }
+      }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strategy must be one of"* ]]
+  [ ! -f "$WIZ_SCRATCH/scrub/bad.json" ]
+}
+
+@test "POST /api/scrub/save rejects paths outside HOME / config dir" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "/etc/dbx-evil.json",
+      "manifest": { "version": "1", "tables": {} }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"under the config directory or"* ]]
+}
+
+@test "POST /api/scrub/save rejects non-.json paths" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{
+      "manifest_path": "scrub/oops.txt",
+      "manifest": { "version": "1", "tables": {} }
+    }' \
+    "$(api /api/scrub/save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"must end with .json"* ]]
+}
+
+@test "GET / composes the Scrub fragment into the HTML shell" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxScrub()"* ]]
+  [[ "$output" == *"Per-host PII manifests"* ]]
 }
