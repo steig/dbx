@@ -154,19 +154,34 @@ setup() {
 # ----------------------------------------------------------------------------
 
 @test "dbx restore --into against prod-source backup is refused with a clear error" {
-  # CLI integration test for the safety gate. Linux-only because the
-  # macOS $BATS_TEST_TMPDIR symlink chain breaks dbx's path-resolution
-  # ahead of the safety check in ways that need more investigation than
-  # this fix budget allows. The safety logic itself is unit-tested
-  # extensively above (host_safety, require_writable_host) — this test
-  # is the end-to-end stitching, not the load-bearing assertion.
-  [[ "$(uname)" == "Darwin" ]] && skip "macOS path-resolution short-circuits before safety check (tracked separately)"
-
+  # CLI integration test for the safety gate. Runs on both Linux and
+  # macOS: `dbx`'s DATA_DIR-prefix check normalizes both sides via
+  # `cd … && pwd -P` so the macOS `/tmp -> /private/tmp` symlink chain
+  # no longer short-circuits the host/database extraction (and
+  # therefore the safety check) when the source is given as an
+  # absolute file path.
   mkdir -p "$DBX_DATA_DIR/production/myapp"
   : > "$DBX_DATA_DIR/production/myapp/myapp_20260524_120000.sql.zst"
   write_config '{"hosts":{"production":{"type":"postgres","user":"x","safety":"prod"}}}'
 
   run "$DBX_REPO_ROOT/dbx" restore production/myapp/latest --into some-sidecar-container
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"safety=prod"* ]]
+}
+
+@test "dbx restore --into refuses prod-source backup via an absolute file path (regression: macOS BATS_TEST_TMPDIR symlinks)" {
+  # The path-shape that used to short-circuit on macOS: source is an
+  # absolute file path under DATA_DIR. Before the cd/pwd -P
+  # normalization, the literal-string prefix check `$source ==
+  # "$DATA_DIR"/*` failed because bats' BATS_TEST_TMPDIR resolves
+  # through `/tmp -> /private/tmp`, so host/database parse skipped,
+  # and the safety check (guarded by `-n "$host"`) never fired.
+  mkdir -p "$DBX_DATA_DIR/production/myapp"
+  local fake="$DBX_DATA_DIR/production/myapp/myapp_20260524_120000.sql.zst"
+  : > "$fake"
+  write_config '{"hosts":{"production":{"type":"postgres","user":"x","safety":"prod"}}}'
+
+  run "$DBX_REPO_ROOT/dbx" restore "$fake" --into some-sidecar-container
   [ "$status" -ne 0 ]
   [[ "$output" == *"safety=prod"* ]]
 }

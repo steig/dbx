@@ -20,6 +20,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ### Fixed
 
+- **`dbx restore --into` safety gate now fires on macOS even when the source is given as an absolute path.** Before: the prefix check `[[ "$source" == "$DATA_DIR"/* ]]` used a literal string match, so a source produced by `realpath`/`find` (resolving `/tmp -> /private/tmp` on macOS) failed to match `$DATA_DIR` which had stayed `/tmp/...`. Host extraction skipped, the `[[ -n "$host" ]]` guard on the safety check kicked in, and the prod-safety refusal silently never fired. Now `cd … && pwd -P` normalizes both sides before the comparison so the prefix match works regardless of which side went through symlink resolution. As a side benefit, the safety gate also got moved to fire BEFORE `require_docker`, so the test now passes on hosts with no docker installed (notably the macOS CI runner) — the `[[ "$(uname)" == "Darwin" ]] && skip` in `tests/unit/safety.bats` is dropped.
+
+### Fixed
+
 - **Restore success line now says WHERE the data landed.** Previously `[OK] Restore complete: b2c_v1_20260524` left the user guessing whether the data went to the managed `mysql-dbx` container, a docker-compose `mysql` service, or a remote `DEV_SERVICES_MODE=remote` host. Now: `[OK] Restore complete: b2c_v1_20260524 on mysql:3306 (DEV_SERVICES_MODE=remote)` for remote mode or `… on container mysql-dbx` for the default. Applies to both MySQL and Postgres restore paths.
 - **`Connecting:` log line no longer prints a stray trailing colon when port is empty.** Was `[INFO] Connecting: 1.2.3.4: (user: …)` for hosts with SSH-tunnel-resolved ports that come back empty; now elides the `:port` portion entirely.
 
