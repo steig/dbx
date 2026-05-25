@@ -288,11 +288,16 @@ pg_restore_backup() {
   file_size=$(ls -lh "$tmpfile" | awk '{print $5}')
   log_info "Decompressed size: $file_size"
 
+  # Track which target we're restoring to so the final success message
+  # makes it obvious WHERE the data landed (matches mysql_restore_backup).
+  local restore_target
+
   # Check if using remote mode
   if [[ "${DEV_SERVICES_MODE:-local}" == "remote" ]]; then
     local pg_host="${DEV_PG_HOST:-postgres}"
     local pg_port="${DEV_PG_PORT:-5432}"
     local pg_pass="${DEV_PG_PASSWORD:-devpassword}"
+    restore_target="$pg_host:$pg_port (DEV_SERVICES_MODE=remote)"
 
     log_info "Restoring to remote: $pg_host:$pg_port"
 
@@ -312,6 +317,7 @@ pg_restore_backup() {
       "$tmpfile" 2>&1 | grep -E "^pg_restore: (error|warning)" || true
   else
     require_container "$POSTGRES_CONTAINER"
+    restore_target="container $POSTGRES_CONTAINER"
 
     # Create database if it doesn't exist
     docker exec "$POSTGRES_CONTAINER" \
@@ -337,7 +343,7 @@ pg_restore_backup() {
 
   # Audit is recorded by cmd_restore (after post-restore hooks complete) so we
   # don't claim success before user-visible mutations have actually run.
-  log_success "Restore complete: $target_db"
+  log_success "Restore complete: $target_db on ${restore_target:-unknown target}"
 }
 
 # ============================================================================

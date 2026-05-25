@@ -76,7 +76,14 @@ mysql_backup() {
   fi
 
   log_step "Backing up MySQL: $database@$host"
-  log_info "Connecting: $db_host:$db_port (user: $db_user)"
+  # Omit the trailing ":port" when port is empty (SSH-tunnel hosts without
+  # an explicit target_port end up here with $db_port="" and used to print
+  # "Connecting: 1.2.3.4: (user: ...)" with the stray colon).
+  if [[ -n "$db_port" ]]; then
+    log_info "Connecting: $db_host:$db_port (user: $db_user)"
+  else
+    log_info "Connecting: $db_host (user: $db_user)"
+  fi
   log_info "DEFINER handling: $definer_handling"
   [[ "$enc_type" != "none" ]] && log_info "Encryption: $enc_type"
   [[ ${#exclude_tables[@]} -gt 0 ]] && log_info "Excluding data: ${exclude_tables[*]}"
@@ -416,11 +423,19 @@ mysql_restore_backup() {
      | LC_ALL=C command sed 's/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g')
   }
 
+  # Track which target we're restoring to so the final success message
+  # can say WHERE the data landed. Without this, the user sees
+  # "Restore complete: b2c_v1_2026..." and has to grep upstream lines
+  # to figure out if it went to mysql-dbx, a docker-compose `mysql`
+  # service, a remote NixOS host, etc.
+  local restore_target
+
   # Check if using remote mode
   if [[ "${DEV_SERVICES_MODE:-local}" == "remote" ]]; then
     local mysql_host="${DEV_MYSQL_HOST:-mysql}"
     local mysql_port="${DEV_MYSQL_PORT:-3306}"
     local mysql_pass="${DEV_MYSQL_PASSWORD:-devpassword}"
+    restore_target="$mysql_host:$mysql_port (DEV_SERVICES_MODE=remote)"
 
     log_info "Restoring to remote: $mysql_host:$mysql_port"
 
@@ -449,6 +464,7 @@ mysql_restore_backup() {
     fi
   else
     require_container "$MYSQL_CONTAINER"
+    restore_target="container $MYSQL_CONTAINER"
 
     # Get root password from container env (if set)
     local root_pass
@@ -497,7 +513,7 @@ mysql_restore_backup() {
 
   # Audit is recorded by cmd_restore (after post-restore hooks complete) so we
   # don't claim success before user-visible mutations have actually run.
-  log_success "Restore complete: $target_db"
+  log_success "Restore complete: $target_db on ${restore_target:-unknown target}"
   if [[ -n "$mysql_force_flag" ]]; then
     log_info "Note: mysql import ran with --force (tolerant mode). Any [ERROR …] lines"
     log_info "  above were emitted but did NOT abort the restore — typically views or"
