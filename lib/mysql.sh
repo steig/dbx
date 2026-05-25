@@ -101,7 +101,24 @@ mysql_backup() {
   local tmpdir
   tmpdir=$(mktemp -d)
   chmod 700 "$tmpdir"
-  trap "rm -rf '$tmpdir'" RETURN
+
+  # Per-invocation unique credential file inside the SHARED mysql-dbx
+  # container. The previous code hardcoded /tmp/my.cnf for every backup
+  # against the same container, which races with any concurrent invocation
+  # (a scheduled `dbx schedule run` while the user is mid-`dbx backup`, a
+  # sibling Claude session via cmux, the schedule.bats integration test,
+  # …). Race manifests as mysqldump pass 2 erroring with
+  # "Failed to open required defaults file: /tmp/my.cnf" because the OTHER
+  # invocation's after-success cleanup deleted the file between THIS
+  # invocation's pass 1 and pass 2.
+  local container_cnf
+  container_cnf="/tmp/dbx-my.$$-$RANDOM.cnf"
+
+  # Trap-based cleanup runs on every return path (success, die, ^C), so
+  # the per-invocation file is always cleaned up. Old code only cleaned
+  # up in specific exit paths via inline `docker exec ... rm`, which left
+  # files behind on unhappy paths.
+  trap "rm -rf '$tmpdir'; docker exec '$MYSQL_CONTAINER' rm -f '$container_cnf' 2>/dev/null; true" RETURN
 
   # Create secure credential file using helper
   local cred_file
@@ -127,8 +144,8 @@ mysql_backup() {
   [[ "$flavor" != "mariadb" ]] && gtid_flag="--set-gtid-purged=OFF"
 
   # Copy credential file to container for secure access
-  docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
-  docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
+  docker cp "$cred_file" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
+  docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
 
   # Pass 1: Schema for ALL tables (including excluded ones)
   log_info "Dumping schema (tables, views, routines, triggers)..."
@@ -143,7 +160,7 @@ mysql_backup() {
   if [[ "$verbose" == "true" ]]; then
     if ! docker exec "$MYSQL_CONTAINER" \
       mysqldump \
-        --defaults-extra-file=/tmp/my.cnf \
+        --defaults-extra-file=$container_cnf \
         --single-transaction \
         $gtid_flag \
         --skip-lock-tables \
@@ -154,14 +171,14 @@ mysql_backup() {
         $verbose_flag \
         "$database" 2> >(tee -a "$err_file" >&2) | strip_definer "$definer_handling" > "$tmpdir/schema.sql"; then
       cat "$err_file" >&2
-      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
       audit_backup "$host" "$database" "failure"
       die "Schema dump failed"
     fi
   else
     if ! docker exec "$MYSQL_CONTAINER" \
       mysqldump \
-        --defaults-extra-file=/tmp/my.cnf \
+        --defaults-extra-file=$container_cnf \
         --single-transaction \
         $gtid_flag \
         --skip-lock-tables \
@@ -172,7 +189,7 @@ mysql_backup() {
         $verbose_flag \
         "$database" 2>"$err_file" | strip_definer "$definer_handling" > "$tmpdir/schema.sql"; then
       cat "$err_file" >&2
-      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
       audit_backup "$host" "$database" "failure"
       die "Schema dump failed"
     fi
@@ -209,7 +226,7 @@ mysql_backup() {
 
   if [[ ! -s "$tmpdir/schema.sql" ]]; then
     cat "$err_file" >&2
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
     audit_backup "$host" "$database" "failure"
     die "Schema dump produced empty output - check connection and permissions"
   fi
@@ -225,7 +242,7 @@ mysql_backup() {
   if [[ "$verbose" == "true" ]]; then
     if ! docker exec "$MYSQL_CONTAINER" \
       mysqldump \
-        --defaults-extra-file=/tmp/my.cnf \
+        --defaults-extra-file=$container_cnf \
         --single-transaction \
         $gtid_flag \
         --skip-lock-tables \
@@ -235,14 +252,14 @@ mysql_backup() {
         "${ignore_opts[@]}" \
         "$database" 2> >(tee -a "$err_file" >&2) > "$tmpdir/data.sql"; then
       cat "$err_file" >&2
-      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
       audit_backup "$host" "$database" "failure"
       die "Data dump failed"
     fi
   else
     if ! docker exec "$MYSQL_CONTAINER" \
       mysqldump \
-        --defaults-extra-file=/tmp/my.cnf \
+        --defaults-extra-file=$container_cnf \
         --single-transaction \
         $gtid_flag \
         --skip-lock-tables \
@@ -252,7 +269,7 @@ mysql_backup() {
         "${ignore_opts[@]}" \
         "$database" 2>"$err_file" > "$tmpdir/data.sql"; then
       cat "$err_file" >&2
-      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
       audit_backup "$host" "$database" "failure"
       die "Data dump failed"
     fi
@@ -260,7 +277,7 @@ mysql_backup() {
   _dbx_mysqldump_surface_warnings "data pass" "$err_file"
 
   # Clean up credential file in container
-  docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+  docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
 
   # Get compression level from config
   local comp_level
@@ -437,23 +454,27 @@ mysql_restore_backup() {
     local root_pass
     root_pass=$(docker exec "$MYSQL_CONTAINER" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
 
-    # Create secure credential file and copy to container
+    # Create secure credential file and copy to container. Per-invocation
+    # unique container path so concurrent backups/restores against the
+    # same mysql-dbx container don't race on $container_cnf.
     local tmpdir
     tmpdir=$(mktemp -d)
     chmod 700 "$tmpdir"
-    trap "rm -rf '$tmpdir'" RETURN
+
+    local container_cnf="/tmp/dbx-my.$$-$RANDOM.cnf"
+    trap "rm -rf '$tmpdir'; docker exec '$MYSQL_CONTAINER' rm -f '$container_cnf' 2>/dev/null; true" RETURN
 
     local cred_file
     cred_file=$(create_mysql_credential_file "root" "$root_pass")
     mv "$cred_file" "$tmpdir/my.cnf"
     cred_file="$tmpdir/my.cnf"
-    docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
-    docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
+    docker cp "$cred_file" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
 
     # Create database if it doesn't exist
     log_info "Creating database if not exists..."
     docker exec "$MYSQL_CONTAINER" \
-      mysql --defaults-extra-file=/tmp/my.cnf -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" \
+      mysql --defaults-extra-file=$container_cnf -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" \
       2> >(mysql_stderr_filter)
 
     log_info "Importing $human_size (compressed)..."
@@ -463,15 +484,15 @@ mysql_restore_backup() {
     # pv counts are the source file's, not the post-decompress stream.
     if command -v pv &>/dev/null; then
       pv -N "Importing" -s "$file_size" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
-        docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf $mysql_force_flag "$target_db"
+        docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=$container_cnf $mysql_force_flag "$target_db"
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
       decompress_backup "$backup_file" | filter_sql | docker exec -i "$MYSQL_CONTAINER" \
-        mysql --defaults-extra-file=/tmp/my.cnf $mysql_force_flag "$target_db"
+        mysql --defaults-extra-file=$container_cnf $mysql_force_flag "$target_db"
     fi
 
     # Clean up credential file in container
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
   fi
 
   # Audit is recorded by cmd_restore (after post-restore hooks complete) so we
@@ -622,18 +643,22 @@ analyze_mysql() {
 
   log_step "Analyzing tables in $database@$host..."
 
-  # Create secure credential file
+  # Create secure credential file. Per-invocation unique container path
+  # avoids races with other backups/restores/analyze runs against the
+  # same mysql-dbx container.
   local tmpdir
   tmpdir=$(mktemp -d)
   chmod 700 "$tmpdir"
-  trap "rm -rf '$tmpdir'" RETURN
+
+  local container_cnf="/tmp/dbx-my.$$-$RANDOM.cnf"
+  trap "rm -rf '$tmpdir'; docker exec '$MYSQL_CONTAINER' rm -f '$container_cnf' 2>/dev/null; true" RETURN
 
   local cred_file
   cred_file=$(create_mysql_credential_file "$db_user" "$db_pass" "$db_host" "$db_port")
   mv "$cred_file" "$tmpdir/my.cnf"
   cred_file="$tmpdir/my.cnf"
-  docker cp "$cred_file" "$MYSQL_CONTAINER:/tmp/my.cnf" 2>/dev/null
-  docker exec "$MYSQL_CONTAINER" chmod 600 /tmp/my.cnf 2>/dev/null
+  docker cp "$cred_file" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
+  docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
 
   # Get current exclusions
   local current_exclusions
@@ -656,11 +681,11 @@ analyze_mysql() {
   local tmpfile="$tmpdir/stats.txt"
 
   docker exec "$MYSQL_CONTAINER" \
-    mysql --defaults-extra-file=/tmp/my.cnf \
+    mysql --defaults-extra-file=$container_cnf \
     -N -e "$stats_query" 2>/dev/null > "$tmpfile"
 
   if [[ ! -s "$tmpfile" ]]; then
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
     die "Failed to get table stats. Check connection and permissions."
   fi
 
@@ -692,7 +717,7 @@ analyze_mysql() {
 
     echo ""
     log_info "Install fzf for interactive table selection"
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
     return
   fi
 
@@ -736,7 +761,7 @@ Common exclusions:
 
   if [[ -z "$selected" ]]; then
     log_info "No changes made"
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
     return
   fi
 
@@ -750,13 +775,13 @@ Common exclusions:
     [[ -z "$tbl" ]] && continue
     local tbl_size
     tbl_size=$(docker exec "$MYSQL_CONTAINER" \
-      mysql --defaults-extra-file=/tmp/my.cnf -N \
+      mysql --defaults-extra-file=$container_cnf -N \
       -e "SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$database' AND TABLE_NAME='$tbl'" 2>/dev/null)
     excluded_size=$(awk "BEGIN {print $excluded_size + ${tbl_size:-0}}")
   done <<< "$selected"
 
   # Clean up credential file in container
-  docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+  docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
 
   echo ""
   echo -e "${BOLD}Selected for exclusion:${NC}"
