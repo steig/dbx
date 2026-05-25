@@ -849,6 +849,103 @@
         const el = this.$el.closest('[data-mode]');
         if (el) this.mode = el.dataset.mode;
         if (el && el.dataset.saveUrl) this.saveUrl = el.dataset.saveUrl;
+        // CLI mode: pre-populate from the user's existing ~/.config/dbx/config.json
+        // via the wizard server. Static mode (mkdocs embed) has no backend, so
+        // we leave the form blank.
+        if (this.mode === 'cli') this.loadCurrentConfig();
+      },
+
+      async loadCurrentConfig() {
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const token = params.get('token') || '';
+          const r = await fetch(`/api/config?token=${encodeURIComponent(token)}`);
+          if (!r.ok) return;
+          const cfg = await r.json();
+          if (cfg && typeof cfg === 'object' && Object.keys(cfg).length > 0) {
+            this.loadFromConfig(cfg);
+          }
+        } catch (_) { /* fall back to blank form */ }
+      },
+
+      // Inverse of buildConfig(). Populates form state from a config.json
+      // object. Unknown top-level keys (schedules, scrub, vault, …) are NOT
+      // touched here — the server preserves them on save via the merge logic
+      // in POST /save. Unknown per-host fields will be lost on round-trip if
+      // the user re-saves that host; documented limitation.
+      loadFromConfig(cfg) {
+        if (cfg.defaults && typeof cfg.defaults === 'object') {
+          for (const k of ['encryption_type', 'keep_backups', 'compression_level', 'auto_upload']) {
+            if (cfg.defaults[k] !== undefined) this.defaults[k] = cfg.defaults[k];
+          }
+        }
+        if (cfg.hosts && typeof cfg.hosts === 'object' && Object.keys(cfg.hosts).length > 0) {
+          this.hosts = [];
+          for (const [alias, block] of Object.entries(cfg.hosts)) {
+            const h = emptyHost();
+            h.alias = alias;
+            if (block.type) h.type = block.type;
+            if (block.user) h.user = block.user;
+            if (block.definer_handling) h.definer_handling = block.definer_handling;
+            if (block.ssh_tunnel) {
+              h.connection = 'ssh_tunnel';
+              h.jump_host = block.ssh_tunnel.jump_host || '';
+              h.target_host = block.ssh_tunnel.target_host || '';
+              h.target_port = block.ssh_tunnel.target_port || '';
+            } else {
+              h.connection = 'direct';
+              h.host = block.host || '';
+              h.port = block.port || '';
+            }
+            if (block.databases && typeof block.databases === 'object') {
+              const dbs = [];
+              for (const [name, dbBlock] of Object.entries(block.databases)) {
+                const excl = Array.isArray(dbBlock && dbBlock.exclude_data)
+                  ? dbBlock.exclude_data.join(', ') : '';
+                dbs.push({ name, exclude_data: excl });
+              }
+              h.databases = dbs.length ? dbs : [{ name: '', exclude_data: '' }];
+            }
+            if (block.post_restore) {
+              try { h.post_restore_raw = JSON.stringify(block.post_restore, null, 2); }
+              catch (_) { /* leave blank */ }
+            }
+            this.hosts.push(h);
+          }
+          if (this.hosts.length === 0) this.hosts = [emptyHost()];
+        }
+        if (cfg.storage && typeof cfg.storage === 'object') {
+          this.storage.enabled = true;
+          const s3 = cfg.storage.s3 || {};
+          this.storage.bucket     = s3.bucket     || '';
+          this.storage.endpoint   = s3.endpoint   || '';
+          this.storage.prefix     = s3.prefix     || '';
+          this.storage.access_key = s3.access_key || '';
+        }
+        if (cfg.notifications && typeof cfg.notifications === 'object') {
+          const n = cfg.notifications;
+          this.notifications.enabled = !!n.enabled;
+          if (n.on) this.notifications.on = n.on;
+          if (Array.isArray(n.backends)) {
+            for (const b of ['slack', 'desktop', 'email', 'command']) {
+              this.notifications.backends[b] = n.backends.includes(b);
+            }
+          }
+          if (n.slack) {
+            this.notifications.slack.use_vault   = !!n.slack.webhook_url_cmd;
+            this.notifications.slack.webhook_url = n.slack.webhook_url || '';
+          }
+          if (n.email) {
+            this.notifications.email.to        = n.email.to        || '';
+            this.notifications.email.from      = n.email.from      || '';
+            this.notifications.email.smtp_host = n.email.smtp_host || '';
+            this.notifications.email.smtp_port = n.email.smtp_port || 587;
+          }
+          if (n.command) {
+            this.notifications.command.on_failure = n.command.on_failure || '';
+            this.notifications.command.on_success = n.command.on_success || '';
+          }
+        }
       },
 
       addHost() { this.hosts.push(emptyHost()); },

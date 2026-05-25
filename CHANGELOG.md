@@ -8,6 +8,11 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 - **`dbx wizard --remote`** — server-only mode for SSH-tunneled access. Skips the SSH-TTY auto-fallback and the local browser launch; prints the URL, the suggested `ssh -L` tunnel command, and the localhost open-URL so you can forward the port from your laptop. Bind stays on 127.0.0.1; transport is SSH.
 - **`dbx wizard --port N`** — pin the local port instead of letting the OS pick a free one. Pairs with `--remote` so the SSH-tunnel command is stable across runs. Validates the value is numeric, in range, and actually bindable before spawning the server.
+- **`dbx wizard` Config view now loads the user's existing `config.json`** instead of starting blank. New `GET /api/config` endpoint reads the current config; the form's Alpine `init()` calls a new `loadFromConfig()` that maps the JSON shape back into the form's host-array / storage / defaults / notifications state. Static online builder (mkdocs embed) is unaffected — it still starts blank because it has no backend.
+
+### Changed
+
+- **`POST /save` now merges into the existing `config.json` instead of overwriting**. Form-managed top-level keys (`hosts`, `defaults`, `storage`, `notifications`) are replaced — including being deleted if the form omitted them (e.g., user unchecked storage.enabled) — but every other key (`schedules`, `scrub`, `vault`, etc.) is preserved verbatim. Fixes a pre-existing footgun where saving from the Config view would wipe a `schedules[]` block edited in the Schedule view. Atomic write via `.wizard-tmp` swap, same pattern as `POST /api/schedules`.
 
 ## [0.12.0] - 2026-05-24
 

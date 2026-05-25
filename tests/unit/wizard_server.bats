@@ -253,3 +253,73 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"dbxSchedule()"* ]]
 }
+
+@test "GET /api/config returns existing config.json verbatim" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u" } },
+  "defaults": { "encryption_type": "age", "keep_backups": 7 },
+  "schedules": [{ "host": "prod", "database": "myapp", "when": "daily@5" }] }
+JSON
+  run curl -s "$(api /api/config)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"hosts\":"* ]]
+  [[ "$output" == *"\"prod\""* ]]
+  [[ "$output" == *"\"keep_backups\": 7"* ]]
+  [[ "$output" == *"\"daily@5\""* ]]
+}
+
+@test "GET /api/config returns {} when config.json is missing" {
+  # Default test setup doesn't create config.json — confirm clean state.
+  [ ! -f "$WIZ_SCRATCH/config.json" ]
+  run curl -s "$(api /api/config)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+@test "POST /save merges into existing config, preserving non-form keys" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "previous-host": { "type": "postgres", "user": "u" } },
+  "defaults": { "encryption_type": "age" },
+  "schedules": [{ "host": "h", "database": "d", "when": "daily" }],
+  "scrub": { "manifest": "/path/to/scrub.json" } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"new-host":{"type":"mysql","user":"u"}},"defaults":{"encryption_type":"none"}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\":true"* ]]
+  # Form-managed keys replaced.
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" == *"\"new-host\""* ]]
+  [[ "$output" != *"previous-host"* ]]
+  [[ "$output" == *"\"encryption_type\": \"none\""* ]]
+  # Non-form keys preserved.
+  [[ "$output" == *"\"schedules\":"* ]]
+  [[ "$output" == *"\"scrub\":"* ]]
+  [[ "$output" == *"/path/to/scrub.json"* ]]
+}
+
+@test "POST /save omitting storage wipes existing storage but keeps schedules" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": {},
+  "storage": { "type": "s3", "s3": { "bucket": "old-bucket" } },
+  "schedules": [{ "host": "h", "database": "d", "when": "daily" }] }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"h":{"type":"postgres","user":"u"}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  # Storage form-managed but absent from payload → removed.
+  [[ "$output" != *"old-bucket"* ]]
+  [[ "$output" != *"\"storage\""* ]]
+  # Schedules preserved (not form-managed).
+  [[ "$output" == *"\"schedules\":"* ]]
+}
+
+@test "POST /save with non-object body errors with 400" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d '"justastring"' "$(api /save)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
