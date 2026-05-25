@@ -120,6 +120,7 @@ SH
     --runs-fragment     "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
     --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
     --vault-fragment    "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
+    --storage-fragment   "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
     --config-path       "$WIZ_SCRATCH/config.json" \
     --data-dir          "$WIZ_SCRATCH/data" \
     --audit-dir         "$WIZ_AUDIT_DIR" \
@@ -1173,4 +1174,129 @@ JSONL
   run curl -s "$(api /api/vault/list)"
   [ "$status" -eq 0 ]
   [[ "$output" == *"\"last_set\": \"2026-05-25T02:07:58Z\""* ]]
+}
+# ----------------------------------------------------------------------------
+# /api/storage/*  — usage breakdown + retention preview + sweep (PR-Y5)
+# ----------------------------------------------------------------------------
+
+@test "GET / now composes the storage fragment too" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxStorage()"* ]]
+}
+
+@test "GET /api/storage/usage returns expected shape with fixture data" {
+  run curl -s "$(api /api/storage/usage)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"total_bytes\":"* ]]
+  [[ "$output" == *"\"total_files\": 1"* ]]
+  [[ "$output" == *"\"free_bytes\":"* ]]
+  [[ "$output" == *"\"by_pair\":"* ]]
+  [[ "$output" == *"\"host\": \"prod\""* ]]
+  [[ "$output" == *"\"database\": \"myapp\""* ]]
+  [[ "$output" == *"\"count\": 1"* ]]
+  [[ "$output" == *"\"largest_bytes\":"* ]]
+  [[ "$output" == *"\"oldest_iso\":"* ]]
+  [[ "$output" == *"\"newest_iso\":"* ]]
+}
+
+@test "GET /api/storage/usage with bad token returns 403" {
+  run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/storage/usage?token=NOPE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
+@test "GET /api/storage/clean-preview requires keep OR older_than" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/storage/clean-preview)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/storage/clean-preview?keep=2 against 5 backups marks 3 for delete" {
+  # Replace the single fixture file with 5 backups of varying mtime under
+  # prod/myapp. We use python to set mtimes (BSD vs GNU touch differ).
+  rm -f "$WIZ_SCRATCH/data/prod/myapp/"*.sql.zst*
+  for d in 1 2 3 4 5; do
+    f="$WIZ_SCRATCH/data/prod/myapp/myapp_2026050${d}_000000.sql.zst"
+    echo "data-$d" > "$f"
+    echo "{}" > "${f}.meta.json"
+  done
+  python3 -c "
+import os, time
+base = '$WIZ_SCRATCH/data/prod/myapp'
+now = time.time()
+# Day 5 is newest; day 1 is oldest. mtime offsets in seconds.
+for i, d in enumerate(['5','4','3','2','1']):
+    f = os.path.join(base, f'myapp_2026050{d}_000000.sql.zst')
+    t = now - i * 86400
+    os.utime(f, (t, t))
+"
+  run curl -s "$(api /api/storage/clean-preview)&keep=2"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"reclaim_count\": 3"* ]]
+}
+
+@test "GET /api/storage/clean-preview?older_than=999999 returns 0 to delete" {
+  run curl -s "$(api /api/storage/clean-preview)&older_than=3650"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"reclaim_count\": 0"* ]]
+  [[ "$output" == *"\"would_delete\": []"* ]]
+}
+
+@test "GET /api/storage/clean-preview?keep=0 returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/storage/clean-preview)&keep=0"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/storage/clean-preview?keep=notanumber returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/storage/clean-preview)&keep=abc"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/storage/clean-preview?older_than=4000 returns 400 (out of range)" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/storage/clean-preview)&older_than=4000"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/storage/clean with valid args returns a job_id" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"keep":7}' "$(api /api/storage/clean)"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ \"job_id\":\ ?\"[0-9a-f]{32}\" ]]
+}
+
+@test "POST /api/storage/clean forwards --keep and --older-than into argv" {
+  local body job_id
+  body=$(curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"keep":3,"older_than":14,"dry_run":true}' "$(api /api/storage/clean)")
+  job_id=$(echo "$body" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])")
+  [ -n "$job_id" ]
+  run curl -s -N --max-time 3 "http://127.0.0.1:$WIZ_PORT/api/jobs/$job_id/events?token=$WIZ_TOKEN"
+  # The fake dbx echoes its argv on the first line.
+  [[ "$output" == *"cmd=clean --keep 3 --older-than 14 --dry-run"* ]]
+}
+
+@test "POST /api/storage/clean rejects missing keep + older_than" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{}' "$(api /api/storage/clean)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"at least one"* ]]
+}
+
+@test "POST /api/storage/clean rejects non-boolean dry_run" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"keep":7,"dry_run":"yes"}' "$(api /api/storage/clean)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dry_run must be a boolean"* ]]
+}
+
+@test "POST /api/storage/clean with bad token returns 403" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" -d '{"keep":7}' \
+    "http://127.0.0.1:$WIZ_PORT/api/storage/clean?token=NOPE"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
 }

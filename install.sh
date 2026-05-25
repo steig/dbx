@@ -93,7 +93,7 @@ main() {
   # HTML assets for the browser-based `dbx wizard` config builder. Same
   # form fragment also powers the static docs builder; downloading both
   # gives offline-capable wizard mode.
-  for asset in wizard.html wizard-form.html wizard-backups.html wizard-backup.html wizard-restore.html wizard-schedule.html wizard-runs.html wizard-dashboard.html wizard-vault.html; do
+  for asset in wizard.html wizard-form.html wizard-backups.html wizard-backup.html wizard-restore.html wizard-schedule.html wizard-runs.html wizard-dashboard.html wizard-vault.html wizard-storage.html; do
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$asset" -o "$LIB_DIR/$asset"
   done
 
