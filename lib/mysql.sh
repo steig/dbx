@@ -271,8 +271,15 @@ mysql_restore_backup() {
   # - Fixes VARCHAR length limits (MySQL allows 65000, MariaDB max 16383)
   # - Prepends FK/unique check disabling for faster import
   filter_sql() {
+    # -a / --text: treat input as text even when grep sniffs binary-looking
+    # bytes (BLOB columns, latin1-encoded strings in INSERTs). Without it,
+    # grep emits the literal line "Binary file (standard input) matches"
+    # INTO the pipe, which mysql then tries to execute as SQL and rejects
+    # with ERROR 1064 (42000) — turning a valid dump into a fake syntax
+    # error. Surfaced after PR #59 stopped silencing mysql stderr; the
+    # previous 2>/dev/null had been hiding this for months.
     (echo "SET foreign_key_checks=0; SET unique_checks=0;" && \
-     grep -v "^mysqldump: \[Warning\]" | grep -v "^Warning: Using a password" | \
+     grep -av "^mysqldump: \[Warning\]" | grep -av "^Warning: Using a password" | \
      command sed 's/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g')
   }
 
@@ -298,7 +305,7 @@ mysql_restore_backup() {
 
     # Restore with progress if pv is available
     if command -v pv &>/dev/null; then
-      pv -N "Importing" "$backup_file" | decompress_stdin "${backup_file##*.}" | filter_sql | \
+      pv -N "Importing" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
         mysql --defaults-extra-file="$cred_file" "$target_db" 2> >(mysql_stderr_filter)
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
@@ -335,7 +342,7 @@ mysql_restore_backup() {
 
     # Restore with progress if pv is available
     if command -v pv &>/dev/null; then
-      pv -N "Importing" "$backup_file" | decompress_stdin "${backup_file##*.}" | filter_sql | \
+      pv -N "Importing" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
         docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
@@ -377,8 +384,11 @@ mysql_restore_backup_streaming() {
 
   # filter_sql is defined inline as a function-scoped here so the streaming
   # variant doesn't depend on mysql_restore_backup having been sourced.
+  # See the comment on mysql_restore_backup's filter_sql for why -a is
+  # essential — grep otherwise emits "Binary file (standard input) matches"
+  # into the pipe and mysql chokes with ERROR 1064.
   local filter_sql_cmd='(printf "SET foreign_key_checks=0; SET unique_checks=0;\n" &&
-    grep -v "^mysqldump: \[Warning\]" | grep -v "^Warning: Using a password" |
+    grep -av "^mysqldump: \[Warning\]" | grep -av "^Warning: Using a password" |
     sed "s/VARCHAR(65000)/TEXT/g; s/VARCHAR(32000)/TEXT/g")'
 
   log_info "Streaming restore → transform → target..."
