@@ -1,0 +1,436 @@
+<!--
+  Vault view fragment. Loaded by `dbx wizard` only.
+
+  Surfaces `dbx vault {set|get|delete|list}` and the age-recipients file
+  so the user can manage credentials without dropping to a terminal.
+
+  Endpoints:
+    GET  /api/vault/list                      → [{key, backend, last_set}, ...]
+    GET  /api/vault/get?key=…                 → {key, value}
+    POST /api/vault/set       {key, value}    → {ok}
+    POST /api/vault/delete    {key}           → {ok}
+    GET  /api/vault/age-recipients            → {path, recipients[]}
+    POST /api/vault/age-recipients/add        {recipient}
+    POST /api/vault/age-recipients/remove     {recipient}
+
+  Reveal-value flow: fetches via GET, shows the value in a monospace pill
+  for 5s with a countdown, then auto-hides. We never persist the revealed
+  value anywhere except a local Alpine field, and we clear it on view-leave.
+-->
+<style>
+  .dbx-vault__layout { display: grid; gap: 1.5rem; }
+  .dbx-vault__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+  .dbx-vault__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+
+  .dbx-vault__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  .dbx-vault__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
+  .dbx-vault__table td { padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
+  .dbx-vault__table tbody tr:hover { background: var(--md-code-bg-color); }
+  .dbx-vault__key { font-family: var(--md-code-font-family); font-weight: 600; }
+  .dbx-vault__backend { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
+  .dbx-vault__ts { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--md-default-fg-color--light); }
+
+  .dbx-vault__card { border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-code-bg-color); padding: 1rem 1.25rem; }
+  .dbx-vault__card h3 { margin: 0 0 0.75rem; font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
+  .dbx-vault__form { display: grid; gap: 0.6rem; grid-template-columns: 1fr 1fr auto; align-items: end; }
+  .dbx-vault__form label { display: block; font-size: 0.8125rem; font-weight: 600; color: var(--md-default-fg-color--light); margin-bottom: 0.25rem; }
+  .dbx-vault__form input { width: 100%; padding: 0.4rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
+
+  .dbx-vault__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; }
+  .dbx-vault__btn:hover:not(:disabled) { opacity: 0.92; filter: brightness(1.08); }
+  .dbx-vault__btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .dbx-vault__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
+  .dbx-vault__btn--secondary:hover:not(:disabled) { background: var(--md-code-bg-color); filter: none; }
+  .dbx-vault__btn--danger { background: #c43d3d; color: #fff; border: none; padding: 0.3rem 0.6rem; border-radius: 5px; cursor: pointer; font-size: 0.75rem; }
+  .dbx-vault__btn--danger:hover:not(:disabled) { filter: brightness(1.05); }
+  .dbx-vault__btn--small { padding: 0.25rem 0.55rem; font-size: 0.75rem; }
+
+  .dbx-vault__chip { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 4px; font-size: 0.8125rem; margin-top: 0.5rem; }
+  .dbx-vault__chip--ok  { background: rgba(74, 158, 76, 0.20);  color: #2f7d31; }
+  .dbx-vault__chip--err { background: rgba(196, 61, 61, 0.20); color: #a83232; }
+
+  .dbx-vault__reveal { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.5rem; background: var(--md-default-fg-color--lightest); border-radius: 4px; font-family: var(--md-code-font-family); font-size: 0.8125rem; }
+  .dbx-vault__reveal-countdown { color: var(--md-default-fg-color--light); font-size: 0.75rem; }
+
+  .dbx-vault__recipients { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.5rem; }
+  .dbx-vault__recipient-row { display: flex; align-items: center; gap: 0.5rem; }
+  .dbx-vault__recipient { font-family: var(--md-code-font-family); font-size: 0.8125rem; word-break: break-all; flex: 1; }
+  .dbx-vault__path { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
+
+  .dbx-vault__empty { padding: 1rem; text-align: center; color: var(--md-default-fg-color--light); font-style: italic; font-size: 0.875rem; }
+</style>
+
+<div x-data="dbxVault()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Vault</h2>
+    <p class="dbx-view__subtitle">
+      Store database passwords and age recipients used by <code>dbx backup</code>.
+      Values are kept in the system keychain (or libsecret / pass / gpg-file
+      on Linux) — they never appear in <code>config.json</code>.
+    </p>
+  </header>
+
+  <div class="dbx-vault__layout">
+
+    <!-- ===== Credentials list ===== -->
+    <div>
+      <div class="dbx-vault__toolbar">
+        <button class="dbx-vault__btn dbx-vault__btn--secondary" @click="load()" :disabled="loading">Refresh</button>
+        <span class="dbx-vault__count" x-text="loading ? 'Loading…' : (rows.length + ' credential' + (rows.length === 1 ? '' : 's'))"></span>
+      </div>
+
+      <template x-if="!loading && rows.length === 0">
+        <p class="dbx-vault__empty">No credentials stored yet. Add one below.</p>
+      </template>
+
+      <template x-if="!loading && rows.length > 0">
+        <table class="dbx-vault__table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Backend</th>
+              <th>Last set</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="row in rows" :key="row.key">
+              <tr>
+                <td><span class="dbx-vault__key" x-text="row.key"></span></td>
+                <td><span class="dbx-vault__backend" x-text="row.backend || '—'"></span></td>
+                <td><span class="dbx-vault__ts" x-text="formatTimestamp(row.last_set)"></span></td>
+                <td style="text-align:right">
+                  <template x-if="revealed.key !== row.key">
+                    <button class="dbx-vault__btn dbx-vault__btn--small dbx-vault__btn--secondary"
+                            @click="reveal(row.key)" :disabled="revealing">Show</button>
+                  </template>
+                  <template x-if="revealed.key === row.key">
+                    <span class="dbx-vault__reveal">
+                      <code x-text="revealed.value"></code>
+                      <span class="dbx-vault__reveal-countdown" x-text="'auto-hides in ' + revealed.secs + 's'"></span>
+                      <button class="dbx-vault__btn dbx-vault__btn--small dbx-vault__btn--secondary" @click="copyValue()">Copy</button>
+                      <button class="dbx-vault__btn dbx-vault__btn--small dbx-vault__btn--secondary" @click="hideValue()">Hide</button>
+                    </span>
+                  </template>
+                  <button class="dbx-vault__btn dbx-vault__btn--danger" @click="confirmDelete(row.key)">Delete</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </template>
+    </div>
+
+    <!-- ===== Add/Update credential ===== -->
+    <div class="dbx-vault__card">
+      <h3>Add or update a credential</h3>
+      <form class="dbx-vault__form" @submit.prevent="save()">
+        <div>
+          <label>Key</label>
+          <input type="text" x-model.trim="form.key" placeholder="e.g. prod-mysql" :disabled="saving"
+                 autocomplete="off" spellcheck="false">
+        </div>
+        <div>
+          <label>Value</label>
+          <input type="password" x-model="form.value" placeholder="(secret)" :disabled="saving"
+                 autocomplete="new-password" spellcheck="false">
+        </div>
+        <div>
+          <button type="submit" class="dbx-vault__btn" :disabled="saving || !form.key || !form.value">
+            <span x-show="!saving">Save</span>
+            <span x-show="saving">Saving…</span>
+          </button>
+        </div>
+      </form>
+      <template x-if="saveStatus.text">
+        <span class="dbx-vault__chip" :class="saveStatus.kind === 'ok' ? 'dbx-vault__chip--ok' : 'dbx-vault__chip--err'"
+              x-text="saveStatus.text"></span>
+      </template>
+    </div>
+
+    <!-- ===== age recipients editor ===== -->
+    <div class="dbx-vault__card">
+      <h3>age recipients</h3>
+      <p style="margin: 0 0 0.5rem; font-size: 0.875rem; color: var(--md-default-fg-color--light);">
+        Public keys that <code>age</code> uses to encrypt backups when
+        <code>defaults.encryption_type = "age"</code>. Comment lines are
+        preserved on disk but not shown here.
+      </p>
+      <p class="dbx-vault__path">File: <code x-text="recipientsPath || '(loading…)'"></code></p>
+
+      <template x-if="!loadingRecipients && recipients.length === 0">
+        <p class="dbx-vault__empty">No recipients yet. Paste a key starting with <code>age1…</code> and click Add.</p>
+      </template>
+
+      <template x-if="recipients.length > 0">
+        <div class="dbx-vault__recipients">
+          <template x-for="(rcp, i) in recipients" :key="i">
+            <div class="dbx-vault__recipient-row">
+              <span class="dbx-vault__recipient" x-text="rcp"></span>
+              <button class="dbx-vault__btn dbx-vault__btn--danger dbx-vault__btn--small"
+                      @click="removeRecipient(rcp)" :disabled="recipientSaving">Remove</button>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <form class="dbx-vault__form" style="grid-template-columns: 1fr auto; margin-top: 0.75rem;"
+            @submit.prevent="addRecipient()">
+        <div>
+          <label>Add recipient</label>
+          <input type="text" x-model.trim="recipientInput" placeholder="age1…" :disabled="recipientSaving"
+                 autocomplete="off" spellcheck="false">
+        </div>
+        <div>
+          <button type="submit" class="dbx-vault__btn" :disabled="recipientSaving || !recipientInput">
+            <span x-show="!recipientSaving">Add</span>
+            <span x-show="recipientSaving">Adding…</span>
+          </button>
+        </div>
+      </form>
+      <template x-if="recipientStatus.text">
+        <span class="dbx-vault__chip" :class="recipientStatus.kind === 'ok' ? 'dbx-vault__chip--ok' : 'dbx-vault__chip--err'"
+              x-text="recipientStatus.text"></span>
+      </template>
+    </div>
+  </div>
+</div>
+
+<script>
+  function dbxVault() {
+    return {
+      rows: [],
+      loading: true,
+      form: { key: '', value: '' },
+      saving: false,
+      saveStatus: { text: '', kind: '' },
+      _statusTimer: null,
+
+      // Reveal-value state. We never persist the revealed value beyond this
+      // ephemeral object; the countdown timer wipes it after ~5s.
+      revealing: false,
+      revealed: { key: '', value: '', secs: 0 },
+      _revealTimer: null,
+
+      // age recipients editor
+      recipients: [],
+      recipientsPath: '',
+      loadingRecipients: true,
+      recipientInput: '',
+      recipientSaving: false,
+      recipientStatus: { text: '', kind: '' },
+      _recipientStatusTimer: null,
+
+      init() {
+        this.$watch('$store.dbx.view', (v) => {
+          if (v === 'vault') {
+            this.load();
+            this.loadRecipients();
+          } else {
+            // Leaving the view — wipe any revealed value defensively.
+            this.hideValue();
+          }
+        });
+        if (Alpine.store('dbx').view === 'vault') {
+          this.load();
+          this.loadRecipients();
+        }
+      },
+
+      async load() {
+        this.loading = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/vault/list'));
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          this.rows = await r.json();
+        } catch (e) {
+          this.rows = [];
+          console.error('Failed to load vault list:', e);
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async save() {
+        if (this.saving || !this.form.key || !this.form.value) return;
+        this.saving = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/vault/set'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: this.form.key, value: this.form.value }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+            this.setStatus('Failed: ' + (err.error || r.status), 'err');
+            return;
+          }
+          this.setStatus('Saved', 'ok');
+          this.form.key = '';
+          this.form.value = '';
+          await this.load();
+        } catch (e) {
+          this.setStatus('Network error: ' + e, 'err');
+        } finally {
+          this.saving = false;
+        }
+      },
+
+      async confirmDelete(key) {
+        if (!window.confirm('Delete credential "' + key + '"? This cannot be undone.')) return;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/vault/delete'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+            this.setStatus('Delete failed: ' + (err.error || r.status), 'err');
+            return;
+          }
+          this.setStatus('Deleted ' + key, 'ok');
+          await this.load();
+        } catch (e) {
+          this.setStatus('Network error: ' + e, 'err');
+        }
+      },
+
+      async reveal(key) {
+        if (this.revealing) return;
+        this.revealing = true;
+        try {
+          const url = Alpine.store('dbx').api('/vault/get') + '&key=' + encodeURIComponent(key);
+          const r = await fetch(url);
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+            this.setStatus('Reveal failed: ' + (err.error || r.status), 'err');
+            return;
+          }
+          const data = await r.json();
+          this.revealed = { key, value: data.value || '', secs: 5 };
+          this.startRevealCountdown();
+        } catch (e) {
+          this.setStatus('Network error: ' + e, 'err');
+        } finally {
+          this.revealing = false;
+        }
+      },
+
+      startRevealCountdown() {
+        if (this._revealTimer) clearInterval(this._revealTimer);
+        this._revealTimer = setInterval(() => {
+          this.revealed.secs -= 1;
+          if (this.revealed.secs <= 0) this.hideValue();
+        }, 1000);
+      },
+
+      hideValue() {
+        if (this._revealTimer) { clearInterval(this._revealTimer); this._revealTimer = null; }
+        this.revealed = { key: '', value: '', secs: 0 };
+      },
+
+      copyValue() {
+        if (!this.revealed.value) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(this.revealed.value).then(
+            () => this.setStatus('Copied to clipboard', 'ok'),
+            () => this.setStatus('Clipboard copy denied', 'err'),
+          );
+        } else {
+          this.setStatus('Clipboard not available', 'err');
+        }
+      },
+
+      setStatus(text, kind) {
+        this.saveStatus = { text, kind };
+        if (this._statusTimer) clearTimeout(this._statusTimer);
+        this._statusTimer = setTimeout(() => { this.saveStatus = { text: '', kind: '' }; }, 3000);
+      },
+
+      formatTimestamp(ts) {
+        if (!ts) return 'unknown';
+        try {
+          const d = new Date(ts);
+          return d.toLocaleString();
+        } catch (e) {
+          return ts;
+        }
+      },
+
+      // ----- age recipients -----
+
+      async loadRecipients() {
+        this.loadingRecipients = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/vault/age-recipients'));
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const data = await r.json();
+          this.recipients = Array.isArray(data.recipients) ? data.recipients : [];
+          this.recipientsPath = data.path || '';
+        } catch (e) {
+          this.recipients = [];
+          this.recipientsPath = '';
+          console.error('Failed to load age recipients:', e);
+        } finally {
+          this.loadingRecipients = false;
+        }
+      },
+
+      async addRecipient() {
+        if (this.recipientSaving || !this.recipientInput) return;
+        this.recipientSaving = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/vault/age-recipients/add'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recipient: this.recipientInput }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+            this.setRecipientStatus('Failed: ' + (err.error || r.status), 'err');
+            return;
+          }
+          this.setRecipientStatus('Added', 'ok');
+          this.recipientInput = '';
+          await this.loadRecipients();
+        } catch (e) {
+          this.setRecipientStatus('Network error: ' + e, 'err');
+        } finally {
+          this.recipientSaving = false;
+        }
+      },
+
+      async removeRecipient(rcp) {
+        if (!window.confirm('Remove recipient ' + rcp + '?')) return;
+        this.recipientSaving = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/vault/age-recipients/remove'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recipient: rcp }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+            this.setRecipientStatus('Remove failed: ' + (err.error || r.status), 'err');
+            return;
+          }
+          this.setRecipientStatus('Removed', 'ok');
+          await this.loadRecipients();
+        } catch (e) {
+          this.setRecipientStatus('Network error: ' + e, 'err');
+        } finally {
+          this.recipientSaving = false;
+        }
+      },
+
+      setRecipientStatus(text, kind) {
+        this.recipientStatus = { text, kind };
+        if (this._recipientStatusTimer) clearTimeout(this._recipientStatusTimer);
+        this._recipientStatusTimer = setTimeout(() => {
+          this.recipientStatus = { text: '', kind: '' };
+        }, 3000);
+      },
+    };
+  }
+</script>
