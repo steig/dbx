@@ -207,11 +207,7 @@
           // entries from saved rows so the user can still edit.
           if (cfgR && cfgR.ok) {
             const cfg = await cfgR.json();
-            const arr = Array.isArray(cfg.hosts) ? cfg.hosts : [];
-            this.hosts = arr.map(h => ({
-              alias: h && typeof h.alias === 'string' ? h.alias : '',
-              databases: Array.isArray(h && h.databases) ? h.databases.slice() : [],
-            })).filter(h => h.alias);
+            this.hosts = this.parseHosts(cfg);
           } else {
             this.hosts = [];
           }
@@ -221,6 +217,32 @@
         } finally {
           this.loading = false;
         }
+      },
+
+      // config.json shape: `hosts` is an OBJECT keyed by alias, and
+      // each host's `databases` is also keyed by db name (not arrays).
+      // Tolerate the array-of-objects shape for hand-edited configs.
+      parseHosts(cfg) {
+        const out = [];
+        const hosts = cfg && cfg.hosts;
+        if (hosts && typeof hosts === 'object' && !Array.isArray(hosts)) {
+          for (const [alias, h] of Object.entries(hosts)) {
+            if (!h || typeof h !== 'object') continue;
+            out.push({ alias, databases: this.extractDbs(h.databases) });
+          }
+        } else if (Array.isArray(hosts)) {
+          for (const h of hosts) {
+            if (!h || typeof h !== 'object' || !h.alias) continue;
+            out.push({ alias: h.alias, databases: this.extractDbs(h.databases) });
+          }
+        }
+        return out;
+      },
+
+      extractDbs(dbs) {
+        if (Array.isArray(dbs)) return dbs.filter(d => typeof d === 'string');
+        if (dbs && typeof dbs === 'object') return Object.keys(dbs);
+        return [];
       },
 
       // Host dropdown options for a row. Includes every configured host

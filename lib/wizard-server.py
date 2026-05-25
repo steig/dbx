@@ -525,7 +525,11 @@ def make_handler(args):
         /api/backup's `host` field — the wizard MUST refuse to invoke
         `dbx backup <host>` for a host the user hasn't configured. Returns
         an empty list if config.json is missing or malformed (caller will
-        then 400 with a useful error)."""
+        then 400 with a useful error).
+
+        config.json's `hosts` is an OBJECT keyed by alias (e.g.
+        `{"prod-mysql": {"type": "mysql", ...}}`); also tolerate the
+        array-of-objects shape for hand-edited / older configs."""
         try:
             with open(args.config_path) as f:
                 cfg = json.load(f)
@@ -534,12 +538,15 @@ def make_handler(args):
         if not isinstance(cfg, dict):
             return []
         hosts = cfg.get("hosts")
-        if not isinstance(hosts, list):
-            return []
         out = []
-        for h in hosts:
-            if isinstance(h, dict) and isinstance(h.get("alias"), str):
-                out.append(h["alias"])
+        if isinstance(hosts, dict):
+            for alias, h in hosts.items():
+                if isinstance(alias, str) and isinstance(h, dict):
+                    out.append(alias)
+        elif isinstance(hosts, list):
+            for h in hosts:
+                if isinstance(h, dict) and isinstance(h.get("alias"), str):
+                    out.append(h["alias"])
         return out
 
     def validate_backup_body(body: dict, configured_hosts: list[str]):

@@ -152,19 +152,41 @@
           const r = await fetch(Alpine.store('dbx').api('/config'));
           if (!r.ok) { this.hosts = []; return; }
           const cfg = await r.json();
-          const hosts = Array.isArray(cfg.hosts) ? cfg.hosts : [];
-          this.hosts = hosts.map(h => ({
-            alias: h.alias || '',
-            flavor: h.flavor || '',
-            databases: Array.isArray(h.databases) ? h.databases.slice() : [],
-          })).filter(h => h.alias);
-          // Default to the first host if nothing is picked yet.
+          this.hosts = this.parseHosts(cfg);
           if (!this.form.host && this.hosts.length > 0) this.form.host = this.hosts[0].alias;
         } catch (e) {
           this.hosts = [];
         } finally {
           this.loadingHosts = false;
         }
+      },
+
+      // config.json shape: `hosts` is an OBJECT keyed by alias (e.g.
+      // {"prod-mysql": {"type":"mysql","databases":{"b2b":{...}}}}).
+      // `databases` is the same — keyed by db name. Tolerate the
+      // array-of-objects shape too in case someone has a hand-edited
+      // config from an older / informal source.
+      parseHosts(cfg) {
+        const out = [];
+        const hosts = cfg && cfg.hosts;
+        if (hosts && typeof hosts === 'object' && !Array.isArray(hosts)) {
+          for (const [alias, h] of Object.entries(hosts)) {
+            if (!h || typeof h !== 'object') continue;
+            out.push({ alias, flavor: h.type || h.flavor || '', databases: this.extractDbs(h.databases) });
+          }
+        } else if (Array.isArray(hosts)) {
+          for (const h of hosts) {
+            if (!h || typeof h !== 'object' || !h.alias) continue;
+            out.push({ alias: h.alias, flavor: h.type || h.flavor || '', databases: this.extractDbs(h.databases) });
+          }
+        }
+        return out;
+      },
+
+      extractDbs(dbs) {
+        if (Array.isArray(dbs)) return dbs.filter(d => typeof d === 'string');
+        if (dbs && typeof dbs === 'object') return Object.keys(dbs);
+        return [];
       },
 
       onHostChange() {

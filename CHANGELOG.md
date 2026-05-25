@@ -4,6 +4,11 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Fixed
+
+- **Audit log is JSONL again, not pretty-printed multi-line JSON.** `audit_log()` was building each entry with `jq -n` (which defaults to pretty-printed output across ~5 lines per entry). The audit file's contract is one JSON object per line, read line-by-line by the wizard Runs view and by the bash-side last-successful-run baseline (`last_backup_baseline` at lib/core.sh:809). Pretty-printed output broke every reader silently — the wizard's Runs view appeared empty even when audit entries existed, and the "last backup took N seconds" baseline returned nothing. Fixed by passing `-c` (compact) to both `jq` calls in `audit_log()`. Existing pretty-printed entries can be recovered in place with `jq -c . ~/.local/share/dbx/audit.log > /tmp/x && mv /tmp/x ~/.local/share/dbx/audit.log && chmod 600 ~/.local/share/dbx/audit.log`. New `tests/unit/audit_log_jsonl.bats` asserts the JSONL contract on every call to prevent regression.
+- **Wizard Backup + Schedule views: now read `config.json` correctly.** PR-W (Backup view) and PR-X (Schedule dropdowns) both assumed `config.json`'s `hosts` was an array of `{alias, databases}` objects. Real schema is an object keyed by alias (`{"prod-mysql": {"type": "mysql", "databases": {"b2b": {}, "b2c": {}}, ...}}`), and `databases` is similarly keyed by db name. The result: against a real working config, the Backup view rendered "No hosts configured yet" and the Schedule view rendered empty dropdowns. Both client-side loaders + the server-side `list_configured_hosts` validator now read the object-keyed shape correctly (with defensive array-shape fallback for hand-edited / informal configs). Added a wizard_server test against the real dict shape.
+
 ## [0.14.0] - 2026-05-25
 
 ### Added

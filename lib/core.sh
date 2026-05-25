@@ -660,9 +660,12 @@ audit_log() {
   # Ensure directory exists
   mkdir -p "$AUDIT_LOG_DIR"
 
-  # Build JSON entry
+  # Build JSON entry. `-c` (compact / one-line) is REQUIRED: the audit
+  # log is JSONL (one object per line), and pretty-printed `jq` output
+  # would split each entry across ~5 lines. Readers like the wizard
+  # Runs view + `last_backup_baseline` then can't parse it.
   local entry
-  entry=$(jq -n \
+  entry=$(jq -nc \
     --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --arg action "$action" \
     --arg outcome "$outcome" \
@@ -675,7 +678,7 @@ audit_log() {
     local key="$1"
     local value="$2"
     shift 2
-    entry=$(echo "$entry" | jq --arg k "$key" --arg v "$value" '. + {($k): $v}')
+    entry=$(echo "$entry" | jq -c --arg k "$key" --arg v "$value" '. + {($k): $v}')
   done
 
   # Append to log
