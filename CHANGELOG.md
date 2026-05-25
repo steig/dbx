@@ -4,17 +4,25 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-24
+
+Single-theme minor release: `dbx wizard` graduates from a one-shot config builder into a multi-view local control panel. The same CLI is still the source of truth; the browser shells out to it. No Chromium bundle, no Electron — the existing 127.0.0.1 + URL-token Python server gained an `/api/` surface and three new views.
+
 ### Added
 
-- **`dbx wizard` Schedule view (PR-2 of 2).** Lands the declarative-schedule editor next to the Backups / Restore views. Shows three tables side by side: the `schedules[]` block from `config.json` (editable: add / edit / remove rows), the installed launchd plists or systemd timers (read-only), and the sync plan diff (install / update / orphan / nochange). Save writes back to `config.json`'s `schedules[]` in place, preserving every other key. Reconciling to disk still happens via `dbx schedule sync --apply` from the CLI — the write path is deliberately CLI-only until the schedules issue's part-2 lands. New endpoints: `GET /api/schedules` (shells out to `lib/schedule.sh`'s existing TSV helpers in a bash subprocess), `POST /api/schedules` (validates each row against the same host-alias / db-name regex as the bash side, then rewrites the block atomically via a `.wizard-tmp` swap).
-- **`dbx wizard` becomes a multi-view control panel.** Previously a one-shot config builder, the local browser-driven wizard now ships with three views: **Config** (existing), **Backups** (new), and **Restore** (new). The sidebar only appears in CLI mode — the static online builder at `https://steig.github.io/dbx/config-builder/` continues to show only the Config form, unchanged. (#TBD, PR-1 of 2; Schedule editor lands in PR-2.)
-  - **Backups view**: filesystem walk of `$DATA_DIR/<host>/<db>/*.sql.zst[.age|.gpg]` with sidecar `.meta.json` enrichment (timestamp, source flavor, source version). Filter + refresh. Click any row to stage it for restore.
-  - **Restore view**: full form binding to `dbx restore` (target name, `--into` container picker, `--no-post-restore`, `--hooks-only`, `--no-scrub`, `--keep-download`). Spawns `dbx restore` server-side; output streams to the browser via Server-Sent Events (text/event-stream). Cancel button SIGTERMs the running restore. `--transform` is intentionally NOT exposed (browser-triggered exec of host scripts is the wrong attack surface).
-  - **Security**: every endpoint is gated by the same 32-hex URL token as the existing wizard. `/api/restore` strictly validates input (`source` must match `<host>/<db>/latest|<file>` shape or resolve to a file under `$DATA_DIR`; `name` must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; `--into` must reference a currently running container; booleans are type-checked). `subprocess.Popen(..., shell=False)` is used everywhere.
+- **`dbx wizard` is now a multi-view control panel** with **Config** (existing), **Backups**, **Restore**, and **Schedule** tabs. The sidebar is gated by the existing `data-mode="cli"` attribute, so the static online builder at https://steig.github.io/dbx/config-builder/ continues to show only the Config form, unchanged. (#51, #52)
+  - **Backups view**: filesystem walk of `$DATA_DIR/<host>/<db>/*.sql.zst[.age|.gpg]` enriched with sidecar `.meta.json` (timestamp, source flavor + major version). Filter + refresh + per-row "Restore" button that stages the backup for the Restore view.
+  - **Restore view**: full form binding to `dbx restore` (target name, `--into` container picker populated from `docker ps`, `--no-post-restore`, `--hooks-only`, `--no-scrub`, `--keep-download`). Server spawns `dbx restore`; output streams to the browser via Server-Sent Events (`text/event-stream`). Cancel button SIGTERMs the running restore. `--transform` is **intentionally not exposed** — browser-triggered exec of host scripts is the wrong attack surface.
+  - **Schedule view**: three tables side by side — the declarative `schedules[]` block in `config.json` (editable: add / edit / remove rows with client-side validation + dirty-check), the installed launchd / systemd units (read-only, reuses `lib/schedule.sh:schedule_installed_read`), and the sync plan diff (`install` / `update` / `orphan` / `nochange`). Save rewrites `schedules[]` in place via an atomic `.wizard-tmp` swap, preserving every other top-level key. Reconciling units to disk still goes via `dbx schedule sync --apply` from the CLI — the write path is deliberately CLI-only.
+  - **New endpoints** (all `127.0.0.1`, all `?token=<32-hex>`-gated):
+    - `GET /api/backups`, `GET /api/containers`, `GET /api/schedules`
+    - `POST /api/restore` → `{job_id}`, `GET /api/jobs/<id>/events` (SSE), `POST /api/jobs/<id>/cancel`
+    - `POST /api/schedules` (declarative-only write; rewrites the block atomically)
+  - **Security**: every `POST` input is strictly validated. Source paths must match `<host>/<db>/(latest|<filename>)` shape OR resolve via `realpath` to a file inside `$DATA_DIR` matching `*.sql.zst[.age|.gpg]`. Host / database identifiers match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` — the same shape used by `host_alias_valid` on the bash side. `--into` must reference a currently running docker container. `subprocess.Popen(argv_list, shell=False)` everywhere; no string interpolation into a shell. (#51, #52)
 
 ### Changed
 
-- The Python HTTP server backing `dbx wizard` moved out of a 200-line heredoc in `lib/wizard.sh` into a standalone `lib/wizard-server.py` invoked via argparse flags. No behavior change on the existing config-save path; the extraction made room for the multi-view server logic and unlocked unit tests against the server itself (`tests/unit/wizard_server.bats`, 14 new tests).
+- The Python HTTP server backing `dbx wizard` moved out of a 200-line heredoc in `lib/wizard.sh` into a standalone `lib/wizard-server.py` invoked via argparse flags. No behavior change on the existing config-save path; the extraction made room for the multi-view server logic and unlocked unit tests against the server itself (`tests/unit/wizard_server.bats`, **21 new tests** spawning the real server against fixture data + curling endpoints). (#51, #52)
 
 ## [0.11.0] - 2026-05-24
 
