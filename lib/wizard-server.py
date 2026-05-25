@@ -79,6 +79,7 @@ def parse_args():
     p.add_argument("--html", required=True, help="Path to wizard.html shell")
     p.add_argument("--form-fragment", required=True, help="Path to wizard-form.html")
     p.add_argument("--backups-fragment", required=True, help="Path to wizard-backups.html")
+    p.add_argument("--backup-fragment", required=True, help="Path to wizard-backup.html")
     p.add_argument("--restore-fragment", required=True, help="Path to wizard-restore.html")
     p.add_argument("--config-path", required=True, help="Where to write config.json on POST /save")
     p.add_argument("--data-dir", required=True, help="Root for backup enumeration (DATA_DIR)")
@@ -447,6 +448,8 @@ def make_handler(args):
             form = f.read()
         with open(args.backups_fragment) as f:
             backups = f.read()
+        with open(args.backup_fragment) as f:
+            backup = f.read()
         with open(args.restore_fragment) as f:
             restore = f.read()
         with open(args.schedule_fragment) as f:
@@ -457,6 +460,7 @@ def make_handler(args):
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
+                 .replace("<!-- __DBX_BACKUP_FRAGMENT__ -->", backup)
                  .replace("<!-- __DBX_RESTORE_FRAGMENT__ -->", restore)
                  .replace("<!-- __DBX_SCHEDULE_FRAGMENT__ -->", schedule)
                  .replace("<!-- __DBX_RUNS_FRAGMENT__ -->", runs)
@@ -516,8 +520,63 @@ def make_handler(args):
 
         return argv, None
 
-    def spawn_restore(argv_tail: list[str]) -> str:
-        argv = [args.dbx_bin, "restore", *argv_tail]
+    def list_configured_hosts() -> list[str]:
+        """Return the list of host aliases from config.json. Used to validate
+        /api/backup's `host` field — the wizard MUST refuse to invoke
+        `dbx backup <host>` for a host the user hasn't configured. Returns
+        an empty list if config.json is missing or malformed (caller will
+        then 400 with a useful error)."""
+        try:
+            with open(args.config_path) as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(cfg, dict):
+            return []
+        hosts = cfg.get("hosts")
+        if not isinstance(hosts, list):
+            return []
+        out = []
+        for h in hosts:
+            if isinstance(h, dict) and isinstance(h.get("alias"), str):
+                out.append(h["alias"])
+        return out
+
+    def validate_backup_body(body: dict, configured_hosts: list[str]):
+        """Return (argv_tail, error_or_None). argv_tail is the list of args
+        after `dbx backup`. Mirrors validate_restore_body's shape."""
+        host = body.get("host")
+        if not isinstance(host, str) or not host:
+            return None, "host is required"
+        if not IDENT_RE.match(host):
+            return None, "host has invalid characters"
+        if host not in configured_hosts:
+            return None, f"host '{host}' is not configured (add it in the Config view)"
+        argv = []
+        # -v goes BEFORE the host argument because cmd_backup parses its
+        # flags positionally (lib/core.sh dispatcher). Same constraint
+        # mysqldump has with --defaults-extra-file: order matters.
+        verbose = body.get("verbose")
+        if verbose is True:
+            argv.append("-v")
+        elif verbose is not None and verbose is not False:
+            return None, "verbose must be a boolean"
+        upload = body.get("upload")
+        if upload is True:
+            argv.append("--upload")
+        elif upload is not None and upload is not False:
+            return None, "upload must be a boolean"
+        argv.append(host)
+        database = body.get("database")
+        if database is not None and database != "":
+            if not isinstance(database, str) or not IDENT_RE.match(database):
+                return None, "database has invalid characters"
+            argv.append(database)
+        return argv, None
+
+    def spawn_dbx(subcommand: str, argv_tail: list[str]) -> str:
+        """Spawn `dbx <subcommand> <argv_tail>` as a tracked job."""
+        argv = [args.dbx_bin, subcommand, *argv_tail]
         # text=True + bufsize=1 = line-buffered string stream from the child.
         popen = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -736,7 +795,38 @@ def make_handler(args):
                     return
                 assert argv_tail is not None
                 try:
-                    job_id = spawn_restore(argv_tail)
+                    job_id = spawn_dbx("restore", argv_tail)
+                except OSError as e:
+                    self._send(500, f"spawn failed: {e}")
+                    return
+                send_json(self, 200, {"job_id": job_id})
+                return
+
+            if path == "/api/backup":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    self._send(400, "body must be a JSON object")
+                    return
+                configured = list_configured_hosts()
+                if not configured:
+                    send_json(self, 400, {"error": "no hosts configured in config.json"})
+                    return
+                argv_tail, err = validate_backup_body(body, configured)
+                if err is not None:
+                    send_json(self, 400, {"error": err})
+                    return
+                assert argv_tail is not None
+                try:
+                    job_id = spawn_dbx("backup", argv_tail)
                 except OSError as e:
                     self._send(500, f"spawn failed: {e}")
                     return

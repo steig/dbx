@@ -128,7 +128,7 @@ EOF
 
   require_jq
 
-  local token port done_marker html_template form_fragment backups_fragment restore_fragment schedule_fragment runs_fragment dbx_bin audit_dir
+  local token port done_marker html_template form_fragment backups_fragment backup_fragment restore_fragment schedule_fragment runs_fragment dbx_bin audit_dir
   token=$(wizard_make_token)
   if [[ -n "$user_port" ]]; then
     [[ "$user_port" =~ ^[0-9]+$ ]] || die "Invalid --port value: $user_port"
@@ -142,6 +142,7 @@ EOF
   html_template="$LIB_DIR/wizard.html"
   form_fragment="$LIB_DIR/wizard-form.html"
   backups_fragment="$LIB_DIR/wizard-backups.html"
+  backup_fragment="$LIB_DIR/wizard-backup.html"
   restore_fragment="$LIB_DIR/wizard-restore.html"
   schedule_fragment="$LIB_DIR/wizard-schedule.html"
   runs_fragment="$LIB_DIR/wizard-runs.html"
@@ -157,6 +158,7 @@ EOF
   [[ -f "$html_template"     ]] || die "Wizard HTML missing: $html_template (re-run install.sh to repair)"
   [[ -f "$form_fragment"     ]] || die "Wizard form fragment missing: $form_fragment (re-run install.sh to repair)"
   [[ -f "$backups_fragment"  ]] || die "Wizard backups fragment missing: $backups_fragment (re-run install.sh to repair)"
+  [[ -f "$backup_fragment"   ]] || die "Wizard backup fragment missing: $backup_fragment (re-run install.sh to repair)"
   [[ -f "$restore_fragment"  ]] || die "Wizard restore fragment missing: $restore_fragment (re-run install.sh to repair)"
   [[ -f "$schedule_fragment" ]] || die "Wizard schedule fragment missing: $schedule_fragment (re-run install.sh to repair)"
   [[ -f "$runs_fragment"     ]] || die "Wizard runs fragment missing: $runs_fragment (re-run install.sh to repair)"
@@ -174,6 +176,7 @@ EOF
     --html "$html_template" \
     --form-fragment "$form_fragment" \
     --backups-fragment "$backups_fragment" \
+    --backup-fragment "$backup_fragment" \
     --restore-fragment "$restore_fragment" \
     --schedule-fragment "$schedule_fragment" \
     --runs-fragment "$runs_fragment" \

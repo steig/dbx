@@ -133,6 +133,7 @@
       <div class="dbx-app__brand">dbx<small>local control panel</small></div>
       <nav class="dbx-app__nav" x-data>
         <a @click="$store.dbx.view = 'config'"   :class="{active: $store.dbx.view === 'config'}">Config</a>
+        <a @click="$store.dbx.view = 'backup'"   :class="{active: $store.dbx.view === 'backup'}">Backup</a>
         <a @click="$store.dbx.view = 'backups'"  :class="{active: $store.dbx.view === 'backups'}">Backups</a>
         <a @click="$store.dbx.view = 'runs'"     :class="{active: $store.dbx.view === 'runs'}">Runs</a>
         <a @click="$store.dbx.view = 'restore'"  :class="{active: $store.dbx.view === 'restore'}">Restore</a>
@@ -146,6 +147,9 @@
           <p class="dbx-view__subtitle">Build your <code>~/.config/dbx/config.json</code>, then click <strong>Save &amp; exit</strong>.</p>
         </header>
         <!-- __DBX_FORM_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'backup'">
+        <!-- __DBX_BACKUP_FRAGMENT__ -->
       </section>
       <section x-data x-show="$store.dbx.view === 'backups'">
         <!-- __DBX_BACKUPS_FRAGMENT__ -->
