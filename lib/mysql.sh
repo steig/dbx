@@ -855,13 +855,64 @@ mysql_parse_version_string() {
 # Returns "flavor major minor" or "unknown 0 0" on any failure.
 # Uses the dbx-managed mysql container as the client to avoid needing a
 # local mysql binary.
+#
+# Under DBX_VERBOSE=1, logs raw mysql output (and stderr) to the
+# terminal so the user can see WHY detection failed when the result is
+# the `unknown 0 0` sentinel. Prod MySQL backups have been observed
+# landing with `source_flavor: "unknown"` / `source_major_version: "0"`
+# in `.meta.json` — the diagnostic logging is what we need to triage
+# whether it's an auth/network/version-format issue.
+#
 # Args: $1=host $2=port $3=user $4=password
 mysql_detect_server_version() {
   local host="$1" port="$2" user="$3" password="$4"
-  local raw
+
+  local container="${MYSQL_CONTAINER:-mysql-dbx}"
+  local verbose="${DBX_VERBOSE:-0}"
+
+  if [[ "$verbose" == "1" ]]; then
+    log_info "mysql_detect_server_version: querying SELECT VERSION() via $container against $host:$port (user: $user)"
+  fi
+
+  # Capture stdout and stderr separately so we can log stderr under
+  # `-v` without polluting the stdout we feed into the parser. mysql
+  # client emits the cosmetic `[Warning] Using a password on the command
+  # line interface can be insecure.` to stderr on every invocation, but
+  # also writes connection / permission / handshake errors there — we
+  # want both visible to the user when they pass `-v`.
+  local stderr_file
+  stderr_file=$(mktemp -t dbx-mysql-detect-stderr.XXXXXX)
+  local raw rc
   raw=$(docker exec -i -e MYSQL_PWD="$password" \
-    "${MYSQL_CONTAINER:-mysql-dbx}" \
+    "$container" \
     mysql -h "$host" -P "$port" -u "$user" -N -e 'SELECT VERSION()' \
-    2>/dev/null | tr -d '\r')
+    2>"$stderr_file")
+  rc=$?
+
+  if [[ "$verbose" == "1" ]]; then
+    log_info "mysql_detect_server_version: docker exec exit=$rc"
+    # printf %q on the raw output so non-printable / multi-line strings
+    # don't break the log formatting and the user can see exactly what
+    # came back.
+    if [[ -n "$raw" ]]; then
+      log_info "mysql_detect_server_version: raw stdout: $(printf %q "$raw")"
+    else
+      log_info "mysql_detect_server_version: raw stdout was empty"
+    fi
+    if [[ -s "$stderr_file" ]]; then
+      log_info "mysql_detect_server_version: stderr was:"
+      while IFS= read -r _line; do
+        log_info "  | $_line"
+      done < "$stderr_file"
+    else
+      log_info "mysql_detect_server_version: stderr was empty"
+    fi
+  fi
+  rm -f "$stderr_file"
+
+  # Strip CR (mysql client sometimes emits CRLF in certain locales) and
+  # let the parser handle the rest. If raw is empty, parser will return
+  # the `unknown 0 0` sentinel.
+  raw=$(printf '%s' "$raw" | tr -d '\r')
   mysql_parse_version_string "$raw"
 }
