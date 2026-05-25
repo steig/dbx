@@ -94,7 +94,7 @@ EOF
 
   require_jq
 
-  local token port done_marker html_template form_fragment backups_fragment restore_fragment dbx_bin
+  local token port done_marker html_template form_fragment backups_fragment restore_fragment schedule_fragment dbx_bin
   token=$(wizard_make_token)
   port=$(wizard_find_free_port)
   done_marker=$(mktemp -t dbx-wizard.XXXXXX)
@@ -102,6 +102,7 @@ EOF
   form_fragment="$LIB_DIR/wizard-form.html"
   backups_fragment="$LIB_DIR/wizard-backups.html"
   restore_fragment="$LIB_DIR/wizard-restore.html"
+  schedule_fragment="$LIB_DIR/wizard-schedule.html"
   # Resolve the dbx binary so the wizard server can spawn `dbx restore` even
   # when this clone isn't on PATH (common in dev: `./dbx wizard`). SCRIPT_DIR
   # is set at the top of the dbx script and is always absolute.
@@ -111,6 +112,7 @@ EOF
   [[ -f "$form_fragment"     ]] || die "Wizard form fragment missing: $form_fragment (re-run install.sh to repair)"
   [[ -f "$backups_fragment"  ]] || die "Wizard backups fragment missing: $backups_fragment (re-run install.sh to repair)"
   [[ -f "$restore_fragment"  ]] || die "Wizard restore fragment missing: $restore_fragment (re-run install.sh to repair)"
+  [[ -f "$schedule_fragment" ]] || die "Wizard schedule fragment missing: $schedule_fragment (re-run install.sh to repair)"
 
   mkdir -p "$(dirname "$CONFIG_FILE")"
 
@@ -126,9 +128,11 @@ EOF
     --form-fragment "$form_fragment" \
     --backups-fragment "$backups_fragment" \
     --restore-fragment "$restore_fragment" \
+    --schedule-fragment "$schedule_fragment" \
     --config-path "$CONFIG_FILE" \
     --data-dir "$DATA_DIR" \
     --dbx-bin "$dbx_bin" \
+    --lib-dir "$LIB_DIR" \
     --done-marker "$done_marker" \
     >"$server_log" 2>&1 &
   local srv_pid=$!

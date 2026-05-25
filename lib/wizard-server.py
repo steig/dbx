@@ -83,6 +83,8 @@ def parse_args():
     p.add_argument("--config-path", required=True, help="Where to write config.json on POST /save")
     p.add_argument("--data-dir", required=True, help="Root for backup enumeration (DATA_DIR)")
     p.add_argument("--dbx-bin", required=True, help="Path to the dbx binary to invoke for restores")
+    p.add_argument("--lib-dir", required=True, help="Path to dbx lib/ (sourced for schedule helpers)")
+    p.add_argument("--schedule-fragment", required=True, help="Path to wizard-schedule.html")
     p.add_argument("--done-marker", required=True, help="Touched after a successful save")
     return p.parse_args()
 
@@ -151,6 +153,123 @@ def list_containers():
         return []
 
 
+def read_schedule_state(lib_dir: str, config_path: str, data_dir: str):
+    """Source core.sh + schedule.sh in a bash subprocess and read all three
+    TSV blocks (declarative / installed / sync plan). Returns a dict suitable
+    for JSON response, or raises RuntimeError on shell failure."""
+    script = r"""
+set -e
+. "$LIB_DIR/core.sh"
+. "$LIB_DIR/schedule.sh"
+CFG=$(schedule_config_read || true)
+INST=$(schedule_installed_read || true)
+PLAN=$(schedule_sync_plan "$CFG" "$INST")
+printf '__CFG__\n%s\n__INST__\n%s\n__PLAN__\n%s\n__END__\n' "$CFG" "$INST" "$PLAN"
+"""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "LIB_DIR": lib_dir,
+        "DBX_CONFIG_DIR": os.path.dirname(config_path),
+        "DBX_DATA_DIR": data_dir,
+    }
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script], env=env,
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"bash invocation failed: {e}") from e
+    if result.returncode != 0:
+        raise RuntimeError(f"schedule helpers failed: {result.stderr.strip() or result.stdout.strip()}")
+
+    # Split on the three sentinel markers; each block is multiline TSV.
+    out = result.stdout
+    sections = {"__CFG__": "", "__INST__": "", "__PLAN__": ""}
+    current = None
+    for line in out.splitlines():
+        if line in sections:
+            current = line
+            continue
+        if line == "__END__":
+            current = None
+            continue
+        if current is not None:
+            sections[current] += line + "\n"
+
+    def parse_tsv_rows(blob: str, columns: list):
+        rows = []
+        for line in blob.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            row = {columns[i]: (parts[i] if i < len(parts) else "") for i in range(len(columns))}
+            rows.append(row)
+        return rows
+
+    return {
+        "declarative": parse_tsv_rows(sections["__CFG__"], ["host", "database", "when"]),
+        "installed":   parse_tsv_rows(sections["__INST__"], ["host", "database", "when"]),
+        "plan":        parse_tsv_rows(sections["__PLAN__"], ["action", "host", "database", "when"]),
+    }
+
+
+def write_schedules_block(config_path: str, schedules):
+    """Validate and write the schedules[] block into the existing config.json,
+    preserving every other key. Returns (ok, error_message). `schedules` is
+    deliberately untyped — it comes from arbitrary JSON and may not be a list."""
+    if not isinstance(schedules, list):
+        return False, "schedules must be a JSON array"
+    if len(schedules) > 1000:
+        return False, "too many schedules (>1000)"
+
+    cleaned = []
+    for i, s in enumerate(schedules):
+        if not isinstance(s, dict):
+            return False, f"schedules[{i}] must be an object"
+        host = s.get("host")
+        database = s.get("database")
+        when = s.get("when")
+        if not isinstance(host, str) or not IDENT_RE.match(host):
+            return False, f"schedules[{i}].host must match the host-alias shape"
+        if not isinstance(database, str) or not IDENT_RE.match(database):
+            return False, f"schedules[{i}].database must match the db-name shape"
+        if not isinstance(when, str) or not (1 <= len(when) <= 128):
+            return False, f"schedules[{i}].when must be a string (1-128 chars)"
+        cleaned.append({"host": host, "database": database, "when": when})
+
+    # Read existing config, replace schedules block, write back atomically.
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                return False, "existing config.json is not a JSON object"
+        else:
+            config = {}
+    except (OSError, json.JSONDecodeError) as e:
+        return False, f"could not read existing config.json: {e}"
+
+    config["schedules"] = cleaned
+
+    tmp_path = config_path + ".wizard-tmp"
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(tmp_path, "w") as f:
+            json.dump(config, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, config_path)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return False, f"write failed: {e}"
+
+    return True, None
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
@@ -167,11 +286,14 @@ def make_handler(args):
             backups = f.read()
         with open(args.restore_fragment) as f:
             restore = f.read()
+        with open(args.schedule_fragment) as f:
+            schedule = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
                  .replace("<!-- __DBX_RESTORE_FRAGMENT__ -->", restore)
+                 .replace("<!-- __DBX_SCHEDULE_FRAGMENT__ -->", schedule)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -314,6 +436,14 @@ def make_handler(args):
             if path == "/api/containers":
                 send_json(self, 200, list_containers())
                 return
+            if path == "/api/schedules":
+                try:
+                    state = read_schedule_state(args.lib_dir, args.config_path, args.data_dir)
+                except RuntimeError as e:
+                    send_json(self, 500, {"error": str(e)})
+                    return
+                send_json(self, 200, state)
+                return
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/events$", path)
             if m:
                 with JOBS_LOCK:
@@ -381,6 +511,27 @@ def make_handler(args):
                     self._send(500, f"spawn failed: {e}")
                     return
                 send_json(self, 200, {"job_id": job_id})
+                return
+
+            if path == "/api/schedules":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 256_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict) or "schedules" not in body:
+                    send_json(self, 400, {"error": "body must be {schedules: [...]}"})
+                    return
+                ok, err = write_schedules_block(args.config_path, body["schedules"])
+                if not ok:
+                    send_json(self, 400, {"error": err})
+                    return
+                send_json(self, 200, {"ok": True})
                 return
 
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/cancel$", path)
