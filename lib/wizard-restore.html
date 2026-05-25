@@ -24,11 +24,19 @@
   .dbx-restore__status--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
   .dbx-restore__status--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
   .dbx-restore__status--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
+  .dbx-restore__elapsed { display: inline-block; padding: 0.2rem 0.55rem; margin-left: 0.5rem; border-radius: 999px; background: var(--md-code-bg-color); color: var(--md-default-fg-color); font-family: var(--md-code-font-family); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+  .dbx-restore__elapsed--running { color: var(--md-accent-fg-color); }
 </style>
 
 <div x-data="dbxRestore()" x-init="init()">
   <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Restore</h2>
+    <h2 class="dbx-view__title">Restore
+      <template x-if="startedAt">
+        <span class="dbx-restore__elapsed"
+              :class="{ 'dbx-restore__elapsed--running': running }"
+              x-text="'Elapsed: ' + formatElapsed(elapsed)"></span>
+      </template>
+    </h2>
     <p class="dbx-view__subtitle">
       Wraps <code>dbx restore</code> against a local backup. Output streams live;
       the restore keeps running if you close the browser.
@@ -122,6 +130,13 @@
       running: false,
       status: '',
       exitCode: null,
+      // Elapsed counter. `startedAt` is the ms-epoch we set on a successful
+      // POST /api/restore; `elapsed` is the live seconds value driven by
+      // setInterval and frozen on the `done` event. `tickHandle` lets us
+      // clear the interval cleanly on done / cancel / browser nav.
+      startedAt: null,
+      elapsed: 0,
+      tickHandle: null,
 
       init() {
         // Re-read the selected backup whenever the user switches into the
@@ -139,6 +154,8 @@
           this.log = [];
           this.status = '';
           this.exitCode = null;
+          this.startedAt = null;
+          this.elapsed = 0;
         }
         // Pull container list for the --into picker.
         try {
@@ -163,6 +180,11 @@
         this.log = [];
         this.status = 'Starting restore…';
         this.running = true;
+        // Reset elapsed state on a fresh run; we'll set startedAt only on
+        // a successful POST so a 4xx response doesn't kick off the timer.
+        this.startedAt = null;
+        this.elapsed = 0;
+        this.stopTicker();
         try {
           const r = await fetch(Alpine.store('dbx').api('/restore'), {
             method: 'POST',
@@ -177,11 +199,51 @@
           }
           const { job_id } = await r.json();
           this.jobId = job_id;
+          // Timer starts when the server accepted the job. setInterval at
+          // 1s gives a once-per-second tick; the JS `elapsed` field is
+          // recomputed from Date.now() each tick so we never accumulate
+          // drift if the browser is throttled while backgrounded.
+          this.startedAt = Date.now();
+          this.startTicker();
           this.attachStream(job_id);
         } catch (e) {
           this.status = `Network error: ${e}`;
           this.running = false;
         }
+      },
+
+      startTicker() {
+        this.stopTicker();
+        // Compute immediately so the user doesn't see "0m 0s" for a full second
+        this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
+        this.tickHandle = setInterval(() => {
+          if (!this.startedAt) return;
+          this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
+        }, 1000);
+      },
+
+      stopTicker() {
+        if (this.tickHandle != null) {
+          clearInterval(this.tickHandle);
+          this.tickHandle = null;
+        }
+      },
+
+      // Pure formatter — matches the format_duration semantics on the
+      // bash side (Ns / XmYs / XhYmZs). No DOM dependencies; easy to unit
+      // test from node if/when we add a JS smoke harness.
+      formatElapsed(secs) {
+        if (!Number.isFinite(secs) || secs < 0) return '0s';
+        const s = Math.floor(secs);
+        if (s < 60) return s + 's';
+        if (s < 3600) {
+          const m = Math.floor(s / 60);
+          return m + 'm ' + (s % 60) + 's';
+        }
+        const h = Math.floor(s / 3600);
+        const rem = s % 3600;
+        const m = Math.floor(rem / 60);
+        return h + 'h ' + m + 'm ' + (rem % 60) + 's';
       },
 
       attachStream(jobId) {
@@ -206,6 +268,13 @@
             this.status = 'Restore finished (unknown exit code).';
           } finally {
             this.running = false;
+            // Final tick so the elapsed shows total wall-clock time of
+            // the run, then stop the interval. We keep startedAt set so
+            // the badge stays visible until the user clears the log.
+            if (this.startedAt) {
+              this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
+            }
+            this.stopTicker();
             es.close();
             this.eventSource = null;
           }
@@ -230,6 +299,9 @@
         this.log = [];
         this.status = '';
         this.exitCode = null;
+        this.startedAt = null;
+        this.elapsed = 0;
+        this.stopTicker();
       },
 
       statusClass() {

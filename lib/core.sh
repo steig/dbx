@@ -699,6 +699,149 @@ audit_vault() {
 }
 
 # ============================================================================
+# Duration helpers
+# ============================================================================
+
+# Format an integer number of seconds as a short human-readable duration.
+#   <60s         → "Ns"        (e.g. "5s", "0s")
+#   <3600s       → "XmYs"      (e.g. "1m 5s")
+#   >=3600s      → "XhYmZs"    (e.g. "1h 2m 5s")
+#
+# Used by cmd_backup / cmd_restore end-of-run summaries and the verbose
+# per-step elapsed prefix. Negative / non-numeric input falls back to "0s"
+# so callers don't have to validate.
+format_duration() {
+  local secs="$1"
+  # Accept only non-negative integers; everything else collapses to 0.
+  if [[ ! "$secs" =~ ^[0-9]+$ ]]; then
+    echo "0s"
+    return 0
+  fi
+
+  if [[ "$secs" -lt 60 ]]; then
+    echo "${secs}s"
+  elif [[ "$secs" -lt 3600 ]]; then
+    local m=$((secs / 60))
+    local s=$((secs % 60))
+    echo "${m}m ${s}s"
+  else
+    local h=$((secs / 3600))
+    local rem=$((secs % 3600))
+    local m=$((rem / 60))
+    local s=$((rem % 60))
+    echo "${h}h ${m}m ${s}s"
+  fi
+}
+
+# Look up the duration_sec of the most recent successful audit entry that
+# matches the given action / host / database. Used to print a "last took Xs"
+# baseline before backup / restore so the user has a rough ETA.
+#
+# Reads only the tail of $AUDIT_LOG_FILE (last 500 lines) to keep the call
+# bounded — the audit log is append-only and grows forever.
+#
+# Args: $1=action ("backup" or "restore")
+#       $2=host alias (matched against the `db_host` field; for restore the
+#          audit entry doesn't carry db_host so $2 is ignored there)
+#       $3=database name (matched against the `database` field; for restore
+#          the entry doesn't carry it either — ignored)
+#
+# Outputs: the integer duration_sec on stdout when a match is found, or
+#          nothing when there's no match / no audit log / jq fails.
+# Never errors out — failure is silent so callers can `local x=$(...)`.
+audit_last_duration() {
+  local action="$1"
+  local host="$2"
+  local database="$3"
+
+  [[ -z "$action" ]] && return 0
+  [[ ! -f "$AUDIT_LOG_FILE" ]] && return 0
+
+  # Tail-bounded read: the audit log is unbounded, so we deliberately scan
+  # only the last ~500 lines. For typical use this covers months of history.
+  # `jq -s` slurps the array; `last` picks the most recent match.
+  local query
+  if [[ "$action" == "backup" ]]; then
+    # Backups have db_host + database fields; require both to match.
+    query='[.[] | select(.action == $a and .outcome == "success"'
+    query+=' and .db_host == $h and .database == $d'
+    query+=' and (.duration_sec // null) != null'
+    query+=' and (.duration_sec | tostring | test("^[0-9]+$")))] | last'
+  else
+    # Restores don't carry db_host/database — match on action+outcome only.
+    query='[.[] | select(.action == $a and .outcome == "success"'
+    query+=' and (.duration_sec // null) != null'
+    query+=' and (.duration_sec | tostring | test("^[0-9]+$")))] | last'
+  fi
+
+  local last_entry
+  last_entry=$(tail -500 "$AUDIT_LOG_FILE" 2>/dev/null \
+    | jq -s --arg a "$action" --arg h "$host" --arg d "$database" \
+        "$query" 2>/dev/null) || return 0
+  [[ -z "$last_entry" || "$last_entry" == "null" ]] && return 0
+
+  # Pull duration_sec; print iff it's an integer. Sizes are emitted as
+  # strings by audit_log (jq --arg), so we accept either string-int or int.
+  echo "$last_entry" | jq -r '.duration_sec // empty' 2>/dev/null \
+    | head -1 \
+    | grep -E '^[0-9]+$' || true
+}
+
+# Same shape as audit_last_duration but returns the .size field of the most
+# recent matching success entry. Used alongside the duration baseline so
+# we can say "last backup … took 1m 41s, produced 228 MB".
+audit_last_size() {
+  local action="$1"
+  local host="$2"
+  local database="$3"
+
+  [[ -z "$action" ]] && return 0
+  [[ ! -f "$AUDIT_LOG_FILE" ]] && return 0
+
+  local query
+  if [[ "$action" == "backup" ]]; then
+    query='[.[] | select(.action == $a and .outcome == "success"'
+    query+=' and .db_host == $h and .database == $d'
+    query+=' and (.size // null) != null)] | last'
+  else
+    query='[.[] | select(.action == $a and .outcome == "success"'
+    query+=' and (.size // null) != null)] | last'
+  fi
+
+  local last_entry
+  last_entry=$(tail -500 "$AUDIT_LOG_FILE" 2>/dev/null \
+    | jq -s --arg a "$action" --arg h "$host" --arg d "$database" \
+        "$query" 2>/dev/null) || return 0
+  [[ -z "$last_entry" || "$last_entry" == "null" ]] && return 0
+
+  echo "$last_entry" | jq -r '.size // empty' 2>/dev/null \
+    | head -1 \
+    | grep -E '^[0-9]+$' || true
+}
+
+# Emit a "[INFO] +<elapsed> <msg>" line where elapsed is wall-clock seconds
+# since $start_epoch formatted via format_duration. Used by pg_backup /
+# mysql_backup under -v so the user sees a per-step heartbeat without us
+# trying to maintain a live ticking cursor (which fragments across terminals).
+#
+# Args: $1=start epoch (output of `date +%s` from the function entry),
+#       $2..N=message
+log_step_elapsed() {
+  local start="$1"
+  shift
+  local now elapsed
+  now=$(date +%s)
+  # Guard against clock skew / missing start — format_duration handles 0.
+  if [[ "$start" =~ ^[0-9]+$ ]]; then
+    elapsed=$((now - start))
+    [[ "$elapsed" -lt 0 ]] && elapsed=0
+  else
+    elapsed=0
+  fi
+  log_info "+$(format_duration "$elapsed")  $*"
+}
+
+# ============================================================================
 # Security Functions
 # ============================================================================
 

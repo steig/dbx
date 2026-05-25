@@ -125,6 +125,7 @@ mysql_backup() {
 
   # Pass 1: Schema for ALL tables (including excluded ones)
   log_info "Dumping schema (tables, views, routines, triggers)..."
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (schema pass) started"
   if ! docker exec "$MYSQL_CONTAINER" \
     mysqldump \
       --defaults-extra-file=/tmp/my.cnf \
@@ -152,6 +153,7 @@ mysql_backup() {
 
   # Pass 2: Data for non-excluded tables
   log_info "Dumping data..."
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (data pass) started"
   local ignore_opts=()
   for table in "${exclude_tables[@]}"; do
     ignore_opts+=(--ignore-table="${database}.${table}")
@@ -184,6 +186,7 @@ mysql_backup() {
 
   # Combine, compress, and optionally encrypt
   log_info "Compressing..."
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "zstd + encrypt pipeline started"
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
     cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$output_file"
   else
@@ -196,7 +199,11 @@ mysql_backup() {
   end_time=$(date +%s)
   duration=$((end_time - start_time))
   file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
+  if [[ "$verbose" == "true" ]]; then
+    log_step_elapsed "$start_time" "compress + encrypt done — $(human_size "$file_size") on disk"
+  fi
   checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "sha256 done"
 
   # Capture information_schema.columns for the pre-restore scrub drift
   # check. See the same block in pg_backup for rationale. Best-effort;
@@ -242,6 +249,7 @@ mysql_backup() {
       scrub_schema: $scrub_schema
     }' > "$meta_file"
   secure_file "$meta_file"
+  [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
 
   # Audit log
   audit_backup "$host" "$database" "success" "$output_file" "$file_size" "$duration"
@@ -303,9 +311,11 @@ mysql_restore_backup() {
 
     log_info "Importing $human_size (compressed)..."
 
-    # Restore with progress if pv is available
+    # Restore with progress if pv is available. `-s` gives pv the
+    # compressed file size so the bar shows a real % / ETA — the bytes
+    # pv counts are the source file's, not the post-decompress stream.
     if command -v pv &>/dev/null; then
-      pv -N "Importing" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
+      pv -N "Importing" -s "$file_size" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
         mysql --defaults-extra-file="$cred_file" "$target_db" 2> >(mysql_stderr_filter)
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
@@ -340,9 +350,11 @@ mysql_restore_backup() {
 
     log_info "Importing $human_size (compressed)..."
 
-    # Restore with progress if pv is available
+    # Restore with progress if pv is available. `-s` gives pv the
+    # compressed file size so the bar shows a real % / ETA — the bytes
+    # pv counts are the source file's, not the post-decompress stream.
     if command -v pv &>/dev/null; then
-      pv -N "Importing" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
+      pv -N "Importing" -s "$file_size" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
         docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
