@@ -210,6 +210,31 @@ is_file_encrypted() {
 # Decompress + Decrypt Combined
 # ============================================================================
 
+# Streaming version of decompress_backup. Reads from stdin and dispatches
+# on $1's extension (rather than reading from the file itself). Used by the
+# mysql restore pipeline so `pv` can wrap the source-file read for progress
+# while the decryption + decompression happens downstream. Without this,
+# callers were using `decompress_stdin "${file##*.}"` (lib/core.sh) which
+# only handles the SINGLE final extension and falls through to `cat` for
+# `.age` / `.gpg` — silently passing encrypted bytes straight into mysql
+# and producing nonsense "syntax error" failures.
+# Handles: .sql.zst.age, .sql.zst.gpg, .sql.zst, .sql.gz.age, .sql.gz.gpg,
+#          .sql.gz, .sql.age, .sql.gpg, .sql, .zst, .gz
+decompress_stream_by_filename() {
+  local file="$1"
+  case "$file" in
+    *.sql.zst.age|*.zst.age) require_age; age_decrypt_stream | zstd -d ;;
+    *.sql.zst.gpg|*.zst.gpg) require_gpg; decrypt_stream | zstd -d ;;
+    *.sql.gz.age|*.gz.age)   require_age; age_decrypt_stream | gunzip ;;
+    *.sql.gz.gpg|*.gz.gpg)   require_gpg; decrypt_stream | gunzip ;;
+    *.sql.age)               require_age; age_decrypt_stream ;;
+    *.sql.gpg)               require_gpg; decrypt_stream ;;
+    *.sql.zst|*.zst)         zstd -d ;;
+    *.sql.gz|*.gz)           gunzip ;;
+    *.sql|*)                 cat ;;
+  esac
+}
+
 # Full decompression pipeline for backup files
 # Handles: .sql.zst.age, .sql.zst.gpg, .sql.zst, .sql.age, .sql.gpg, .sql
 decompress_backup() {
