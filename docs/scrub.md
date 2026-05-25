@@ -306,7 +306,18 @@ Keep these as the audit trail for compliance reviews: every restore into a gated
 ```bash
 dbx scrub init production > dbx.scrub.json
 dbx scrub init production --include-empty > dbx.scrub.json
+
+# Or, iterate against a restored snapshot living in postgres-dbx / mysql-dbx
+# (no host config required):
+dbx scrub init local/myapp_v1 --output dbx.scrub.json
+dbx scrub check local/myapp_v1 --manifest dbx.scrub.json
 ```
+
+The pseudo-host `local` (alias `localhost`) auto-detects whether the named
+database lives in `postgres-dbx` or `mysql-dbx`; postgres wins if both have
+it. Useful for iterating on a manifest before wiring it to a real source.
+`check` against `local/<db>` requires `--manifest <path>` since there's no
+host config to resolve the manifest from.
 
 `init` connects to the source, walks `information_schema.columns`, and for each column either:
 

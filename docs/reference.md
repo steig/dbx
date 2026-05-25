@@ -9,7 +9,7 @@
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed). |
 | `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query). |
 | `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB. |
-| `dbx analyze <host> <database>` | Pick tables to exclude from data dumps. |
+| `dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan]` | Pick tables to exclude from data dumps; also pre-scans schema for PII candidates. `--suggest-scrub` writes a draft scrub manifest; `--no-pii-scan` skips the pre-scan. |
 | `dbx list [host] [database]` | List local backups. |
 | `dbx clean [--keep N] [--dry-run] [--older-than D]` | Retention sweep. |
 | `dbx host add` | [Interactive wizard](wizards.md#dbx-host-add) for adding a host. |

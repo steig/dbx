@@ -1206,6 +1206,124 @@ scrub_run_count_query() {
 }
 
 # ============================================================================
+# Local-container source resolution (for `dbx scrub <action> local/<db>`)
+# ============================================================================
+#
+# Lets scrub init/check run against a database that already lives inside
+# postgres-dbx / mysql-dbx without configuring a real host. Two helpers:
+#   scrub_local_db_engine    — detect which managed container owns the db
+#   scrub_local_schema_tsv   — emit the engine-specific schema TSV
+
+# 0 iff $1 is the local-container pseudo-host name (`local` or `localhost`).
+# Centralized so callers don't drift on which spellings are accepted.
+# Args: $1 host alias
+scrub_is_local_host() {
+  local host="$1"
+  [[ "$host" == "local" || "$host" == "localhost" ]]
+}
+
+# Detect which managed container holds a database with the given name.
+# Echoes `postgres` or `mysql` on stdout, or empty on no match. When the
+# db lives in BOTH containers, postgres wins (deterministic).
+# Args: $1 db name
+scrub_local_db_engine() {
+  local db="$1"
+  [[ -z "$db" ]] && return 0
+
+  # Postgres: look up by name in pg_database.
+  local pg_match=""
+  if docker inspect "${POSTGRES_CONTAINER:-postgres-dbx}" >/dev/null 2>&1; then
+    local pg_root_pass
+    pg_root_pass=$(docker exec "${POSTGRES_CONTAINER:-postgres-dbx}" \
+      printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
+    pg_match=$(docker exec -e PGPASSWORD="$pg_root_pass" \
+      "${POSTGRES_CONTAINER:-postgres-dbx}" \
+      psql -U postgres -tA -c \
+      "SELECT 1 FROM pg_database WHERE datname='$db' LIMIT 1" \
+      2>/dev/null | tr -d '[:space:]')
+  fi
+  if [[ "$pg_match" == "1" ]]; then
+    printf '%s\n' "postgres"
+    return 0
+  fi
+
+  # MySQL.
+  local my_match=""
+  if docker inspect "${MYSQL_CONTAINER:-mysql-dbx}" >/dev/null 2>&1; then
+    local my_root_pass
+    my_root_pass=$(docker exec "${MYSQL_CONTAINER:-mysql-dbx}" \
+      printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
+    my_match=$(docker exec -e MYSQL_PWD="$my_root_pass" \
+      "${MYSQL_CONTAINER:-mysql-dbx}" \
+      mysql -u root -B -N -e \
+      "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db' LIMIT 1" \
+      2>/dev/null | tr -d '[:space:]')
+  fi
+  if [[ "$my_match" == "1" ]]; then
+    printf '%s\n' "mysql"
+    return 0
+  fi
+
+  return 0
+}
+
+# Schema TSV (table, column, data_type, is_nullable) for a local-container
+# database. Picks the engine via scrub_local_db_engine. Dies cleanly when
+# the db is in neither container.
+# Args: $1 db name
+scrub_local_schema_tsv() {
+  local db="$1"
+  local engine
+  engine=$(scrub_local_db_engine "$db")
+  case "$engine" in
+    postgres) scrub_schema_query_pg_local "$db" ;;
+    mysql)    scrub_schema_query_mysql_local "$db" ;;
+    *)
+      die "scrub: database '$db' not found in ${POSTGRES_CONTAINER:-postgres-dbx} or ${MYSQL_CONTAINER:-mysql-dbx} (restore it first, or pass a configured <host>)"
+      ;;
+  esac
+}
+
+# ============================================================================
+# PII summary for `dbx analyze` (PR-E)
+# ============================================================================
+#
+# Given a schema JSON (output of scrub_schema_tsv_to_json), emit a TSV
+# of (table\tcomma-separated-pii-cols) — one row per table that has at
+# least one dictionary-matching column. Pure jq+bash; no docker.
+# Args: $1 schema JSON, $2 manifest JSON (optional; defaults to {})
+scrub_pii_summary_tsv() {
+  local schema="$1" manifest="${2:-{\}}"
+  local table col matches pat
+  while IFS= read -r table; do
+    [[ -z "$table" ]] && continue
+    matches=""
+    while IFS= read -r col; do
+      [[ -z "$col" ]] && continue
+      pat=$(scrub_dict_matches "$col" "$manifest")
+      if [[ -n "$pat" ]]; then
+        if [[ -z "$matches" ]]; then
+          matches="$col"
+        else
+          matches="$matches,$col"
+        fi
+      fi
+    done < <(jq -r --arg t "$table" '.tables[$t].columns | keys[]?' <<<"$schema" 2>/dev/null || true)
+    if [[ -n "$matches" ]]; then
+      printf '%s\t%s\n' "$table" "$matches"
+    fi
+  done < <(jq -r '.tables | keys[]?' <<<"$schema" 2>/dev/null || true)
+}
+
+# Echo PII candidate columns (comma-separated) for a single table from
+# a TSV produced by scrub_pii_summary_tsv. Empty if the table has none.
+# Args: $1 TSV, $2 table name
+scrub_pii_for_table() {
+  local tsv="$1" table="$2"
+  printf '%s\n' "$tsv" | awk -F'\t' -v t="$table" '$1 == t { print $2; exit }'
+}
+
+# ============================================================================
 # Restore-time gate
 # ============================================================================
 #
