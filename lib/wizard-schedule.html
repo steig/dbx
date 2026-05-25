@@ -16,7 +16,8 @@
   .dbx-sched__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
   .dbx-sched__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
   .dbx-sched__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-  .dbx-sched__table input { width: 100%; padding: 0.35rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
+  .dbx-sched__table input,
+  .dbx-sched__table select { width: 100%; padding: 0.35rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
   .dbx-sched__table input:invalid { border-color: #c43d3d; }
   .dbx-sched__actions { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.75rem; }
   .dbx-sched__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
@@ -67,8 +68,22 @@
         <tbody>
           <template x-for="(row, i) in declarative" :key="i">
             <tr>
-              <td><input type="text" x-model.trim="row.host" placeholder="production" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"></td>
-              <td><input type="text" x-model.trim="row.database" placeholder="myapp" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"></td>
+              <td>
+                <select x-model="row.host" @change="onHostChange(row)">
+                  <option value="">(pick a host)</option>
+                  <template x-for="h in hostOptions(row)" :key="h.alias">
+                    <option :value="h.alias" x-text="h.alias + (h.unknown ? '  (not in config)' : '')"></option>
+                  </template>
+                </select>
+              </td>
+              <td>
+                <select x-model="row.database">
+                  <option value="">(pick a database)</option>
+                  <template x-for="db in databaseOptions(row)" :key="db.value">
+                    <option :value="db.value" x-text="db.value + (db.unknown ? '  (not in config)' : '')"></option>
+                  </template>
+                </select>
+              </td>
               <td><input type="text" x-model.trim="row.when" placeholder="daily@2" maxlength="128"></td>
               <td><button class="dbx-sched__btn dbx-sched__btn--danger" @click="removeRow(i)">Remove</button></td>
             </tr>
@@ -149,6 +164,9 @@
       saved: [],         // baseline for dirty-check (last server-truth)
       installed: [],
       plan: [],
+      // Configured hosts from config.json's `hosts[]`. Used to populate
+      // the Host + Database dropdowns. Shape: [{alias, databases:[]}].
+      hosts: [],
       loading: false,
       saving: false,
       status: '',
@@ -164,23 +182,81 @@
         this.loading = true;
         this.status = '';
         try {
-          const r = await fetch(Alpine.store('dbx').api('/schedules'));
-          if (!r.ok) {
-            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-            this.status = `Failed to load: ${err.error || r.status}`;
+          // Load configured hosts in parallel with the schedule state.
+          // Both are needed for the dropdowns to render correctly; failing
+          // either one shouldn't block the other (config could be missing
+          // and we still want to show installed/saved schedules).
+          const [schedR, cfgR] = await Promise.all([
+            fetch(Alpine.store('dbx').api('/schedules')),
+            fetch(Alpine.store('dbx').api('/config')).catch(() => null),
+          ]);
+          if (!schedR.ok) {
+            const err = await schedR.json().catch(() => ({ error: `HTTP ${schedR.status}` }));
+            this.status = `Failed to load: ${err.error || schedR.status}`;
             this.statusClass = 'dbx-sched__status--err';
             return;
           }
-          const data = await r.json();
+          const data = await schedR.json();
           this.declarative = (data.declarative || []).map(r => ({ ...r }));
           this.saved       = JSON.parse(JSON.stringify(this.declarative));
           this.installed   = data.installed || [];
           this.plan        = data.plan || [];
+
+          // Pull hosts from /api/config. Missing or unreadable config →
+          // empty hosts list; the dropdowns will show only the "unknown"
+          // entries from saved rows so the user can still edit.
+          if (cfgR && cfgR.ok) {
+            const cfg = await cfgR.json();
+            const arr = Array.isArray(cfg.hosts) ? cfg.hosts : [];
+            this.hosts = arr.map(h => ({
+              alias: h && typeof h.alias === 'string' ? h.alias : '',
+              databases: Array.isArray(h && h.databases) ? h.databases.slice() : [],
+            })).filter(h => h.alias);
+          } else {
+            this.hosts = [];
+          }
         } catch (e) {
           this.status = `Network error: ${e}`;
           this.statusClass = 'dbx-sched__status--err';
         } finally {
           this.loading = false;
+        }
+      },
+
+      // Host dropdown options for a row. Includes every configured host
+      // plus, if the row already references a host that isn't configured
+      // (manual edit / removed host), that host too with `unknown: true`
+      // so the row stays editable instead of silently coercing to empty.
+      hostOptions(row) {
+        const opts = this.hosts.map(h => ({ alias: h.alias, unknown: false }));
+        if (row.host && !this.hosts.some(h => h.alias === row.host)) {
+          opts.unshift({ alias: row.host, unknown: true });
+        }
+        return opts;
+      },
+
+      // Database dropdown options for a row, scoped to the row's host.
+      // Same "unknown" promotion as hostOptions so an unrecognized db
+      // doesn't get silently dropped on save.
+      databaseOptions(row) {
+        const h = this.hosts.find(h => h.alias === row.host);
+        const dbs = h ? h.databases : [];
+        const opts = dbs.map(d => ({ value: d, unknown: false }));
+        if (row.database && !dbs.includes(row.database)) {
+          opts.unshift({ value: row.database, unknown: true });
+        }
+        return opts;
+      },
+
+      // When the host changes, the row's database may be invalid (i.e.
+      // not in the new host's databases[]). Clear it so the user has to
+      // re-pick, which surfaces the change in the UI instead of silently
+      // carrying a now-mismatched value.
+      onHostChange(row) {
+        const h = this.hosts.find(h => h.alias === row.host);
+        const dbs = h ? h.databases : [];
+        if (row.database && !dbs.includes(row.database)) {
+          row.database = '';
         }
       },
 

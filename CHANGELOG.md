@@ -8,6 +8,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 - **Wizard Backup view.** New "Backup" tab between Config and Backups runs `dbx backup <host> [database] [-v] [--upload]` from the browser with the same SSE log streaming + cancel button as Restore. Host and Database are dropdowns sourced from `GET /api/config` — Host lists every alias in `config.json's` `hosts[]`, Database lists `hosts[<alias>].databases[]` when present (empty option = "all databases" so `dbx backup <host>` with no DB arg still works). The new `POST /api/backup` endpoint validates `host` against the configured allowlist (a hand-crafted POST cannot run `dbx backup` against an unknown target), validates `database` against `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, and accepts booleans for `verbose` / `upload`. The internal `spawn_restore` helper got renamed to `spawn_dbx(subcommand, argv_tail)` so the same Popen / SSE plumbing handles both restore and backup jobs.
 
+### Changed
+
+- **Wizard Schedule view: Host and Database are now dropdowns sourced from `config.json`** instead of free-text inputs. Previously the user had to type the host alias + database name and remember the exact spelling — typos either landed silently in `schedules[]` (saving an invalid row) or got caught only at `dbx schedule sync` time. Now the Schedule view pulls `hosts[].alias` and `hosts[].databases[]` from `GET /api/config` on reload and renders them as selects. If a saved row references a host or database that isn't in the current config (manual edit, removed host), that value is preserved as a "(not in config)"-tagged option so the row stays editable instead of silently coercing to empty.
+
 ## [0.13.0] - 2026-05-25
 
 ### Added
