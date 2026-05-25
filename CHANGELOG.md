@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wizard Restore view now disables the `--into` container picker for MySQL backups.** The CLI rejects `dbx restore --into` for non-postgres backups (`--into is only supported for postgres restores`); the UI was happily letting the user select a container, then hitting that error after Start. Now the dropdown is disabled when the selected backup's `source_flavor` is `mysql` / `mariadb`, with a small explanation underneath. Also clears any stale `form.into` value when the source flips from a postgres backup to a MySQL one, so the wizard server doesn't see a leftover value in the POST body.
+
 ### Added
 
 - **`dbx restore -v` / `--verbose`** now works (previously errored `Unknown option`). Surfaces verbose log paths into the restore code; also exports `DBX_VERBOSE=1` for downstream libs that gate output on it.

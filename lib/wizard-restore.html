@@ -86,13 +86,17 @@
         </div>
         <div class="dbx-restore__field">
           <label for="dbx-r-into">Restore into container</label>
-          <select id="dbx-r-into" x-model="form.into" :disabled="!containers.length">
+          <select id="dbx-r-into" x-model="form.into"
+                  :disabled="!containers.length || isMysql()">
             <option value="">(default: managed postgres-dbx / mysql-dbx)</option>
             <template x-for="name in containers" :key="name">
               <option :value="name" x-text="name"></option>
             </template>
           </select>
-          <small>Optional. Postgres only; restore aborts if you point at a MySQL container.</small>
+          <small x-show="!isMysql()">Optional. Postgres only.</small>
+          <small x-show="isMysql()" style="color: var(--md-default-fg-color--light);">
+            <code>--into</code> is postgres-only — the CLI rejects it for MySQL backups.
+          </small>
         </div>
       </div>
 
@@ -174,6 +178,12 @@
           this.startedAt = null;
           this.elapsed = 0;
         }
+        // If the new source is a MySQL backup, clear any stale --into
+        // value from a previous (postgres) selection. Otherwise the
+        // hidden picker still has a value and buildConfig() would send
+        // it to the server, which would then 400 with the CLI's
+        // "--into is only supported for postgres" error.
+        if (this.isMysql()) this.form.into = '';
         // Pull container list for the --into picker.
         try {
           const r = await fetch(Alpine.store('dbx').api('/containers'));
@@ -334,6 +344,16 @@
       // rather than a server-side error.
       prodIntoBlocked() {
         return !!(this.source && this.source.safety === 'prod' && this.form.into);
+      },
+
+      // `dbx restore --into <c>` is postgres-only — the CLI rejects it
+      // for MySQL/MariaDB backups with "--into is only supported for
+      // postgres restores". Disable the picker in the UI so the user
+      // can't even reach that error.
+      isMysql() {
+        if (!this.source) return false;
+        const f = (this.source.source_flavor || '').toLowerCase();
+        return f === 'mysql' || f === 'mariadb';
       },
     };
   }
