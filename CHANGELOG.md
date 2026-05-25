@@ -4,6 +4,8 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-25
+
 ### Added
 
 - **New wizard "Runs" view** (between Backups and Restore) renders the last 200 audit-log entries — `dbx backup`, `dbx restore`, and vault operations — as a sortable table with When / Action / Host-DB / Outcome / Duration / File columns. Failed runs get a soft red row wash and the `✗ failure` chip so you actually notice cron-driven backups that died silently. Filter by action (Backup / Restore / Other) and free-text host/db search. The backing `GET /api/audit-log` endpoint validates the `action` allowlist + clamps `limit` to 1-500, reads only the tail of `audit.log` so the request stays cheap even on multi-year accumulations, and returns `[]` (not 500) when the log doesn't exist yet. Closes the user's "if the backup fails I actually don't know" gap — until now, audit visibility required `cat ~/.local/share/dbx/audit.log | jq` from a terminal.
