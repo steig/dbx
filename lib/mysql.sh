@@ -115,6 +115,13 @@ mysql_backup() {
   local verbose_flag=""
   [[ "$verbose" == "true" ]] && verbose_flag="--verbose"
 
+  # Print the sanitized mysqldump target when verbose so the user can
+  # confirm exactly which connection/db is being dumped (no password —
+  # that's in cred_file, not on the argv).
+  if [[ "$verbose" == "true" ]]; then
+    log_info "mysqldump target: $db_user@$db_host:$db_port → $database"
+  fi
+
   # --set-gtid-purged is MySQL-only; MariaDB rejects it as an unknown variable.
   local gtid_flag=""
   [[ "$flavor" != "mariadb" ]] && gtid_flag="--set-gtid-purged=OFF"
@@ -126,22 +133,49 @@ mysql_backup() {
   # Pass 1: Schema for ALL tables (including excluded ones)
   log_info "Dumping schema (tables, views, routines, triggers)..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (schema pass) started"
-  if ! docker exec "$MYSQL_CONTAINER" \
-    mysqldump \
-      --defaults-extra-file=/tmp/my.cnf \
-      --single-transaction \
-      $gtid_flag \
-      --skip-lock-tables \
-      --no-data \
-      --routines \
-      --triggers \
-      --events \
-      $verbose_flag \
-      "$database" 2>"$err_file" | strip_definer "$definer_handling" > "$tmpdir/schema.sql"; then
-    cat "$err_file" >&2
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
-    audit_backup "$host" "$database" "failure"
-    die "Schema dump failed"
+  # When verbose, tee mysqldump's stderr live to the user's terminal in
+  # addition to the err_file. mysqldump --verbose emits per-table progress
+  # ("-- Retrieving table structure for table X...") — invaluable when
+  # diagnosing a missing-table situation since you can watch and see
+  # exactly which table doesn't appear. Without the live tee, the
+  # progress only showed up post-hoc in err_file (and only on failure
+  # before PR #62, only as warnings after).
+  if [[ "$verbose" == "true" ]]; then
+    if ! docker exec "$MYSQL_CONTAINER" \
+      mysqldump \
+        --defaults-extra-file=/tmp/my.cnf \
+        --single-transaction \
+        $gtid_flag \
+        --skip-lock-tables \
+        --no-data \
+        --routines \
+        --triggers \
+        --events \
+        $verbose_flag \
+        "$database" 2> >(tee -a "$err_file" >&2) | strip_definer "$definer_handling" > "$tmpdir/schema.sql"; then
+      cat "$err_file" >&2
+      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      audit_backup "$host" "$database" "failure"
+      die "Schema dump failed"
+    fi
+  else
+    if ! docker exec "$MYSQL_CONTAINER" \
+      mysqldump \
+        --defaults-extra-file=/tmp/my.cnf \
+        --single-transaction \
+        $gtid_flag \
+        --skip-lock-tables \
+        --no-data \
+        --routines \
+        --triggers \
+        --events \
+        $verbose_flag \
+        "$database" 2>"$err_file" | strip_definer "$definer_handling" > "$tmpdir/schema.sql"; then
+      cat "$err_file" >&2
+      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      audit_backup "$host" "$database" "failure"
+      die "Schema dump failed"
+    fi
   fi
 
   # ALWAYS surface mysqldump's stderr (even on exit 0), filtering only the
@@ -188,21 +222,40 @@ mysql_backup() {
     ignore_opts+=(--ignore-table="${database}.${table}")
   done
 
-  if ! docker exec "$MYSQL_CONTAINER" \
-    mysqldump \
-      --defaults-extra-file=/tmp/my.cnf \
-      --single-transaction \
-      $gtid_flag \
-      --skip-lock-tables \
-      --no-create-info \
-      --skip-triggers \
-      $verbose_flag \
-      "${ignore_opts[@]}" \
-      "$database" 2>"$err_file" > "$tmpdir/data.sql"; then
-    cat "$err_file" >&2
-    docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
-    audit_backup "$host" "$database" "failure"
-    die "Data dump failed"
+  if [[ "$verbose" == "true" ]]; then
+    if ! docker exec "$MYSQL_CONTAINER" \
+      mysqldump \
+        --defaults-extra-file=/tmp/my.cnf \
+        --single-transaction \
+        $gtid_flag \
+        --skip-lock-tables \
+        --no-create-info \
+        --skip-triggers \
+        $verbose_flag \
+        "${ignore_opts[@]}" \
+        "$database" 2> >(tee -a "$err_file" >&2) > "$tmpdir/data.sql"; then
+      cat "$err_file" >&2
+      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      audit_backup "$host" "$database" "failure"
+      die "Data dump failed"
+    fi
+  else
+    if ! docker exec "$MYSQL_CONTAINER" \
+      mysqldump \
+        --defaults-extra-file=/tmp/my.cnf \
+        --single-transaction \
+        $gtid_flag \
+        --skip-lock-tables \
+        --no-create-info \
+        --skip-triggers \
+        $verbose_flag \
+        "${ignore_opts[@]}" \
+        "$database" 2>"$err_file" > "$tmpdir/data.sql"; then
+      cat "$err_file" >&2
+      docker exec "$MYSQL_CONTAINER" rm -f /tmp/my.cnf 2>/dev/null
+      audit_backup "$host" "$database" "failure"
+      die "Data dump failed"
+    fi
   fi
   _dbx_mysqldump_surface_warnings "data pass" "$err_file"
 
