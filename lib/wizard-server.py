@@ -425,6 +425,237 @@ def list_containers():
         return []
 
 
+# Managed dev containers (mirrors core.sh:15-16). The diff endpoint resolves
+# `source_flavor` -> container name via this map so the UI can tell the user
+# which container the diff was inspected against.
+_FLAVOR_TO_CONTAINER = {
+    "postgres":  "postgres-dbx",
+    "mysql":     "mysql-dbx",
+    "mariadb":   "mysql-dbx",
+}
+
+
+def resolve_source_to_file(source, data_dir):
+    """Resolve a wizard `source` value to (resolved_file, host, database, err).
+
+    Accepts the same two shapes validate_restore_body does:
+      - `host/db/latest` or `host/db/<filename>` — looked up under DATA_DIR.
+        For `latest`, picks the newest .sql.zst[.age|.gpg] under host/db.
+      - A filesystem path inside DATA_DIR — realpath'd and checked.
+
+    Returns (path, host, db, None) on success; (None, None, None, error) on
+    failure. host/db are best-effort: for the `host/db/...` shape they come
+    straight from the source string; for raw paths we derive them from the
+    DATA_DIR-relative directory structure when possible (otherwise empty).
+    """
+    if not isinstance(source, str) or not source:
+        return None, None, None, "source is required"
+
+    m = SOURCE_HOSTDB_RE.match(source)
+    if m:
+        host, db, selector = m.group(1), m.group(2), m.group(3)
+        backup_dir = os.path.join(data_dir, host, db)
+        if not os.path.isdir(backup_dir):
+            return None, None, None, f"no backups found for {host}/{db}"
+        if selector == "latest":
+            # Newest .sql.zst[.age|.gpg] under host/db. Sorted by mtime desc.
+            candidates = []
+            for fname in os.listdir(backup_dir):
+                if not (fname.endswith(".sql.zst")
+                        or fname.endswith(".sql.zst.age")
+                        or fname.endswith(".sql.zst.gpg")):
+                    continue
+                fpath = os.path.join(backup_dir, fname)
+                try:
+                    candidates.append((os.stat(fpath).st_mtime, fpath))
+                except OSError:
+                    continue
+            if not candidates:
+                return None, None, None, f"no backups found for {host}/{db}"
+            candidates.sort(reverse=True)
+            return candidates[0][1], host, db, None
+        # Specific filename.
+        path = os.path.join(backup_dir, selector)
+        if not os.path.isfile(path):
+            return None, None, None, "source file does not exist"
+        return path, host, db, None
+
+    # Raw path. Same checks as validate_restore_body.
+    try:
+        resolved = os.path.realpath(source)
+    except (OSError, ValueError):
+        return None, None, None, "source path could not be resolved"
+    data_root = os.path.realpath(data_dir)
+    if not (resolved == data_root or resolved.startswith(data_root + os.sep)):
+        return None, None, None, "source must be inside data-dir or use host/db/latest shape"
+    if not os.path.isfile(resolved):
+        return None, None, None, "source file does not exist"
+    if not (resolved.endswith(".sql.zst") or resolved.endswith(".sql.zst.age")
+            or resolved.endswith(".sql.zst.gpg")):
+        return None, None, None, "source must be a .sql.zst[.age|.gpg] backup file"
+    # Derive host/db from the DATA_DIR-relative directory: <root>/<host>/<db>/<file>.
+    rel = resolved[len(data_root) + 1:] if resolved.startswith(data_root + os.sep) else ""
+    parts = rel.split(os.sep)
+    host = parts[0] if len(parts) >= 3 else ""
+    db = parts[1] if len(parts) >= 3 else ""
+    return resolved, host, db, None
+
+
+def _read_meta_for_backup(backup_path):
+    """Read the sidecar .meta.json next to a backup file. Returns {} when the
+    sidecar is missing or unparseable — callers treat empty meta as
+    'source details unknown' rather than failing the request."""
+    if not backup_path:
+        return {}
+    meta_path = backup_path + ".meta.json"
+    if not os.path.isfile(meta_path):
+        return {}
+    try:
+        with open(meta_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _list_target_tables(container, target_name, flavor):
+    """Inspect the dev container for the target db's tables.
+
+    Returns (target_exists, tables_list). Failures (no docker / no container /
+    target db doesn't exist) all degrade silently to (False, []) so the diff
+    endpoint stays informative without docker — tests run without docker.
+
+    Capped at 200 tables to bound the response size.
+    """
+    if not container or not target_name:
+        return False, []
+    flavor = (flavor or "").lower()
+    try:
+        if flavor == "postgres":
+            # Check existence: `psql -lqt` lists databases, one per line, with
+            # the name in column 1. Use `-tA` for a clean parseable form.
+            existence = subprocess.run(
+                ["docker", "exec", container, "psql", "-U", "postgres",
+                 "-tAc", "SELECT datname FROM pg_database;"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if existence.returncode != 0:
+                return False, []
+            dbs = {ln.strip() for ln in existence.stdout.splitlines() if ln.strip()}
+            if target_name not in dbs:
+                return False, []
+            # Target exists — list tables (public schema only, matches what
+            # pg_dump emits for a typical user db).
+            tables = subprocess.run(
+                ["docker", "exec", container, "psql", "-U", "postgres",
+                 "-d", target_name, "-tAc",
+                 "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if tables.returncode != 0:
+                return True, []
+            names = [ln.strip() for ln in tables.stdout.splitlines() if ln.strip()]
+            return True, names[:200]
+        if flavor in ("mysql", "mariadb"):
+            existence = subprocess.run(
+                ["docker", "exec", container, "mysql", "-N", "-B", "-e",
+                 "SHOW DATABASES;"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if existence.returncode != 0:
+                return False, []
+            dbs = {ln.strip() for ln in existence.stdout.splitlines() if ln.strip()}
+            if target_name not in dbs:
+                return False, []
+            tables = subprocess.run(
+                ["docker", "exec", container, "mysql", "-N", "-B", "-e",
+                 f"SHOW TABLES FROM `{target_name}`;"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if tables.returncode != 0:
+                return True, []
+            names = [ln.strip() for ln in tables.stdout.splitlines() if ln.strip()]
+            return True, names[:200]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False, []
+    return False, []
+
+
+def compute_restore_diff(source, target_name, data_dir, config_path):
+    """Build the response payload for GET /api/restore/diff.
+
+    Returns (payload, error_or_None). Validates source + target_name, resolves
+    source to a backup file, reads its sidecar meta.json for flavor/safety,
+    and asks docker whether the target db exists in the canonical managed
+    container. Docker failures (no docker, no container, no target db) all
+    degrade to a "target will be CREATED" response — never 5xx.
+    """
+    # Target name shape — strict so a typo like `;DROP DATABASE` is a 400 not
+    # a docker-exec attempt.
+    if not isinstance(target_name, str) or not target_name:
+        return None, "target is required"
+    if not NAME_RE.match(target_name):
+        return None, "target must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+
+    resolved, host, db, err = resolve_source_to_file(source, data_dir)
+    if err is not None:
+        return None, err
+    assert resolved is not None
+
+    meta = _read_meta_for_backup(resolved)
+    safety_by_host = _read_host_safety_map(config_path)
+    flavor = str(meta.get("source_flavor", "")).lower()
+    container = _FLAVOR_TO_CONTAINER.get(flavor, "")
+
+    target_exists, target_tables = _list_target_tables(container, target_name, flavor)
+
+    src_size = None
+    try:
+        src_size = os.stat(resolved).st_size
+    except OSError:
+        pass
+
+    src_payload = {
+        "host": host or "",
+        "database": db or "",
+        "filename": os.path.basename(resolved),
+        "path": resolved,
+        "timestamp": meta.get("timestamp", ""),
+        "size_bytes": src_size,
+        "source_flavor": meta.get("source_flavor", ""),
+        "source_major_version": meta.get("source_major_version", ""),
+        "safety": safety_by_host.get(host, "local") if host else "local",
+    }
+
+    target_payload = {
+        "container": container,
+        "name": target_name,
+        "table_count": len(target_tables) if target_exists else 0,
+        "tables": target_tables if target_exists else [],
+    }
+
+    if not target_exists:
+        diff_summary = f"Target db `{target_name}` will be CREATED."
+        if container:
+            diff_summary += f" (no existing db named `{target_name}` in `{container}`)"
+        else:
+            diff_summary += " (source flavor unknown — container could not be inspected)"
+    else:
+        # We don't know source table count (would require opening the
+        # backup), so the summary just reports the destination side.
+        diff_summary = (
+            f"Target db `{target_name}` exists in `{container}` with "
+            f"{len(target_tables)} table(s); restore will DROP + recreate it."
+        )
+
+    return {
+        "target_exists": target_exists,
+        "source": src_payload,
+        "target": target_payload,
+        "diff_summary": diff_summary,
+    }, None
+
+
 def read_schedule_state(lib_dir: str, config_path: str, data_dir: str):
     """Source core.sh + schedule.sh in a bash subprocess and read all three
     TSV blocks (declarative / installed / sync plan). Returns a dict suitable
@@ -1598,6 +1829,23 @@ def make_handler(args):
                 return
             if path == "/api/containers":
                 send_json(self, 200, list_containers())
+                return
+            if path == "/api/restore/diff":
+                # Guided-restore step-3 preview. Resolves the source backup,
+                # reads its meta.json for flavor, then asks docker whether
+                # the target db exists in the managed container. Silent
+                # docker failures degrade to "target will be CREATED" — no
+                # docker is required for the endpoint to return useful info.
+                qs = parse_query(self.path)
+                source = (qs.get("source", [""]) or [""])[0]
+                target = (qs.get("target", [""]) or [""])[0]
+                payload, err = compute_restore_diff(
+                    source, target, args.data_dir, args.config_path,
+                )
+                if err is not None:
+                    send_json(self, 400, {"error": err})
+                    return
+                send_json(self, 200, payload)
                 return
             if path == "/api/schedules":
                 try:

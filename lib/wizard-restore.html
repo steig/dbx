@@ -41,23 +41,65 @@
   .dbx-restore__root-cause-label { display: block; font-family: inherit; font-size: 0.75rem; font-weight: 600; color: #a83232; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.25rem; }
   .dbx-restore__audit-hint { margin-top: 0.5rem; color: var(--md-default-fg-color--light); font-size: 0.75rem; }
   .dbx-restore__audit-hint code { font-size: 0.75rem; }
+  /* Guided-mode chrome (PR-Y6): mode toggle pill, step indicator, prod-
+     acknowledgement banner, monospace diff block. Scoped under the same
+     .dbx-restore__ namespace as the rest of the view. */
+  .dbx-restore__mode { display: inline-flex; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 999px; padding: 0.15rem; background: var(--md-default-bg-color); }
+  .dbx-restore__mode button { background: transparent; border: none; padding: 0.3rem 0.85rem; font-size: 0.8125rem; color: var(--md-default-fg-color); cursor: pointer; border-radius: 999px; font-weight: 500; }
+  .dbx-restore__mode button.active { background: var(--md-accent-fg-color); color: #fff; }
+  .dbx-restore__steps { display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0 1.25rem; }
+  .dbx-restore__step { display: flex; align-items: center; gap: 0.5rem; color: var(--md-default-fg-color--light); font-size: 0.8125rem; }
+  .dbx-restore__step-num { display: inline-flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; border-radius: 999px; background: var(--md-default-fg-color--lighter); color: var(--md-default-bg-color); font-weight: 600; font-size: 0.75rem; }
+  .dbx-restore__step.active .dbx-restore__step-num,
+  .dbx-restore__step.done .dbx-restore__step-num { background: var(--md-accent-fg-color); color: #fff; }
+  .dbx-restore__step.active,
+  .dbx-restore__step.done { color: var(--md-default-fg-color); font-weight: 500; }
+  .dbx-restore__step-sep { flex: 0 0 1.5rem; height: 1px; background: var(--md-default-fg-color--lighter); }
+  .dbx-restore__step.done + .dbx-restore__step-sep { background: var(--md-accent-fg-color); }
+  .dbx-restore__prod-banner { padding: 0.75rem 1rem; margin: 0 0 1rem; border-radius: 6px; background: rgba(196, 61, 61, 0.10); border-left: 3px solid #c43d3d; font-size: 0.875rem; color: var(--md-default-fg-color); }
+  .dbx-restore__prod-banner strong { color: #a83232; }
+  .dbx-restore__diff { background: var(--md-code-bg-color); border-radius: 6px; padding: 0.75rem 1rem; font-family: var(--md-code-font-family); font-size: 0.8125rem; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .dbx-restore__diff-line--add { color: #2f7d31; }
+  .dbx-restore__diff-line--rm  { color: #a83232; }
+  .dbx-restore__diff-summary { padding: 0.75rem 1rem; margin: 0 0 0.75rem; background: rgba(11, 107, 203, 0.08); border-left: 3px solid var(--md-accent-fg-color); border-radius: 4px; font-size: 0.875rem; }
+  .dbx-restore__view-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
 </style>
 
 <div x-data="dbxRestore()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Restore
-      <template x-if="startedAt">
-        <span class="dbx-restore__elapsed"
-              :class="{ 'dbx-restore__elapsed--running': running }"
-              x-text="'Elapsed: ' + formatElapsed(elapsed)"></span>
-      </template>
-    </h2>
-    <p class="dbx-view__subtitle">
-      Wraps <code>dbx restore</code> against a local backup. Output streams live;
-      the restore keeps running if you close the browser.
-    </p>
+  <header class="dbx-view__header dbx-restore__view-header">
+    <div>
+      <h2 class="dbx-view__title">Restore
+        <template x-if="startedAt">
+          <span class="dbx-restore__elapsed"
+                :class="{ 'dbx-restore__elapsed--running': running }"
+                x-text="'Elapsed: ' + formatElapsed(elapsed)"></span>
+        </template>
+      </h2>
+      <p class="dbx-view__subtitle">
+        Wraps <code>dbx restore</code> against a local backup. Output streams live;
+        the restore keeps running if you close the browser.
+      </p>
+    </div>
+    <!--
+      PR-Y6: mode toggle. "Quick" is the original single-form flow; "Guided"
+      walks the user through source → target → confirm. Disabled while a
+      restore is mid-run so the user can't switch modes and lose their log.
+    -->
+    <div class="dbx-restore__mode" role="tablist" aria-label="Restore mode">
+      <button type="button" :class="{ active: mode() === 'quick' }"
+              @click="setMode('quick')" :disabled="running">Quick restore</button>
+      <button type="button" :class="{ active: mode() === 'guided' }"
+              @click="setMode('guided')" :disabled="running">Guided restore</button>
+    </div>
   </header>
 
+  <!--
+    Quick-restore mode (default). Single form: pick a backup, fill checkboxes,
+    Start. This is the original behavior; the guided block below sits next
+    to it and renders only when the user flips the mode toggle.
+  -->
+  <template x-if="mode() === 'quick'">
+  <div>
   <template x-if="source">
     <div class="dbx-restore__source">
       <span>
@@ -275,6 +317,276 @@
       </div>
     </div>
   </template>
+  </div>
+  </template>
+
+  <!--
+    Guided mode: 3-step source → target → confirm flow. Reuses the same
+    backend (POST /api/restore + SSE stream) so a guided run shares the
+    log + cancel + retry plumbing with the quick form below.
+  -->
+  <template x-if="mode() === 'guided'">
+    <div>
+      <!-- Step indicator: 1 — 2 — 3 with active highlight + done state. -->
+      <div class="dbx-restore__steps">
+        <div class="dbx-restore__step"
+             :class="{ active: guidedStep === 1, done: guidedStep > 1 }">
+          <span class="dbx-restore__step-num">1</span>
+          <span>Source</span>
+        </div>
+        <span class="dbx-restore__step-sep"
+              :class="{ done: guidedStep > 1 }"></span>
+        <div class="dbx-restore__step"
+             :class="{ active: guidedStep === 2, done: guidedStep > 2 }">
+          <span class="dbx-restore__step-num">2</span>
+          <span>Target</span>
+        </div>
+        <span class="dbx-restore__step-sep"
+              :class="{ done: guidedStep > 2 }"></span>
+        <div class="dbx-restore__step"
+             :class="{ active: guidedStep === 3 }">
+          <span class="dbx-restore__step-num">3</span>
+          <span>Confirm</span>
+        </div>
+      </div>
+
+      <!-- Step 1: pick a source backup. Reuses the same row shape as the
+           Backups view and the quick-mode inline picker. -->
+      <template x-if="guidedStep === 1">
+        <div>
+          <p class="dbx-restore__picker-hint">
+            Pick the backup you want to restore.
+          </p>
+          <div class="dbx-restore__picker-header" style="margin-top: 0.5rem;">
+            <input type="search" class="dbx-restore__picker-search"
+                   x-model="pickerFilter"
+                   placeholder="Filter by host or database…">
+          </div>
+
+          <template x-if="pickerLoading">
+            <p class="dbx-restore__picker-empty">Loading backups…</p>
+          </template>
+          <template x-if="!pickerLoading && pickerRows.length === 0">
+            <p class="dbx-restore__picker-empty">
+              No backups found. Run <code>dbx backup &lt;host&gt; &lt;db&gt;</code> first.
+            </p>
+          </template>
+          <template x-if="!pickerLoading && pickerRows.length > 0">
+            <table class="dbx-backups__table">
+              <thead>
+                <tr>
+                  <th>Host</th>
+                  <th>Safety</th>
+                  <th>Database</th>
+                  <th>Backup</th>
+                  <th>Size</th>
+                  <th>Encryption</th>
+                  <th>When</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="b in pickerFiltered()" :key="b.path">
+                  <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
+                    <td x-text="b.host"></td>
+                    <td>
+                      <template x-if="b.safety === 'prod'">
+                        <span class="dbx-backups__chip dbx-backups__chip--prod">PROD</span>
+                      </template>
+                      <template x-if="b.safety === 'stage'">
+                        <span class="dbx-backups__chip dbx-backups__chip--stage">STAGE</span>
+                      </template>
+                      <template x-if="!b.safety || b.safety === 'local'">
+                        <span style="color: var(--md-default-fg-color--light); font-size: 0.75rem;">local</span>
+                      </template>
+                    </td>
+                    <td x-text="b.database"></td>
+                    <td><code x-text="b.filename"></code></td>
+                    <td x-text="formatSize(b.size)"></td>
+                    <td>
+                      <span class="dbx-backups__chip"
+                            :class="{ 'dbx-backups__chip--age': b.encryption === 'age',
+                                      'dbx-backups__chip--gpg': b.encryption === 'gpg' }"
+                            x-text="b.encryption"></span>
+                    </td>
+                    <td x-text="formatWhen(b)"></td>
+                    <td>
+                      <template x-if="b.complete">
+                        <span class="dbx-backups__chip dbx-backups__chip--complete">✓ complete</span>
+                      </template>
+                      <template x-if="!b.complete">
+                        <span class="dbx-backups__chip dbx-backups__chip--incomplete">⚠ incomplete</span>
+                      </template>
+                    </td>
+                    <td style="white-space: nowrap;">
+                      <button class="dbx-backups__btn"
+                              @click="pickGuided(b)"
+                              :disabled="!b.complete"
+                              :title="b.complete ? 'Use this backup' : 'Cannot restore an incomplete backup'">
+                        Use this
+                      </button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </template>
+        </div>
+      </template>
+
+      <!-- Step 2: name the target + prod-acknowledgement + scrub toggle. -->
+      <template x-if="guidedStep === 2">
+        <div>
+          <template x-if="source">
+            <div class="dbx-restore__source">
+              <span>
+                <strong x-text="source.host"></strong> /
+                <strong x-text="source.database"></strong> &nbsp;·&nbsp;
+                <code x-text="source.filename"></code> &nbsp;·&nbsp;
+                <span x-text="formatSize(source.size)"></span> &nbsp;·&nbsp;
+                <span x-text="formatWhen(source)"></span>
+                <template x-if="source.safety === 'prod'">
+                  <span class="dbx-backups__chip dbx-backups__chip--prod"
+                        style="margin-left: 0.5rem;">PROD</span>
+                </template>
+                <template x-if="source.safety === 'stage'">
+                  <span class="dbx-backups__chip dbx-backups__chip--stage"
+                        style="margin-left: 0.5rem;">STAGE</span>
+                </template>
+              </span>
+            </div>
+          </template>
+
+          <template x-if="source && source.safety === 'prod'">
+            <div class="dbx-restore__prod-banner">
+              <strong>This backup is from a production host.</strong>
+              Confirm you understand you are about to load prod data into a
+              local dev container. The scrub step (default on) sanitizes PII
+              before any consumers can see it.
+            </div>
+          </template>
+
+          <div class="dbx-restore__grid">
+            <div class="dbx-restore__field">
+              <label for="dbx-g-name">Target database name</label>
+              <input id="dbx-g-name" type="text" x-model="guidedTarget"
+                     pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
+                     placeholder="(auto-generated)">
+              <small>Letters, numbers, <code>_</code> and <code>-</code>.</small>
+            </div>
+          </div>
+
+          <div class="dbx-restore__checks">
+            <label>
+              <input type="checkbox" x-model="guidedScrub">
+              Run scrub (sanitize PII before any consumer sees the data)
+            </label>
+            <template x-if="source && source.safety === 'prod'">
+              <label>
+                <input type="checkbox" x-model="guidedAcknowledged">
+                <strong>I understand this is prod data.</strong>
+              </label>
+            </template>
+          </div>
+
+          <div class="dbx-restore__actions">
+            <button class="dbx-restore__btn dbx-restore__btn--secondary"
+                    @click="guidedBack()">Back</button>
+            <button class="dbx-restore__btn"
+                    @click="guidedNext()"
+                    :disabled="!guidedCanAdvance()">Next</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Step 3: diff preview + Run restore. -->
+      <template x-if="guidedStep === 3">
+        <div>
+          <template x-if="source">
+            <div class="dbx-restore__source">
+              <span>
+                <strong x-text="source.host"></strong> /
+                <strong x-text="source.database"></strong> &nbsp;→&nbsp;
+                <code x-text="guidedTarget || '(auto)'"></code>
+              </span>
+            </div>
+          </template>
+
+          <template x-if="diffLoading">
+            <p class="dbx-restore__picker-empty">Inspecting target…</p>
+          </template>
+
+          <template x-if="!diffLoading && diffError">
+            <div class="dbx-restore__status dbx-restore__status--err"
+                 x-text="diffError"></div>
+          </template>
+
+          <template x-if="!diffLoading && !diffError && diff">
+            <div>
+              <p class="dbx-restore__diff-summary" x-text="diff.diff_summary"></p>
+              <template x-if="diff.target && diff.target.tables && diff.target.tables.length > 0">
+                <div class="dbx-restore__diff">
+                  <template x-for="t in diff.target.tables" :key="t">
+                    <div x-text="'- ' + t" class="dbx-restore__diff-line--rm"></div>
+                  </template>
+                  <template x-if="diff.target.table_count > diff.target.tables.length">
+                    <div x-text="'(… ' + (diff.target.table_count - diff.target.tables.length) + ' more)'"></div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <div class="dbx-restore__actions">
+            <button class="dbx-restore__btn dbx-restore__btn--secondary"
+                    @click="guidedBack()"
+                    :disabled="running">Back</button>
+            <button class="dbx-restore__btn"
+                    @click="runGuided()"
+                    :disabled="running || !source || diffLoading">
+              <span x-show="!running">Run restore</span>
+              <span x-show="running">Restoring…</span>
+            </button>
+            <button class="dbx-restore__btn dbx-restore__btn--danger"
+                    @click="cancel()" :disabled="!running">Cancel</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!--
+    Shared post-run UI (status banner + root-cause + log). Visible in either
+    mode once a run is in flight or has completed. Same Alpine state as the
+    quick form, since both modes funnel into start().
+  -->
+  <template x-if="mode() === 'guided' && (running || log.length || status)">
+    <div style="margin-top: 1rem;">
+      <template x-if="status">
+        <div class="dbx-restore__status"
+             :class="statusClass()" x-text="status"></div>
+      </template>
+      <template x-if="rootCause">
+        <div class="dbx-restore__root-cause">
+          <span class="dbx-restore__root-cause-label">Likely root cause</span>
+          <span x-text="rootCause"></span>
+          <div class="dbx-restore__audit-hint">
+            Full restore record in <code>~/.local/share/dbx/audit.log</code>.
+          </div>
+        </div>
+      </template>
+      <div class="dbx-restore__log"
+           :class="{ 'dbx-restore__log--empty': !log.length }">
+        <template x-if="!log.length">
+          <span>(no output yet — click "Run restore" to begin)</span>
+        </template>
+        <template x-for="(line, i) in log" :key="i">
+          <div x-text="line"></div>
+        </template>
+      </div>
+    </div>
+  </template>
 </div>
 
 <script>
@@ -312,13 +624,141 @@
       // PR-M: transient label on the "Copy log" button (e.g. "Copied!").
       // Cleared by a setTimeout so the button reverts to its default label.
       copyState: '',
+      // PR-Y6: guided-restore state. `guidedStep` is 1..3; the rest are
+      // the per-step form fields. Persistence is intentional: navigating
+      // away and back keeps the user where they were so a half-filled
+      // wizard isn't lost. The mode itself is on $store.dbx.restoreMode
+      // so it also survives view switches.
+      guidedStep: 1,
+      guidedTarget: '',
+      guidedAcknowledged: false,
+      guidedScrub: true,        // default ON; turned off only deliberately
+      diff: null,
+      diffLoading: false,
+      diffError: '',
 
       init() {
         // Re-read the selected backup whenever the user switches into the
         // Restore view. Cheaper than a Watch on $store.dbx.selectedBackup
         // and keeps the form snapshot of what was clicked in Backups.
         this.$watch('$store.dbx.view', (v) => { if (v === 'restore') this.refresh(); });
+        // PR-Y6: in guided mode, the user may have arrived from Backups
+        // with a selectedBackup already staged. Skip step 1 in that case
+        // so they land on the "name your target" step.
+        if (this.mode() === 'guided' && Alpine.store('dbx').selectedBackup) {
+          this.guidedStep = 2;
+        }
         this.refresh();
+      },
+
+      // PR-Y6: read the mode flag from the shared store. Wrapped in a
+      // method (not a getter) so Alpine's reactivity tracks store mutations
+      // the same way it does for $store.dbx.view in other views.
+      mode() { return Alpine.store('dbx').restoreMode || 'quick'; },
+      setMode(m) {
+        if (this.running) return;
+        Alpine.store('dbx').restoreMode = m;
+        if (m === 'guided') {
+          // Land on step 2 if we already have a source; otherwise step 1.
+          this.guidedStep = this.source ? 2 : 1;
+          // Default target name = `<db>_restored_YYYYMMDD` so the user has
+          // a sensible suggestion to override. Mirrors the CLI auto-name
+          // shape (which uses the backup timestamp). Computed here rather
+          // than on each render so editing in the field doesn't fight the
+          // suggestion.
+          if (this.source && !this.guidedTarget) {
+            this.guidedTarget = this.defaultTargetName();
+          }
+        }
+      },
+
+      defaultTargetName() {
+        if (!this.source || !this.source.database) return '';
+        const d = new Date();
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${this.source.database}_restored_${yyyy}${mm}${dd}`;
+      },
+
+      // Step 1 → step 2: stage the source and seed the target name.
+      pickGuided(b) {
+        if (!b.complete) return;
+        Alpine.store('dbx').selectedBackup = b;
+        this.source = b;
+        this.guidedTarget = this.defaultTargetName();
+        // Reset prod ack when a new source is picked so the user has to
+        // re-affirm if they switch from a prod backup to a stage one and
+        // back, or vice versa.
+        this.guidedAcknowledged = false;
+        // Default scrub ON for prod sources; stays at user's last choice
+        // for non-prod (they may have unchecked it on purpose).
+        if (b.safety === 'prod') this.guidedScrub = true;
+        this.guidedStep = 2;
+      },
+
+      guidedBack() {
+        if (this.running) return;
+        if (this.guidedStep > 1) this.guidedStep -= 1;
+      },
+
+      guidedNext() {
+        if (!this.guidedCanAdvance()) return;
+        if (this.guidedStep === 2) {
+          this.guidedStep = 3;
+          this.loadDiff();
+          return;
+        }
+      },
+
+      // Step 2 → step 3 gate: must have a source, a valid target name (or
+      // empty for auto), and for prod sources the "I understand" checkbox.
+      guidedCanAdvance() {
+        if (!this.source) return false;
+        if (this.guidedTarget && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(this.guidedTarget)) {
+          return false;
+        }
+        if (this.source.safety === 'prod' && !this.guidedAcknowledged) {
+          return false;
+        }
+        return true;
+      },
+
+      // Step 3 load: ask the server what'll happen against this target.
+      async loadDiff() {
+        if (!this.source) return;
+        this.diff = null;
+        this.diffError = '';
+        this.diffLoading = true;
+        try {
+          // `host/db/latest` shape — same source format the POST endpoint
+          // accepts. The server resolves it to the newest sql.zst[.age|.gpg]
+          // under DATA_DIR/<host>/<db>/.
+          const src = `${this.source.host}/${this.source.database}/latest`;
+          const target = this.guidedTarget || this.defaultTargetName() || 'restored';
+          const params = new URLSearchParams({ source: src, target });
+          const r = await fetch(Alpine.store('dbx').api('/restore/diff') + '&' + params.toString());
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+            this.diffError = err.error || `HTTP ${r.status}`;
+            return;
+          }
+          this.diff = await r.json();
+        } catch (e) {
+          this.diffError = `Network error: ${e}`;
+        } finally {
+          this.diffLoading = false;
+        }
+      },
+
+      // Step 3 → fire restore. Builds the same body shape as buildBody()
+      // but pulls fields from the guided state.
+      runGuided() {
+        if (this.running || !this.source) return;
+        const body = { source: this.source.path };
+        if (this.guidedTarget) body.name = this.guidedTarget;
+        if (!this.guidedScrub)  body.no_scrub = true;
+        this.start(body);
       },
 
       async refresh() {

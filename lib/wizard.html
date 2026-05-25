@@ -127,6 +127,10 @@
         // Backups view; the Backups view consumes + clears it on mount so
         // back/forward navigation doesn't re-apply a stale filter.
         backupFilter: '',
+        // Restore view: 'quick' (single-form, default for power users) or
+        // 'guided' (3-step source→target→confirm wizard). Persisted here
+        // so the user's choice survives navigating away + back.
+        restoreMode: 'quick',
       });
     });
   </script>

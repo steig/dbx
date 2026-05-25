@@ -1300,3 +1300,79 @@ for i, d in enumerate(['5','4','3','2','1']):
   [ "$status" -eq 0 ]
   [ "$output" = "403" ]
 }
+# ----------------------------------------------------------------------------
+# /api/restore/diff  — guided-restore step-3 preview
+# ----------------------------------------------------------------------------
+
+@test "GET /api/restore/diff with missing target returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" \
+    "$(api /api/restore/diff)&source=prod/myapp/latest"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/restore/diff with bad source returns 400" {
+  run curl -s "$(api /api/restore/diff)&source=/etc/passwd&target=newdb"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"data-dir"* ]] || [[ "$output" == *"host/db/latest"* ]]
+}
+
+@test "GET /api/restore/diff with bad target name (shell metachar) returns 400" {
+  run curl -s -o /tmp/wiz_diff_bad_target -w "%{http_code}" \
+    "$(api /api/restore/diff)&source=prod/myapp/latest&target=bad%3Brm"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+  run cat /tmp/wiz_diff_bad_target
+  [[ "$output" == *"target must match"* ]]
+  rm -f /tmp/wiz_diff_bad_target
+}
+
+@test "GET /api/restore/diff with no host/db returns 400 when source not found" {
+  run curl -s "$(api /api/restore/diff)&source=nosuchhost/nosuchdb/latest&target=newdb"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no backups found"* ]] || [[ "$output" == *"not found"* ]]
+}
+
+@test "GET /api/restore/diff with valid source + non-existent target reports CREATED" {
+  # Default fixture has prod/myapp/myapp_20260520_120000.sql.zst with
+  # source_flavor=postgres in its sidecar. No docker is available in this
+  # test environment, so _list_target_tables degrades to (False, []).
+  run curl -s "$(api /api/restore/diff)&source=prod/myapp/latest&target=sandbox"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"target_exists\": false"* ]]
+  [[ "$output" == *"will be CREATED"* ]]
+  [[ "$output" == *"\"name\": \"sandbox\""* ]]
+  # source.path + source.filename echo the resolved backup file.
+  [[ "$output" == *"myapp_20260520_120000.sql.zst"* ]]
+  # Container is resolved from source_flavor=postgres → postgres-dbx.
+  [[ "$output" == *"\"container\": \"postgres-dbx\""* ]]
+}
+
+@test "GET /api/restore/diff surfaces source safety from config.json" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "safety": "prod" } } }
+JSON
+  run curl -s "$(api /api/restore/diff)&source=prod/myapp/latest&target=sandbox"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"safety\": \"prod\""* ]]
+}
+
+@test "GET /api/restore/diff resolves mysql flavor to mysql-dbx container" {
+  # Plant a mysql-flavored backup + meta sidecar.
+  mkdir -p "$WIZ_SCRATCH/data/stage/orders"
+  touch "$WIZ_SCRATCH/data/stage/orders/orders_20260101_120000.sql.zst"
+  cat > "$WIZ_SCRATCH/data/stage/orders/orders_20260101_120000.sql.zst.meta.json" <<'JSON'
+{"timestamp":"2026-01-01T12:00:00Z","source_flavor":"mysql","source_major_version":"8"}
+JSON
+  run curl -s "$(api /api/restore/diff)&source=stage/orders/latest&target=test_db"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"container\": \"mysql-dbx\""* ]]
+  [[ "$output" == *"\"source_flavor\": \"mysql\""* ]]
+}
+
+@test "GET /api/restore/diff with bad token returns 403" {
+  run curl -s -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:$WIZ_PORT/api/restore/diff?token=NOPE&source=prod/myapp/latest&target=x"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
