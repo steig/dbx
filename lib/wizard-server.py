@@ -247,28 +247,79 @@ AUDIT_ACTION_ALLOWLIST = {
     "vault_set", "vault_delete", "vault_get",
 }
 
+# Allowed `outcome` filter values. audit_log() emits 'success'/'failure', but
+# we treat the param as an allowlist so a typo (`?outcome=fail`) is a hard
+# 400 instead of silently zero-matching.
+AUDIT_OUTCOME_ALLOWLIST = {"success", "failure"}
 
-def list_audit_log(audit_dir: str, action: str, limit: int):
-    """Return up to `limit` JSON-parsed entries from the tail of
-    `<audit_dir>/audit.log`, newest first, optionally filtered by `action`.
+# Cap regex pattern length. ReDoS protection: a 200-char pattern is plenty
+# for "prod.*mysql|error" style queries but bounded enough that Python's
+# `re` engine won't catastrophically backtrack on huge crafted patterns.
+AUDIT_REGEX_MAX_LEN = 200
+
+
+def _parse_audit_date_bound(value: str, end_of_day: bool):
+    """Parse a `from=` / `to=` URL param into a comparable ISO string.
+
+    Accepts either a full ISO 8601 datetime (e.g. `2026-05-01T10:00:00Z`) or
+    a bare `YYYY-MM-DD` date. For bare dates we anchor `from` to 00:00:00Z
+    and `to` to 23:59:59Z so the half-open intuition `from <= ts <= to`
+    matches what the user clicks in the date picker.
+
+    Returns the comparable string, or None if the value is malformed (caller
+    treats None as "filter not applied" so a typo in the URL doesn't 400 —
+    the same as how the existing `action=` filter handles missing values).
+    Comparison is purely lexicographic because audit_log emits a fixed
+    ISO-8601-Z timestamp format, so string compare == time compare.
+    """
+    if not value:
+        return None
+    # Bare date: `YYYY-MM-DD`. Treat as inclusive of the whole day.
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return value + ("T23:59:59Z" if end_of_day else "T00:00:00Z")
+    # Full ISO datetime — pass through as-is. We validate shape loosely (must
+    # start with YYYY-MM-DD) so junk like `?from=tomorrow` doesn't get used
+    # as a filter and instead silently disables it.
+    if re.match(r"^\d{4}-\d{2}-\d{2}T", value):
+        return value
+    return None
+
+
+def list_audit_log(audit_dir: str, action: str, limit: int,
+                   from_ts: str | None = None, to_ts: str | None = None,
+                   pattern: "re.Pattern | None" = None,
+                   outcome: str | None = None):
+    """Return ({"entries": [...], "total": N, "filtered": M}) where entries
+    are JSON-parsed audit-log rows, newest first, after applying all filters.
+
+    Filters:
+      - action:   exact match on entry["action"] (legacy, allowlisted).
+      - from_ts:  entry["timestamp"] >= from_ts (lexicographic ISO compare).
+      - to_ts:    entry["timestamp"] <= to_ts.
+      - pattern:  pre-compiled regex tested against json.dumps(entry).
+      - outcome:  exact match on entry["outcome"] (allowlisted).
+
+    Result fields:
+      - total:    well-formed entries in the tail window (before any filter).
+      - filtered: entries that survived all filters (before limit truncation).
+      - entries:  newest-first, capped at `limit`.
 
     Performance: the audit log is append-only and grows forever (see
     core.sh:651). We avoid reading the whole file by tailing the last
     `limit * 2` lines via `tail -N`, then parsing + filtering + truncating
-    in memory. `limit * 2` is a heuristic: after action-filtering you may
-    have fewer matches than `limit`, so reading 2x gives a reasonable
-    cushion without unbounded I/O.
+    in memory. `limit * 2` is a heuristic: after filtering you may have
+    fewer matches than `limit`, so reading 2x gives a reasonable cushion
+    without unbounded I/O.
 
-    Returns [] when the file doesn't exist (not an error: the audit log
-    is lazily created on first audited operation).
+    Returns an empty envelope when the file doesn't exist (not an error:
+    the audit log is lazily created on first audited operation).
     """
     audit_path = os.path.join(audit_dir, "audit.log")
     if not os.path.isfile(audit_path):
-        return []
+        return {"entries": [], "total": 0, "filtered": 0}
     # Tail-bounded read: ask `tail` for the last `limit * 2` lines so we
-    # have some slack when filtering by action. Fall back to a Python
-    # implementation if tail isn't available (edge case; tail is in
-    # coreutils + macOS base system).
+    # have some slack when filtering. Fall back to a Python implementation
+    # if tail isn't available (edge case; tail is in coreutils + macOS base).
     tail_lines = max(limit * 2, 50)
     try:
         result = subprocess.run(
@@ -283,9 +334,9 @@ def list_audit_log(audit_dir: str, action: str, limit: int):
             with open(audit_path) as f:
                 raw = f.read()
         except OSError:
-            return []
+            return {"entries": [], "total": 0, "filtered": 0}
 
-    entries = []
+    parsed = []
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -299,14 +350,43 @@ def list_audit_log(audit_dir: str, action: str, limit: int):
             continue
         if not isinstance(entry, dict):
             continue
+        parsed.append(entry)
+
+    # `total` is the count of well-formed entries in the tail window, before
+    # any filtering. This gives the UI a meaningful "Showing M of N" number
+    # for the user's search space (which is the tail, not the whole file).
+    total = len(parsed)
+
+    filtered_entries = []
+    for entry in parsed:
         if action and entry.get("action") != action:
             continue
-        entries.append(entry)
+        if outcome and entry.get("outcome") != outcome:
+            continue
+        ts = entry.get("timestamp", "")
+        if from_ts and (not isinstance(ts, str) or ts < from_ts):
+            continue
+        if to_ts and (not isinstance(ts, str) or ts > to_ts):
+            continue
+        if pattern is not None:
+            # Stringify the whole entry so the regex can match any field
+            # (host, db, error message, etc.). Sort keys so the haystack is
+            # deterministic and the user's regex behaves the same way every
+            # call regardless of how core.sh emitted the JSON.
+            haystack = json.dumps(entry, sort_keys=True)
+            if not pattern.search(haystack):
+                continue
+        filtered_entries.append(entry)
 
+    filtered_count = len(filtered_entries)
     # Newest first. `tail` already gave us newest at the end; reverse to put
     # newest first, then truncate to `limit`.
-    entries.reverse()
-    return entries[:limit]
+    filtered_entries.reverse()
+    return {
+        "entries": filtered_entries[:limit],
+        "total": total,
+        "filtered": filtered_count,
+    }
 
 
 def list_containers():
@@ -1036,7 +1116,53 @@ def make_handler(args):
                 if limit < 1 or limit > 500:
                     send_json(self, 400, {"error": "limit must be between 1 and 500"})
                     return
-                send_json(self, 200, list_audit_log(args.audit_dir, action, limit))
+                # Optional outcome filter (allowlisted: 'success' | 'failure').
+                outcome = (qs.get("outcome", [""]) or [""])[0]
+                if outcome and outcome not in AUDIT_OUTCOME_ALLOWLIST:
+                    send_json(self, 400, {"error": f"outcome must be one of: {sorted(AUDIT_OUTCOME_ALLOWLIST)} or empty"})
+                    return
+                # Optional date range. Bare YYYY-MM-DD becomes anchored to
+                # start/end of day; malformed input is silently treated as
+                # "no filter" via _parse_audit_date_bound returning None.
+                from_raw = (qs.get("from", [""]) or [""])[0]
+                to_raw = (qs.get("to", [""]) or [""])[0]
+                from_ts = _parse_audit_date_bound(from_raw, end_of_day=False)
+                to_ts = _parse_audit_date_bound(to_raw, end_of_day=True)
+                # Optional regex over stringified entries. The UI sends the
+                # user's raw input; the server compiles it under Python re.
+                # On compile error: 400. On invalid-but-syntactically-OK
+                # patterns: the regex just won't match anything (caller's
+                # problem). Capped at AUDIT_REGEX_MAX_LEN to bound ReDoS.
+                q_raw = (qs.get("q", [""]) or [""])[0]
+                pattern = None
+                if q_raw:
+                    if len(q_raw) > AUDIT_REGEX_MAX_LEN:
+                        send_json(self, 400, {"error": f"q pattern too long (max {AUDIT_REGEX_MAX_LEN} chars)"})
+                        return
+                    try:
+                        pattern = re.compile(q_raw)
+                    except re.error as e:
+                        send_json(self, 400, {"error": f"invalid regex: {e}"})
+                        return
+                # Backwards-compat shape: only the legacy params (`action`,
+                # `limit`) means "return bare array" — that's what the old
+                # tests + any external consumers depend on. The moment any of
+                # the new filter params (or the explicit `format=v2` opt-in)
+                # show up, we return the envelope `{entries,total,filtered}`
+                # so the UI can render "Showing M of N".
+                use_envelope = (
+                    bool(from_raw) or bool(to_raw) or bool(q_raw)
+                    or bool(outcome) or qs.get("format", [""])[0] == "v2"
+                )
+                result = list_audit_log(
+                    args.audit_dir, action, limit,
+                    from_ts=from_ts, to_ts=to_ts,
+                    pattern=pattern, outcome=outcome or None,
+                )
+                if use_envelope:
+                    send_json(self, 200, result)
+                else:
+                    send_json(self, 200, result["entries"])
                 return
             if path == "/api/containers":
                 send_json(self, 200, list_containers())

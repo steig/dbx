@@ -5,13 +5,31 @@
   backups are CLI/cron only, so the user has no other window into past
   successes/failures from inside the wizard — this view closes that gap.
 
+  Filtering: action / outcome dropdowns + date range + a regex `q=` are
+  applied server-side via /api/audit-log. Free-text "host filter" still
+  runs client-side because that's the common interactive case.
+
   Reads /api/audit-log, refreshes on tab switch.
 -->
 <style>
-  .dbx-runs__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+  .dbx-runs__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; }
   .dbx-runs__select { padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
   .dbx-runs__search { flex: 1; min-width: 200px; padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); }
+  .dbx-runs__date { padding: 0.5rem 0.5rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
   .dbx-runs__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+  .dbx-runs__hint  { color: var(--md-default-fg-color--light); font-size: 0.8125rem; font-style: italic; }
+  .dbx-runs__hint--warn { color: #8a4c10; }
+
+  /* Preset filter chip — single-click "failed restores against prod" style.
+     Matches the visual weight of dbx-backups__chip but is interactive. */
+  .dbx-runs__chip--filter {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    padding: 0.25rem 0.625rem; border-radius: 999px; cursor: pointer;
+    background: rgba(196, 61, 61, 0.12); color: #8a1f1f;
+    border: 1px solid rgba(196, 61, 61, 0.35); font-size: 0.8125rem;
+    font-weight: 600; line-height: 1;
+  }
+  .dbx-runs__chip--filter:hover { background: rgba(196, 61, 61, 0.22); }
 
   .dbx-runs__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
   .dbx-runs__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
@@ -44,10 +62,33 @@
       <option value="restore">Restore</option>
       <option value="__other__">Other (vault, scrub_bypass…)</option>
     </select>
-    <input type="search" class="dbx-runs__search" x-model="filter"
-           placeholder="Filter by host or database…">
+    <select class="dbx-runs__select" x-model="outcomeFilter" @change="load()">
+      <option value="">All outcomes</option>
+      <option value="success">Success</option>
+      <option value="failure">Failure</option>
+    </select>
+    <input type="search" class="dbx-runs__search" x-model.debounce.300ms="filter"
+           @input="load()"
+           placeholder="Search (regex over message text, or plain text)…">
+    <input type="date" class="dbx-runs__date" x-model="fromDate" @change="load()" title="From date">
+    <input type="date" class="dbx-runs__date" x-model="toDate"   @change="load()" title="To date">
     <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
+    <button class="dbx-backups__btn" @click="reset()" title="Clear all filters">Reset</button>
+  </div>
+
+  <div class="dbx-runs__toolbar" style="margin-bottom: 1rem;">
+    <!-- One-click "show me what's actually broken in production" preset.
+         Sets action=restore + outcome=failure + searches for prod-mysql. -->
+    <span class="dbx-runs__chip--filter" @click="applyPresetFailedProdRestores()"
+          title="Quick filter: failed restores against a prod-mysql host">
+      Failed restores against prod-mysql
+    </span>
     <span class="dbx-runs__count" x-text="countLabel()"></span>
+    <template x-if="regexInvalid">
+      <span class="dbx-runs__hint dbx-runs__hint--warn">
+        (invalid regex — searching as text)
+      </span>
+    </template>
   </div>
 
   <template x-if="loading">
@@ -105,7 +146,19 @@
       rows: [],
       loading: true,
       filter: '',
-      actionFilter: '',   // '' = all, 'backup', 'restore', or '__other__'
+      actionFilter: '',    // '' = all, 'backup', 'restore', or '__other__'
+      outcomeFilter: '',   // '' = all, 'success', 'failure'
+      fromDate: '',        // YYYY-MM-DD from the date picker
+      toDate: '',          // YYYY-MM-DD
+      // Result-envelope counters from the server. Both default to whatever
+      // the last successful /api/audit-log call returned; pre-load they read
+      // as 0/0, which is fine because the table is hidden behind loading.
+      total: 0,
+      filteredCount: 0,
+      // Server replies 400 with "invalid regex: ..." when the q= pattern
+      // won't compile. We catch that and tell the UI to fall back to plain
+      // substring matching on the client, plus show a small hint.
+      regexInvalid: false,
 
       init() {
         // Lazy-load: only hit /api/audit-log when the user actually opens
@@ -117,20 +170,55 @@
 
       async load() {
         this.loading = true;
+        this.regexInvalid = false;
         try {
           // When the dropdown is set to "__other__" we still fetch with
           // action='' (all), then filter client-side. That keeps the
           // server-side allowlist tight (backup|restore|...) without
           // requiring a NOT-IN dance in the URL.
           const apiAction = this.actionFilter === '__other__' ? '' : this.actionFilter;
-          const params = new URLSearchParams({ limit: '200' });
+          // format=v2 opts into the envelope shape unconditionally. We need
+          // total/filtered for the "Showing 42 of 1247" label even when no
+          // filter is active.
+          const params = new URLSearchParams({ limit: '200', format: 'v2' });
           if (apiAction) params.set('action', apiAction);
+          if (this.outcomeFilter) params.set('outcome', this.outcomeFilter);
+          if (this.fromDate) params.set('from', this.fromDate);
+          if (this.toDate) params.set('to', this.toDate);
+          // Server-side regex search. If the user's pattern is an invalid
+          // regex the server replies 400; we transparently retry without
+          // the q= param and remember the failure so the client-side
+          // filter() can do plain-substring matching on it instead.
+          const q = this.filter.trim();
+          if (q) params.set('q', q);
+
           const url = Alpine.store('dbx').api('/audit-log') + '&' + params.toString();
-          const r = await fetch(url);
+          let r = await fetch(url);
+          if (r.status === 400 && q) {
+            // Likely an invalid regex. Retry without q= so the user still
+            // sees results, then client-side substring-filter on q below.
+            this.regexInvalid = true;
+            params.delete('q');
+            const retryUrl = Alpine.store('dbx').api('/audit-log') + '&' + params.toString();
+            r = await fetch(retryUrl);
+          }
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          this.rows = await r.json();
+          const body = await r.json();
+          // Envelope shape from format=v2. Defensive: also tolerate the
+          // legacy bare-array shape in case something downstream changes.
+          if (Array.isArray(body)) {
+            this.rows = body;
+            this.total = body.length;
+            this.filteredCount = body.length;
+          } else {
+            this.rows = body.entries || [];
+            this.total = body.total || 0;
+            this.filteredCount = body.filtered || 0;
+          }
         } catch (e) {
           this.rows = [];
+          this.total = 0;
+          this.filteredCount = 0;
           console.error('Failed to load audit log:', e);
         } finally {
           this.loading = false;
@@ -143,21 +231,48 @@
         if (this.actionFilter === '__other__') {
           rows = rows.filter(r => r.action !== 'backup' && r.action !== 'restore');
         }
-        const f = this.filter.trim().toLowerCase();
-        if (!f) return rows;
-        return rows.filter(r =>
-          (r.db_host || '').toLowerCase().includes(f) ||
-          (r.database || '').toLowerCase().includes(f) ||
-          (r.target_db || '').toLowerCase().includes(f)
-        );
+        // If the server rejected our regex, fall back to a plain substring
+        // match against the JSON-stringified row. Same haystack shape the
+        // server would have used, just client-side.
+        if (this.regexInvalid && this.filter) {
+          const f = this.filter.toLowerCase();
+          rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(f));
+        }
+        return rows;
+      },
+
+      reset() {
+        // Clear every filter and reload. Quicker than clicking through
+        // each control individually.
+        this.filter = '';
+        this.actionFilter = '';
+        this.outcomeFilter = '';
+        this.fromDate = '';
+        this.toDate = '';
+        this.load();
+      },
+
+      applyPresetFailedProdRestores() {
+        // Spec-defined preset: action=restore, outcome=failure, q=prod-mysql.
+        // Setting q= here triggers the server-side regex match — `prod-mysql`
+        // is a valid plain pattern so no fallback fires.
+        this.actionFilter = 'restore';
+        this.outcomeFilter = 'failure';
+        this.filter = 'prod-mysql';
+        this.fromDate = '';
+        this.toDate = '';
+        this.load();
       },
 
       countLabel() {
-        const n = this.filtered().length;
-        const total = this.rows.length;
-        if (total === 0) return '';
-        if (n === total) return `${n} run${n === 1 ? '' : 's'}`;
-        return `${n} of ${total} matching`;
+        // Always visible — even with no filters active, "Showing 42 of 42
+        // entries" tells the user the audit log tail window is loaded.
+        if (this.total === 0) return 'No entries';
+        const shown = this.filtered().length;
+        if (shown === this.total && shown === this.filteredCount) {
+          return `Showing ${shown} ${shown === 1 ? 'entry' : 'entries'}`;
+        }
+        return `Showing ${shown} of ${this.total} ${this.total === 1 ? 'entry' : 'entries'}`;
       },
 
       hostDbLabel(r) {

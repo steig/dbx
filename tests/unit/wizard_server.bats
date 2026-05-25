@@ -788,3 +788,90 @@ JSONL
   [[ "$output" == *"\"last_failure\":"* ]]
   [[ "$output" == *"pg_dump: connection refused"* ]]
 }
+
+# /api/audit-log new filters: date range, regex, outcome, result envelope.
+# Triggering ANY new param flips the response to the envelope shape:
+#   {"entries": [...], "total": N, "filtered": M}
+# Legacy callers (no new params) still see a bare array — see existing tests.
+# ----------------------------------------------------------------------------
+
+@test "GET /api/audit-log?from=&to= filters by date range" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-04-15T10:00:00Z","action":"backup","outcome":"success","db_host":"old","database":"app"}
+{"timestamp":"2026-05-10T11:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+{"timestamp":"2026-05-20T12:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+{"timestamp":"2026-06-05T13:00:00Z","action":"backup","outcome":"success","db_host":"new","database":"app"}
+JSONL
+  run curl -s "$(api /api/audit-log)&from=2026-05-01&to=2026-05-31"
+  [ "$status" -eq 0 ]
+  # In-range entries present.
+  [[ "$output" == *"2026-05-10"* ]]
+  [[ "$output" == *"2026-05-20"* ]]
+  # Out-of-range entries absent.
+  [[ "$output" != *"2026-04-15"* ]]
+  [[ "$output" != *"2026-06-05"* ]]
+  # Envelope shape activated by the new params.
+  [[ "$output" == *"\"entries\""* ]]
+  [[ "$output" == *"\"total\""* ]]
+  [[ "$output" == *"\"filtered\""* ]]
+}
+
+@test "GET /api/audit-log?q=prod-mysql regex-matches over entry text" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod-mysql","database":"orders"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"backup","outcome":"success","db_host":"stage-pg","database":"orders"}
+{"timestamp":"2026-05-03T12:00:00Z","action":"restore","outcome":"failure","target_db":"prod-mysql-restore"}
+JSONL
+  run curl -s "$(api /api/audit-log)&q=prod-mysql"
+  [ "$status" -eq 0 ]
+  # Both rows mentioning prod-mysql come back; stage-pg does not.
+  [[ "$output" == *"prod-mysql"* ]]
+  [[ "$output" != *"stage-pg"* ]]
+}
+
+@test "GET /api/audit-log?q=[[[[ returns 400 with invalid-regex error" {
+  : > "$WIZ_AUDIT_DIR/audit.log"
+  # URL-encode the brackets to keep curl from treating them specially.
+  run curl -s -o /tmp/wiz_invalid_regex_body -w "%{http_code}" \
+    "$(api /api/audit-log)&q=%5B%5B%5B%5B"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+  run cat /tmp/wiz_invalid_regex_body
+  [[ "$output" == *"invalid regex"* ]]
+  rm -f /tmp/wiz_invalid_regex_body
+}
+
+@test "GET /api/audit-log?outcome=failure filters to failures only" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"backup","outcome":"failure","db_host":"prod","database":"app"}
+{"timestamp":"2026-05-03T12:00:00Z","action":"restore","outcome":"failure","target_db":"app"}
+JSONL
+  run curl -s "$(api /api/audit-log)&outcome=failure"
+  [ "$status" -eq 0 ]
+  # Both failures present; the success is excluded.
+  [[ "$output" == *"\"outcome\": \"failure\""* ]]
+  [[ "$output" != *"\"outcome\": \"success\""* ]]
+  # Envelope reports total=3 (whole window) and filtered=2 (just failures).
+  [[ "$output" == *"\"total\": 3"* ]]
+  [[ "$output" == *"\"filtered\": 2"* ]]
+}
+
+@test "GET /api/audit-log?outcome=BOGUS returns 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/audit-log)&outcome=BOGUS"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "GET /api/audit-log result envelope contains entries/total/filtered" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod","database":"app"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"restore","outcome":"success","target_db":"app"}
+JSONL
+  # format=v2 opts into the envelope without needing a filter.
+  run curl -s "$(api /api/audit-log)&format=v2"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"entries\""* ]]
+  [[ "$output" == *"\"total\": 2"* ]]
+  [[ "$output" == *"\"filtered\": 2"* ]]
+}
