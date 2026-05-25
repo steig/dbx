@@ -26,6 +26,21 @@
   .dbx-restore__status--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
   .dbx-restore__elapsed { display: inline-block; padding: 0.2rem 0.55rem; margin-left: 0.5rem; border-radius: 999px; background: var(--md-code-bg-color); color: var(--md-default-fg-color); font-family: var(--md-code-font-family); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
   .dbx-restore__elapsed--running { color: var(--md-accent-fg-color); }
+  /* Inline backup picker (PR-K): rendered when no backup is staged, gives the
+     user a same-view shortcut so they don't have to bounce to the Backups
+     tab and back. Reuses .dbx-backups__table / __chip / __btn from the
+     global wizard.html stylesheet — these only add picker-specific chrome. */
+  .dbx-restore__picker { margin-bottom: 1rem; }
+  .dbx-restore__picker-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .dbx-restore__picker-hint { color: var(--md-default-fg-color--light); font-size: 0.875rem; margin: 0; }
+  .dbx-restore__picker-search { flex: 1; max-width: 320px; padding: 0.4rem 0.6rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
+  .dbx-restore__picker-empty { padding: 1rem; text-align: center; color: var(--md-default-fg-color--light); font-size: 0.875rem; background: var(--md-code-bg-color); border-radius: 6px; }
+  /* Failure UX (PR-M): root-cause line highlighted above the log so the user
+     doesn't have to scrub through hundreds of lines to find the error. */
+  .dbx-restore__root-cause { margin-bottom: 0.75rem; padding: 0.75rem 1rem; background: rgba(196, 61, 61, 0.08); border-left: 3px solid #c43d3d; border-radius: 4px; font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color); white-space: pre-wrap; word-break: break-word; }
+  .dbx-restore__root-cause-label { display: block; font-family: inherit; font-size: 0.75rem; font-weight: 600; color: #a83232; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.25rem; }
+  .dbx-restore__audit-hint { margin-top: 0.5rem; color: var(--md-default-fg-color--light); font-size: 0.75rem; }
+  .dbx-restore__audit-hint code { font-size: 0.75rem; }
 </style>
 
 <div x-data="dbxRestore()" x-init="init()">
@@ -43,11 +58,8 @@
     </p>
   </header>
 
-  <div class="dbx-restore__source">
-    <template x-if="!source">
-      <span class="dbx-restore__source--empty">Pick a backup from the Backups tab to begin.</span>
-    </template>
-    <template x-if="source">
+  <template x-if="source">
+    <div class="dbx-restore__source">
       <span>
         <strong x-text="source.host"></strong> /
         <strong x-text="source.database"></strong> &nbsp;·&nbsp;
@@ -62,8 +74,97 @@
           <span class="dbx-backups__chip dbx-backups__chip--stage" style="margin-left: 0.5rem;">STAGE</span>
         </template>
       </span>
-    </template>
-  </div>
+    </div>
+  </template>
+
+  <!--
+    PR-K: inline backup picker. Renders when no backup is staged so the user
+    can pick one without bouncing to the Backups tab and back. Mirrors the
+    Backups view table shape (host / safety / database / when / size /
+    encryption / status) and reuses its global CSS. Hidden the moment a row
+    is picked (selectedBackup is set on the shared store, refresh() then
+    populates this.source and Alpine collapses the picker block).
+  -->
+  <template x-if="!source">
+    <div class="dbx-restore__picker">
+      <div class="dbx-restore__picker-header">
+        <p class="dbx-restore__picker-hint">
+          Pick a backup below to begin — or visit the <strong>Backups</strong> tab for the full view.
+        </p>
+        <input type="search" class="dbx-restore__picker-search" x-model="pickerFilter"
+               placeholder="Filter by host or database…">
+      </div>
+
+      <template x-if="pickerLoading">
+        <p class="dbx-restore__picker-empty">Loading backups…</p>
+      </template>
+
+      <template x-if="!pickerLoading && pickerRows.length === 0">
+        <p class="dbx-restore__picker-empty">No backups found. Run <code>dbx backup &lt;host&gt; &lt;db&gt;</code> first.</p>
+      </template>
+
+      <template x-if="!pickerLoading && pickerRows.length > 0">
+        <table class="dbx-backups__table">
+          <thead>
+            <tr>
+              <th>Host</th>
+              <th>Safety</th>
+              <th>Database</th>
+              <th>Backup</th>
+              <th>Size</th>
+              <th>Encryption</th>
+              <th>When</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="b in pickerFiltered()" :key="b.path">
+              <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
+                <td x-text="b.host"></td>
+                <td>
+                  <template x-if="b.safety === 'prod'">
+                    <span class="dbx-backups__chip dbx-backups__chip--prod">PROD</span>
+                  </template>
+                  <template x-if="b.safety === 'stage'">
+                    <span class="dbx-backups__chip dbx-backups__chip--stage">STAGE</span>
+                  </template>
+                  <template x-if="!b.safety || b.safety === 'local'">
+                    <span style="color: var(--md-default-fg-color--light); font-size: 0.75rem;">local</span>
+                  </template>
+                </td>
+                <td x-text="b.database"></td>
+                <td><code x-text="b.filename"></code></td>
+                <td x-text="formatSize(b.size)"></td>
+                <td>
+                  <span class="dbx-backups__chip"
+                        :class="{ 'dbx-backups__chip--age': b.encryption === 'age',
+                                  'dbx-backups__chip--gpg': b.encryption === 'gpg' }"
+                        x-text="b.encryption"></span>
+                </td>
+                <td x-text="formatWhen(b)"></td>
+                <td>
+                  <template x-if="b.complete">
+                    <span class="dbx-backups__chip dbx-backups__chip--complete"
+                          title="Backup has a .meta.json sidecar — finished successfully">✓ complete</span>
+                  </template>
+                  <template x-if="!b.complete">
+                    <span class="dbx-backups__chip dbx-backups__chip--incomplete"
+                          title="No .meta.json sidecar — likely partial; can't restore.">⚠ incomplete</span>
+                  </template>
+                </td>
+                <td style="white-space: nowrap;">
+                  <button class="dbx-backups__btn" @click="pick(b)"
+                          :disabled="!b.complete"
+                          :title="b.complete ? 'Pick this backup' : 'Cannot restore an incomplete backup'">Pick</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </template>
+    </div>
+  </template>
 
   <template x-if="source && source.safety === 'prod'">
     <div class="dbx-restore__status dbx-restore__status--err" style="margin-bottom: 1rem;">
@@ -117,6 +218,27 @@
         <button class="dbx-restore__btn dbx-restore__btn--danger" @click="cancel()" :disabled="!running">
           Cancel
         </button>
+        <!--
+          PR-M: Retry re-issues the SAME body the previous run used, so the
+          user doesn't have to re-toggle the checkboxes after a transient
+          failure (network blip, container OOM, etc.). Only enabled after a
+          failed run while not actively running.
+        -->
+        <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="retry()"
+                :disabled="running || exitCode == null || exitCode === 0"
+                title="Re-run with the same options">
+          Retry
+        </button>
+        <!--
+          PR-M: Copy the full captured log to the clipboard. Useful for
+          pasting into a bug report. Plain log lines (no ANSI), since the
+          SSE stream already strips them server-side.
+        -->
+        <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="copyLog()"
+                :disabled="!log.length"
+                :title="copyState || 'Copy the full log to clipboard'">
+          <span x-text="copyState || 'Copy log'"></span>
+        </button>
         <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="clearLog()" :disabled="running || !log.length">
           Clear log
         </button>
@@ -125,6 +247,22 @@
       <template x-if="status">
         <div class="dbx-restore__status"
              :class="statusClass()" x-text="status"></div>
+      </template>
+
+      <!--
+        PR-M: when a run fails, scan the captured log for the LAST line that
+        looks like a dump-tool error (mysqldump:/pg_restore:/etc.) and pin
+        it at the top of the log area. Saves the user scrolling through
+        hundreds of progress lines to find the root cause.
+      -->
+      <template x-if="rootCause">
+        <div class="dbx-restore__root-cause">
+          <span class="dbx-restore__root-cause-label">Likely root cause</span>
+          <span x-text="rootCause"></span>
+          <div class="dbx-restore__audit-hint">
+            Full restore record in <code>~/.local/share/dbx/audit.log</code>.
+          </div>
+        </div>
       </template>
 
       <div class="dbx-restore__log" :class="{ 'dbx-restore__log--empty': !log.length }">
@@ -158,6 +296,22 @@
       startedAt: null,
       elapsed: 0,
       tickHandle: null,
+      // PR-K: inline picker state. Loaded once on init() (and re-loaded on
+      // re-entering the view when nothing is staged) so the user can pick
+      // a backup without bouncing to the Backups tab.
+      pickerRows: [],
+      pickerLoading: false,
+      pickerFilter: '',
+      // PR-M: the captured body of the last successful POST /api/restore.
+      // Retry replays this verbatim so the user doesn't have to re-toggle
+      // checkboxes after a transient failure.
+      lastBody: null,
+      // PR-M: the highlighted line surfaced after a failed run. Recomputed
+      // from this.log on each `done` event with non-zero exit_code.
+      rootCause: '',
+      // PR-M: transient label on the "Copy log" button (e.g. "Copied!").
+      // Cleared by a setTimeout so the button reverts to its default label.
+      copyState: '',
 
       init() {
         // Re-read the selected backup whenever the user switches into the
@@ -169,7 +323,13 @@
 
       async refresh() {
         this.source = Alpine.store('dbx').selectedBackup;
-        if (!this.source) return;
+        // PR-K: when nothing is staged, populate the inline picker. We do
+        // this BEFORE the early-return below so the picker is ready by the
+        // time Alpine renders it.
+        if (!this.source) {
+          await this.loadPicker();
+          return;
+        }
         // Reset form + log when the source changes.
         if (!this.running) {
           this.log = [];
@@ -177,6 +337,7 @@
           this.exitCode = null;
           this.startedAt = null;
           this.elapsed = 0;
+          this.rootCause = '';
         }
         // If the new source is a MySQL backup, clear any stale --into
         // value from a previous (postgres) selection. Otherwise the
@@ -191,6 +352,58 @@
         } catch (e) { this.containers = []; }
       },
 
+      // PR-K: load /api/backups for the inline picker. Mirrors dbxBackups()
+      // load() but lives here so the picker is self-contained and doesn't
+      // depend on the Backups view component being mounted.
+      async loadPicker() {
+        this.pickerLoading = true;
+        try {
+          const r = await fetch(Alpine.store('dbx').api('/backups'));
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          this.pickerRows = await r.json();
+        } catch (e) {
+          this.pickerRows = [];
+          console.error('Failed to load backups for picker:', e);
+        } finally {
+          this.pickerLoading = false;
+        }
+      },
+
+      // PR-K: apply the search filter to the picker rows. Same shape as
+      // dbxBackups().filtered() — host or database substring, lowercased.
+      pickerFiltered() {
+        const f = this.pickerFilter.trim().toLowerCase();
+        if (!f) return this.pickerRows;
+        return this.pickerRows.filter(b =>
+          b.host.toLowerCase().includes(f) || b.database.toLowerCase().includes(f)
+        );
+      },
+
+      // PR-K: stage a row as the selected backup. Same effect as clicking
+      // "Restore" on the Backups view — drops into the shared store, which
+      // refresh() then promotes to this.source on the next tick.
+      pick(b) {
+        if (!b.complete) return;
+        Alpine.store('dbx').selectedBackup = b;
+        this.refresh();
+      },
+
+      // PR-K helpers, kept in sync with dbxBackups()'s formatters so the
+      // picker renders the same columns the user sees on the Backups tab.
+      formatSize(n) {
+        if (n == null) return '—';
+        if (n < 1024) return n + ' B';
+        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
+        return (n / 1024 ** 3).toFixed(2) + ' GB';
+      },
+
+      formatWhen(b) {
+        if (b.timestamp) return b.timestamp;
+        if (b.mtime) return new Date(b.mtime * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
+        return '—';
+      },
+
       buildBody() {
         const body = { source: this.source.path };
         if (this.form.name)            body.name = this.form.name;
@@ -202,21 +415,28 @@
         return body;
       },
 
-      async start() {
+      async start(bodyOverride) {
         if (this.running) return;
         this.log = [];
         this.status = 'Starting restore…';
         this.running = true;
+        // PR-M: clear the root-cause panel from any previous failed run.
+        this.rootCause = '';
         // Reset elapsed state on a fresh run; we'll set startedAt only on
         // a successful POST so a 4xx response doesn't kick off the timer.
         this.startedAt = null;
         this.elapsed = 0;
         this.stopTicker();
+        // PR-M: snapshot the body that we're about to send so retry() can
+        // replay it verbatim. Use the override if the caller (retry) passed
+        // one explicitly; otherwise build fresh from the form.
+        const body = bodyOverride || this.buildBody();
+        this.lastBody = body;
         try {
           const r = await fetch(Alpine.store('dbx').api('/restore'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(this.buildBody()),
+            body: JSON.stringify(body),
           });
           if (!r.ok) {
             const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
@@ -236,6 +456,61 @@
         } catch (e) {
           this.status = `Network error: ${e}`;
           this.running = false;
+        }
+      },
+
+      // PR-M: re-issue the previous body. If lastBody was never populated
+      // (e.g. user clicks Retry before any run), fall back to building
+      // from the current form so we still do the sensible thing.
+      retry() {
+        const body = this.lastBody || this.buildBody();
+        this.start(body);
+      },
+
+      // PR-M: scan the captured log lines (back to front) for a dump-tool
+      // error line. Returns '' if nothing matches — the panel then stays
+      // hidden. Regex deliberately broad to catch the common engines
+      // (mysqldump, mysql, pg_dump, pg_restore) plus generic [ERROR]
+      // markers that dbx itself emits via log_err.
+      detectRootCause(lines) {
+        // Iterate back to front: the LAST error line is usually the
+        // proximate cause; earlier ones are often noise from cleanup.
+        const pat = /^\[ERROR\]|^ERROR \d|^mysqldump:.*[Ee]rror|^mysql:.*[Ee]rror|^pg_restore: error|^pg_dump: error|^FATAL:/;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (pat.test(lines[i])) return lines[i];
+        }
+        return '';
+      },
+
+      // PR-M: copy the full captured log to the clipboard for pasting
+      // into bug reports / chats. Falls back to a doc.execCommand path
+      // when the Async Clipboard API is unavailable (non-HTTPS, old
+      // browsers); see MDN for the writeText caveat.
+      async copyLog() {
+        if (!this.log.length) return;
+        const text = this.log.join('\n');
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            // Legacy fallback. textarea must be in the DOM for execCommand
+            // to read its selection, so attach + detach inside the same tick.
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+          }
+          this.copyState = 'Copied!';
+        } catch (e) {
+          this.copyState = 'Copy failed';
+        } finally {
+          // Revert the button label after a beat so the user sees the
+          // confirmation but the button doesn't get permanently labeled.
+          setTimeout(() => { this.copyState = ''; }, 1500);
         }
       },
 
@@ -291,6 +566,15 @@
             this.status = exit_code === 0
               ? 'Restore completed successfully.'
               : `Restore failed (exit ${exit_code}).`;
+            // PR-M: on a non-zero exit, hoist the last dump-tool error
+            // line into the highlighted panel. Computed once here rather
+            // than reactively so a long log isn't re-scanned on every
+            // unrelated re-render.
+            if (exit_code !== 0) {
+              this.rootCause = this.detectRootCause(this.log);
+            } else {
+              this.rootCause = '';
+            }
           } catch (e) {
             this.status = 'Restore finished (unknown exit code).';
           } finally {
@@ -328,6 +612,9 @@
         this.exitCode = null;
         this.startedAt = null;
         this.elapsed = 0;
+        // PR-M: drop the root-cause panel along with the rest of the
+        // post-run state.
+        this.rootCause = '';
         this.stopTicker();
       },
 
