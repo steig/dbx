@@ -103,9 +103,9 @@ EOF
   backups_fragment="$LIB_DIR/wizard-backups.html"
   restore_fragment="$LIB_DIR/wizard-restore.html"
   # Resolve the dbx binary so the wizard server can spawn `dbx restore` even
-  # when this clone isn't on PATH (common in dev: `./dbx wizard`).
-  dbx_bin="${BASH_SOURCE[1]:-$0}"
-  [[ "$dbx_bin" = /* ]] || dbx_bin="$PWD/$dbx_bin"
+  # when this clone isn't on PATH (common in dev: `./dbx wizard`). SCRIPT_DIR
+  # is set at the top of the dbx script and is always absolute.
+  dbx_bin="$SCRIPT_DIR/dbx"
 
   [[ -f "$html_template"     ]] || die "Wizard HTML missing: $html_template (re-run install.sh to repair)"
   [[ -f "$form_fragment"     ]] || die "Wizard form fragment missing: $form_fragment (re-run install.sh to repair)"
