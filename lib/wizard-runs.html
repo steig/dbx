@@ -1,0 +1,201 @@
+<!--
+  Runs view fragment. Loaded by `dbx wizard` only (NOT embedded in mkdocs).
+  Renders the recent audit-log entries written by lib/core.sh:audit_log()
+  whenever the user runs `dbx backup` / `dbx restore` / vault ops. Today
+  backups are CLI/cron only, so the user has no other window into past
+  successes/failures from inside the wizard — this view closes that gap.
+
+  Reads /api/audit-log, refreshes on tab switch.
+-->
+<style>
+  .dbx-runs__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+  .dbx-runs__select { padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
+  .dbx-runs__search { flex: 1; min-width: 200px; padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); }
+  .dbx-runs__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+
+  .dbx-runs__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  .dbx-runs__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
+  .dbx-runs__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
+  .dbx-runs__table tbody tr:hover { background: var(--md-code-bg-color); }
+  /* Soft red wash for failed runs so the user spots them at a glance. */
+  .dbx-runs__row--failure { background: rgba(196, 61, 61, 0.07); }
+  .dbx-runs__row--failure:hover { background: rgba(196, 61, 61, 0.12); }
+
+  .dbx-runs__file { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
+  .dbx-runs__ts { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .dbx-runs__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
+  .dbx-runs__empty code { font-size: 0.875rem; }
+</style>
+
+<div x-data="dbxRuns()" x-init="init()">
+  <header class="dbx-view__header">
+    <h2 class="dbx-view__title">Runs</h2>
+    <p class="dbx-view__subtitle">
+      Recent <code>dbx backup</code> / <code>dbx restore</code> runs as
+      recorded in <code>audit.log</code>. Useful for catching backups that
+      silently failed under cron when you weren't watching the terminal.
+    </p>
+  </header>
+
+  <div class="dbx-runs__toolbar">
+    <select class="dbx-runs__select" x-model="actionFilter" @change="load()">
+      <option value="">All actions</option>
+      <option value="backup">Backup</option>
+      <option value="restore">Restore</option>
+      <option value="__other__">Other (vault, scrub_bypass…)</option>
+    </select>
+    <input type="search" class="dbx-runs__search" x-model="filter"
+           placeholder="Filter by host or database…">
+    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
+    <span class="dbx-runs__count" x-text="countLabel()"></span>
+  </div>
+
+  <template x-if="loading">
+    <p class="dbx-runs__empty">Loading…</p>
+  </template>
+
+  <template x-if="!loading && rows.length === 0">
+    <p class="dbx-runs__empty">
+      No runs found. The audit log lives at <code>~/.local/share/dbx/audit.log</code> —
+      it accumulates as you run <code>dbx backup</code> and <code>dbx restore</code>.
+    </p>
+  </template>
+
+  <template x-if="!loading && rows.length > 0">
+    <table class="dbx-runs__table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Action</th>
+          <th>Host / DB</th>
+          <th>Outcome</th>
+          <th>Duration</th>
+          <th>File</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="(r, i) in filtered()" :key="i">
+          <tr :class="{ 'dbx-runs__row--failure': r.outcome === 'failure' }">
+            <td class="dbx-runs__ts" x-text="formatTimestamp(r.timestamp)"></td>
+            <td x-text="r.action || '—'"></td>
+            <td x-text="hostDbLabel(r)"></td>
+            <td>
+              <template x-if="r.outcome === 'success'">
+                <span class="dbx-backups__chip dbx-backups__chip--complete">✓ success</span>
+              </template>
+              <template x-if="r.outcome === 'failure'">
+                <span class="dbx-backups__chip dbx-backups__chip--incomplete">✗ failure</span>
+              </template>
+              <template x-if="r.outcome !== 'success' && r.outcome !== 'failure'">
+                <span class="dbx-backups__chip" x-text="r.outcome || '—'"></span>
+              </template>
+            </td>
+            <td x-text="formatDuration(r.duration_sec)"></td>
+            <td class="dbx-runs__file" x-text="fileLabel(r)"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </template>
+</div>
+
+<script>
+  function dbxRuns() {
+    return {
+      rows: [],
+      loading: true,
+      filter: '',
+      actionFilter: '',   // '' = all, 'backup', 'restore', or '__other__'
+
+      init() {
+        // Lazy-load: only hit /api/audit-log when the user actually opens
+        // this tab. Reading the audit log can spawn a `tail` subprocess on
+        // the server, which we don't want firing on every wizard launch.
+        this.$watch('$store.dbx.view', (v) => { if (v === 'runs') this.load(); });
+        if (Alpine.store('dbx').view === 'runs') this.load();
+      },
+
+      async load() {
+        this.loading = true;
+        try {
+          // When the dropdown is set to "__other__" we still fetch with
+          // action='' (all), then filter client-side. That keeps the
+          // server-side allowlist tight (backup|restore|...) without
+          // requiring a NOT-IN dance in the URL.
+          const apiAction = this.actionFilter === '__other__' ? '' : this.actionFilter;
+          const params = new URLSearchParams({ limit: '200' });
+          if (apiAction) params.set('action', apiAction);
+          const url = Alpine.store('dbx').api('/audit-log') + '&' + params.toString();
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          this.rows = await r.json();
+        } catch (e) {
+          this.rows = [];
+          console.error('Failed to load audit log:', e);
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      filtered() {
+        let rows = this.rows;
+        // Client-side "__other__" filter: anything not backup/restore.
+        if (this.actionFilter === '__other__') {
+          rows = rows.filter(r => r.action !== 'backup' && r.action !== 'restore');
+        }
+        const f = this.filter.trim().toLowerCase();
+        if (!f) return rows;
+        return rows.filter(r =>
+          (r.db_host || '').toLowerCase().includes(f) ||
+          (r.database || '').toLowerCase().includes(f) ||
+          (r.target_db || '').toLowerCase().includes(f)
+        );
+      },
+
+      countLabel() {
+        const n = this.filtered().length;
+        const total = this.rows.length;
+        if (total === 0) return '';
+        if (n === total) return `${n} run${n === 1 ? '' : 's'}`;
+        return `${n} of ${total} matching`;
+      },
+
+      hostDbLabel(r) {
+        // Backup audit rows: db_host + database. Restore: target_db.
+        // Vault: account. Show what's available without inventing fields.
+        if (r.db_host && r.database) return `${r.db_host} / ${r.database}`;
+        if (r.target_db) return `→ ${r.target_db}`;
+        if (r.account) return `account: ${r.account}`;
+        return '—';
+      },
+
+      fileLabel(r) {
+        if (!r.file) return '';
+        // Strip the full path; show just the basename.
+        const parts = r.file.split('/');
+        return parts[parts.length - 1] || r.file;
+      },
+
+      formatTimestamp(ts) {
+        if (!ts) return '—';
+        // audit_log emits ISO 8601 Z timestamps. Display in the user's local
+        // timezone for human readability; fall back to raw string if Date
+        // can't parse (don't drop information when the timestamp is weird).
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return ts;
+        return d.toISOString().replace('T', ' ').replace(/\..+/, '') + ' UTC';
+      },
+
+      formatDuration(secs) {
+        if (secs === undefined || secs === null || secs === '') return '—';
+        const n = Number(secs);
+        if (!Number.isFinite(n) || n < 0) return '—';
+        if (n < 60) return `${n}s`;
+        if (n < 3600) return `${Math.floor(n / 60)}m ${n % 60}s`;
+        const h = Math.floor(n / 3600);
+        const rem = n % 3600;
+        return `${h}h ${Math.floor(rem / 60)}m ${rem % 60}s`;
+      },
+    };
+  }
+</script>

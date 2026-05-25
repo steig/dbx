@@ -85,6 +85,19 @@ def parse_args():
     p.add_argument("--dbx-bin", required=True, help="Path to the dbx binary to invoke for restores")
     p.add_argument("--lib-dir", required=True, help="Path to dbx lib/ (sourced for schedule helpers)")
     p.add_argument("--schedule-fragment", required=True, help="Path to wizard-schedule.html")
+    p.add_argument(
+        "--runs-fragment",
+        required=True,
+        help="Path to wizard-runs.html (audit-log Runs view)",
+    )
+    p.add_argument(
+        "--audit-dir",
+        default=os.environ.get(
+            "DBX_AUDIT_DIR",
+            os.path.join(os.environ.get("HOME", ""), ".local", "share", "dbx"),
+        ),
+        help="Directory containing audit.log (default: $DBX_AUDIT_DIR or ~/.local/share/dbx)",
+    )
     p.add_argument("--done-marker", required=True, help="Touched after a successful save")
     return p.parse_args()
 
@@ -215,6 +228,78 @@ def delete_backup(data_dir: str, raw_path):
         except OSError:
             pass
     return True, None
+
+
+# Allowed audit-log `action` values for filtering. Mirrors the action strings
+# emitted by core.sh:audit_log(): backup, restore, scrub_bypass, restore_into,
+# vault_set, vault_delete (and vault_get which we expose too for completeness).
+# Validated against the URL param to keep this endpoint immune to arbitrary
+# string injection (it's only ever JSON-line-parsed, but defense in depth).
+AUDIT_ACTION_ALLOWLIST = {
+    "backup", "restore", "scrub_bypass", "restore_into",
+    "vault_set", "vault_delete", "vault_get",
+}
+
+
+def list_audit_log(audit_dir: str, action: str, limit: int):
+    """Return up to `limit` JSON-parsed entries from the tail of
+    `<audit_dir>/audit.log`, newest first, optionally filtered by `action`.
+
+    Performance: the audit log is append-only and grows forever (see
+    core.sh:651). We avoid reading the whole file by tailing the last
+    `limit * 2` lines via `tail -N`, then parsing + filtering + truncating
+    in memory. `limit * 2` is a heuristic: after action-filtering you may
+    have fewer matches than `limit`, so reading 2x gives a reasonable
+    cushion without unbounded I/O.
+
+    Returns [] when the file doesn't exist (not an error: the audit log
+    is lazily created on first audited operation).
+    """
+    audit_path = os.path.join(audit_dir, "audit.log")
+    if not os.path.isfile(audit_path):
+        return []
+    # Tail-bounded read: ask `tail` for the last `limit * 2` lines so we
+    # have some slack when filtering by action. Fall back to a Python
+    # implementation if tail isn't available (edge case; tail is in
+    # coreutils + macOS base system).
+    tail_lines = max(limit * 2, 50)
+    try:
+        result = subprocess.run(
+            ["tail", "-n", str(tail_lines), audit_path],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        raw = result.stdout if result.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # Fallback: read the whole file. Acceptable because audit logs
+        # are typically <1MB for normal users.
+        try:
+            with open(audit_path) as f:
+                raw = f.read()
+        except OSError:
+            return []
+
+    entries = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            # Skip malformed lines silently — the audit log is appended
+            # under jq so corrupt lines indicate a partial write from a
+            # killed process. Don't fail the whole endpoint on one bad row.
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if action and entry.get("action") != action:
+            continue
+        entries.append(entry)
+
+    # Newest first. `tail` already gave us newest at the end; reverse to put
+    # newest first, then truncate to `limit`.
+    entries.reverse()
+    return entries[:limit]
 
 
 def list_containers():
@@ -366,12 +451,15 @@ def make_handler(args):
             restore = f.read()
         with open(args.schedule_fragment) as f:
             schedule = f.read()
+        with open(args.runs_fragment) as f:
+            runs = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
                  .replace("<!-- __DBX_RESTORE_FRAGMENT__ -->", restore)
                  .replace("<!-- __DBX_SCHEDULE_FRAGMENT__ -->", schedule)
+                 .replace("<!-- __DBX_RUNS_FRAGMENT__ -->", runs)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -510,6 +598,27 @@ def make_handler(args):
                 return
             if path == "/api/backups":
                 send_json(self, 200, list_backups(args.data_dir, args.config_path))
+                return
+            if path == "/api/audit-log":
+                qs = parse_query(self.path)
+                # Optional `action` filter. Empty / missing means "all actions".
+                action = (qs.get("action", [""]) or [""])[0]
+                if action and action not in AUDIT_ACTION_ALLOWLIST:
+                    send_json(self, 400, {"error": f"action must be one of: {sorted(AUDIT_ACTION_ALLOWLIST)} or empty"})
+                    return
+                # `limit` defaults to 50, capped at 500. Reject out-of-range or
+                # non-integer values so the caller can't ask the server to
+                # tail-bound an audit log that's gigabytes long.
+                limit_raw = (qs.get("limit", ["50"]) or ["50"])[0]
+                try:
+                    limit = int(limit_raw)
+                except ValueError:
+                    send_json(self, 400, {"error": "limit must be an integer"})
+                    return
+                if limit < 1 or limit > 500:
+                    send_json(self, 400, {"error": "limit must be between 1 and 500"})
+                    return
+                send_json(self, 200, list_audit_log(args.audit_dir, action, limit))
                 return
             if path == "/api/containers":
                 send_json(self, 200, list_containers())

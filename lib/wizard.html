@@ -6,32 +6,47 @@
   <meta name="referrer" content="no-referrer">
   <title>dbx</title>
   <style>
+    /*
+     * Design tokens.
+     *
+     * UX polish pass (PR-I) bumped:
+     *   - --md-accent-fg-color to a more saturated blue so primary buttons
+     *     + active sidebar item pop instead of fading into the surrounding
+     *     chrome (user complaint: "so dark and hard to read").
+     *   - --md-default-fg-color--lightest alpha so borders & table dividers
+     *     are visible in dark mode (was nearly invisible at #24272e on #14161a).
+     *   - --dbx-sidebar-bg distance from --md-default-bg-color so the
+     *     sidebar reads as a distinct chrome element instead of a barely-
+     *     darker continuation of main.
+     *   - status chip alphas (.dbx-backups__chip--age/gpg/complete/...) for
+     *     readability in both modes.
+     */
     :root {
       --md-default-bg-color: #fff;
       --md-default-fg-color: #1c1d20;
       --md-default-fg-color--light: #5a5d63;
-      --md-default-fg-color--lighter: #c9ccd2;
-      --md-default-fg-color--lightest: #e6e8ec;
-      --md-accent-fg-color: #0b6bcb;
-      --md-accent-fg-color--transparent: rgba(11, 107, 203, 0.18);
+      --md-default-fg-color--lighter: #b3b8c2;
+      --md-default-fg-color--lightest: #d2d6df;
+      --md-accent-fg-color: #0066ff;
+      --md-accent-fg-color--transparent: rgba(0, 102, 255, 0.18);
       --md-accent-bg-color: #fff;
-      --md-code-bg-color: #f4f5f7;
+      --md-code-bg-color: #f1f3f7;
       --md-code-font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      --dbx-sidebar-bg: #f8f9fb;
+      --dbx-sidebar-bg: #eef1f7;
       --dbx-sidebar-fg: #2a2d33;
-      --dbx-sidebar-active-bg: #e8ecf3;
+      --dbx-sidebar-active-bg: #d9e2f1;
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --md-default-bg-color: #14161a;
         --md-default-fg-color: #e8eaed;
-        --md-default-fg-color--light: #aab0b8;
-        --md-default-fg-color--lighter: #3a3e46;
-        --md-default-fg-color--lightest: #24272e;
+        --md-default-fg-color--light: #b3b9c2;
+        --md-default-fg-color--lighter: #4a4f59;
+        --md-default-fg-color--lightest: #353a44;
         --md-accent-fg-color: #4ea8de;
         --md-accent-bg-color: #14161a;
         --md-code-bg-color: #1d2027;
-        --dbx-sidebar-bg: #1a1d22;
+        --dbx-sidebar-bg: #0e1014;
         --dbx-sidebar-fg: #d4d7dd;
         --dbx-sidebar-active-bg: #2b313a;
       }
@@ -45,12 +60,12 @@
     .dbx-app__nav { display: flex; flex-direction: column; }
     .dbx-app__nav a { cursor: pointer; padding: 0.5rem 1.5rem; color: inherit; text-decoration: none; border-left: 3px solid transparent; }
     .dbx-app__nav a:hover:not(.disabled) { background: var(--dbx-sidebar-active-bg); }
-    .dbx-app__nav a.active { background: var(--dbx-sidebar-active-bg); border-left-color: var(--md-accent-fg-color); font-weight: 600; }
+    .dbx-app__nav a.active { background: var(--dbx-sidebar-active-bg); border-left-color: var(--md-accent-fg-color); font-weight: 600; color: var(--md-accent-fg-color); }
     .dbx-app__nav a.disabled { color: var(--md-default-fg-color--light); cursor: not-allowed; }
     .dbx-app__nav a.disabled small { display: block; font-size: 0.7rem; }
     .dbx-app__main { padding: 1.5rem 1.75rem 4rem; max-width: 1200px; }
 
-    .dbx-view__header { margin-bottom: 1.5rem; }
+    .dbx-view__header { margin-bottom: 1.5rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); }
     .dbx-view__title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.25rem; }
     .dbx-view__subtitle { color: var(--md-default-fg-color--light); margin: 0; }
 
@@ -63,16 +78,37 @@
     .dbx-backups__table td { padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
     .dbx-backups__table tbody tr:hover { background: var(--md-code-bg-color); }
     .dbx-backups__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color); }
-    .dbx-backups__chip--age { background: rgba(74, 158, 76, 0.15); color: #2f7d31; }
-    .dbx-backups__chip--gpg { background: rgba(11, 107, 203, 0.15); color: var(--md-accent-fg-color); }
-    .dbx-backups__chip--complete   { background: rgba(74, 158, 76, 0.18); color: #2f7d31; font-weight: 500; }
-    .dbx-backups__chip--incomplete { background: rgba(196, 61, 61, 0.18); color: #a83232; font-weight: 500; }
-    .dbx-backups__chip--prod  { background: rgba(196, 61, 61, 0.15); color: #a83232; font-weight: 600; letter-spacing: 0.03em; }
-    .dbx-backups__chip--stage { background: rgba(218, 135, 33, 0.15); color: #b8651a; font-weight: 600; letter-spacing: 0.03em; }
+    /* Chip alphas bumped from 0.15-0.18 → 0.28-0.32 so they're legible on
+       both light + dark backgrounds without needing per-mode overrides. */
+    .dbx-backups__chip--age { background: rgba(74, 158, 76, 0.28); color: #2f7d31; }
+    .dbx-backups__chip--gpg { background: rgba(0, 102, 255, 0.22); color: var(--md-accent-fg-color); }
+    .dbx-backups__chip--complete   { background: rgba(74, 158, 76, 0.30); color: #1e5a20; font-weight: 600; }
+    .dbx-backups__chip--incomplete { background: rgba(196, 61, 61, 0.30); color: #8a1f1f; font-weight: 600; }
+    .dbx-backups__chip--prod  { background: rgba(196, 61, 61, 0.28); color: #8a1f1f; font-weight: 700; letter-spacing: 0.03em; }
+    .dbx-backups__chip--stage { background: rgba(218, 135, 33, 0.30); color: #8a4c10; font-weight: 700; letter-spacing: 0.03em; }
+    @media (prefers-color-scheme: dark) {
+      /* Lighter text on the dark-mode chips so the colored fill doesn't
+         drag the foreground into illegibility. */
+      .dbx-backups__chip--age { color: #6fd073; }
+      .dbx-backups__chip--gpg { color: #7cb9ff; }
+      .dbx-backups__chip--complete   { color: #6fd073; }
+      .dbx-backups__chip--incomplete { color: #ff8a8a; }
+      .dbx-backups__chip--prod  { color: #ff8a8a; }
+      .dbx-backups__chip--stage { color: #ffbf6b; }
+    }
     .dbx-backups__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.375rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; margin-right: 0.25rem; }
-    .dbx-backups__btn:hover:not(:disabled) { opacity: 0.92; }
+    .dbx-backups__btn:hover:not(:disabled) { opacity: 0.92; filter: brightness(1.08); }
     .dbx-backups__btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .dbx-backups__btn--danger { background: #c43d3d; }
+    .dbx-backups__btn--secondary {
+      background: transparent;
+      color: var(--md-default-fg-color);
+      border: 1px solid var(--md-default-fg-color--lighter);
+    }
+    .dbx-backups__btn--secondary:hover:not(:disabled) {
+      background: var(--md-code-bg-color);
+      filter: none;
+    }
     .dbx-backups__row--incomplete { opacity: 0.72; }
     .dbx-backups__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
   </style>
@@ -98,6 +134,7 @@
       <nav class="dbx-app__nav" x-data>
         <a @click="$store.dbx.view = 'config'"   :class="{active: $store.dbx.view === 'config'}">Config</a>
         <a @click="$store.dbx.view = 'backups'"  :class="{active: $store.dbx.view === 'backups'}">Backups</a>
+        <a @click="$store.dbx.view = 'runs'"     :class="{active: $store.dbx.view === 'runs'}">Runs</a>
         <a @click="$store.dbx.view = 'restore'"  :class="{active: $store.dbx.view === 'restore'}">Restore</a>
         <a @click="$store.dbx.view = 'schedule'" :class="{active: $store.dbx.view === 'schedule'}">Schedule</a>
       </nav>
@@ -112,6 +149,9 @@
       </section>
       <section x-data x-show="$store.dbx.view === 'backups'">
         <!-- __DBX_BACKUPS_FRAGMENT__ -->
+      </section>
+      <section x-data x-show="$store.dbx.view === 'runs'">
+        <!-- __DBX_RUNS_FRAGMENT__ -->
       </section>
       <section x-data x-show="$store.dbx.view === 'restore'">
         <!-- __DBX_RESTORE_FRAGMENT__ -->

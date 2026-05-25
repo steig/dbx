@@ -128,7 +128,7 @@ EOF
 
   require_jq
 
-  local token port done_marker html_template form_fragment backups_fragment restore_fragment schedule_fragment dbx_bin
+  local token port done_marker html_template form_fragment backups_fragment restore_fragment schedule_fragment runs_fragment dbx_bin audit_dir
   token=$(wizard_make_token)
   if [[ -n "$user_port" ]]; then
     [[ "$user_port" =~ ^[0-9]+$ ]] || die "Invalid --port value: $user_port"
@@ -144,6 +144,11 @@ EOF
   backups_fragment="$LIB_DIR/wizard-backups.html"
   restore_fragment="$LIB_DIR/wizard-restore.html"
   schedule_fragment="$LIB_DIR/wizard-schedule.html"
+  runs_fragment="$LIB_DIR/wizard-runs.html"
+  # AUDIT_LOG_DIR is exported by core.sh (line 646) and already respects
+  # $DBX_AUDIT_DIR, so it's the single source of truth for the audit-log
+  # location across the CLI and the wizard server.
+  audit_dir="${AUDIT_LOG_DIR:-${DBX_AUDIT_DIR:-$HOME/.local/share/dbx}}"
   # Resolve the dbx binary so the wizard server can spawn `dbx restore` even
   # when this clone isn't on PATH (common in dev: `./dbx wizard`). SCRIPT_DIR
   # is set at the top of the dbx script and is always absolute.
@@ -154,6 +159,7 @@ EOF
   [[ -f "$backups_fragment"  ]] || die "Wizard backups fragment missing: $backups_fragment (re-run install.sh to repair)"
   [[ -f "$restore_fragment"  ]] || die "Wizard restore fragment missing: $restore_fragment (re-run install.sh to repair)"
   [[ -f "$schedule_fragment" ]] || die "Wizard schedule fragment missing: $schedule_fragment (re-run install.sh to repair)"
+  [[ -f "$runs_fragment"     ]] || die "Wizard runs fragment missing: $runs_fragment (re-run install.sh to repair)"
 
   mkdir -p "$(dirname "$CONFIG_FILE")"
 
@@ -170,8 +176,10 @@ EOF
     --backups-fragment "$backups_fragment" \
     --restore-fragment "$restore_fragment" \
     --schedule-fragment "$schedule_fragment" \
+    --runs-fragment "$runs_fragment" \
     --config-path "$CONFIG_FILE" \
     --data-dir "$DATA_DIR" \
+    --audit-dir "$audit_dir" \
     --dbx-bin "$dbx_bin" \
     --lib-dir "$LIB_DIR" \
     --done-marker "$done_marker" \
