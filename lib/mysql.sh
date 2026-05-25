@@ -6,6 +6,28 @@
 #
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+# Filter cosmetic mysql/mariadb warnings out of stderr while letting real
+# errors through. Used as `2> >(mysql_stderr_filter)` on `mysql` invocations
+# that the user is meant to see the result of (restore imports, DDL setup).
+#
+# Why: mysql / mariadb clients emit `[Warning] Using a password on the
+# command line interface can be insecure.` (or `Warning: Using a password
+# ...` on older versions) even when invoked with --defaults-extra-file, with
+# no flag to silence just that one. The previous code worked around it with
+# `2>/dev/null`, which also swallowed every real error — so a failed
+# `LOAD DATA` or syntax error in the dump looked indistinguishable from a
+# successful restore (user complaint, PR #56 review feedback).
+#
+# Pattern keeps the legitimate stderr path open while only dropping the
+# known-cosmetic line. Output is rewritten to stderr (>&2) of the parent.
+mysql_stderr_filter() {
+  grep -vE '^(mysql: )?\[?[Ww]arning\]?.*Using a password' >&2 || true
+}
+
+# ============================================================================
 # MySQL Backup
 # ============================================================================
 
@@ -270,18 +292,18 @@ mysql_restore_backup() {
     # Create database if it doesn't exist
     log_info "Creating database if not exists..."
     mysql --defaults-extra-file="$cred_file" \
-      -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" 2>/dev/null
+      -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" 2> >(mysql_stderr_filter)
 
     log_info "Importing $human_size (compressed)..."
 
     # Restore with progress if pv is available
     if command -v pv &>/dev/null; then
       pv -N "Importing" "$backup_file" | decompress_stdin "${backup_file##*.}" | filter_sql | \
-        mysql --defaults-extra-file="$cred_file" "$target_db" 2>/dev/null
+        mysql --defaults-extra-file="$cred_file" "$target_db" 2> >(mysql_stderr_filter)
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
       decompress_backup "$backup_file" | filter_sql | \
-        mysql --defaults-extra-file="$cred_file" "$target_db" 2>/dev/null
+        mysql --defaults-extra-file="$cred_file" "$target_db" 2> >(mysql_stderr_filter)
     fi
   else
     require_container "$MYSQL_CONTAINER"
@@ -306,7 +328,8 @@ mysql_restore_backup() {
     # Create database if it doesn't exist
     log_info "Creating database if not exists..."
     docker exec "$MYSQL_CONTAINER" \
-      mysql --defaults-extra-file=/tmp/my.cnf -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" 2>/dev/null
+      mysql --defaults-extra-file=/tmp/my.cnf -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" \
+      2> >(mysql_stderr_filter)
 
     log_info "Importing $human_size (compressed)..."
 

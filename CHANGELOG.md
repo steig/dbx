@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dbx restore` no longer hides MySQL errors behind `2>/dev/null`.** The four restore-time `mysql` invocations in `lib/mysql.sh` were silencing all stderr to suppress the cosmetic `[Warning] Using a password on the command line interface can be insecure.` line — which also swallowed every real error (failed `LOAD DATA`, missing tables, syntax errors in the dump). On a recent prod-mysql restore the user saw "Importing 47M..." → 100% on `pv` → "Restore failed (exit 1)" with no diagnostic, and the data wasn't actually restored. Each call now routes stderr through a new `mysql_stderr_filter` helper that drops only the known-cosmetic warning lines and passes everything else through to the user.
+
 ### Added
 
 - **Wizard Backups view: per-row Delete button + complete/incomplete status chip.** Each row now shows a green ✓ chip when a `.meta.json` sidecar exists, red ⚠ when it doesn't (the sidecar is written only after `pg_dump`/`mysqldump` returns success, so its absence reliably indicates a partial/orphaned backup from a crashed run). The Restore button is disabled on incomplete rows. Delete button removes the file + sidecar after a confirm dialog, backed by a new `POST /api/backups/delete` endpoint that validates the path resolves under `$DATA_DIR` and has a `.sql.zst[.age|.gpg]` suffix. Source label gracefully renders `—` for the `"unknown" / "0"` sentinel values from a failed version-detect.
