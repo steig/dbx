@@ -268,6 +268,25 @@ mysql_restore_backup() {
 
   log_step "Restoring MySQL backup to: $target_db"
 
+  # Tolerant mode: `--force` lets mysql keep going past SQL errors instead
+  # of aborting on the first one. This is the right default for restore
+  # because dumps often contain DDL that's valid in the source but won't
+  # fully resolve in a fresh local target:
+  #   - VIEWs that JOIN tables in OTHER databases (cross-db views like
+  #     `b2c.rpt_sales_fact` referencing `reporting.dim_b2c_sales`)
+  #   - VIEWs or TRIGGERs referencing tables that were excluded from the
+  #     data pass via --exclude-data
+  #   - Stale view definitions whose underlying table was dropped from the
+  #     source DB but the view stuck around
+  # Without --force, the FIRST cross-db reference aborts the entire import
+  # and you lose every table after that point. Errors are still emitted
+  # to stderr (PR #59) so the user can see what didn't load.
+  #
+  # Opt out via DBX_STRICT_IMPORT=1 for cases where partial restores are
+  # worse than no restore.
+  local mysql_force_flag="--force"
+  [[ "${DBX_STRICT_IMPORT:-}" == "1" ]] && mysql_force_flag=""
+
   # Get file size for progress
   local file_size
   file_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
@@ -316,11 +335,11 @@ mysql_restore_backup() {
     # pv counts are the source file's, not the post-decompress stream.
     if command -v pv &>/dev/null; then
       pv -N "Importing" -s "$file_size" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
-        mysql --defaults-extra-file="$cred_file" "$target_db" 2> >(mysql_stderr_filter)
+        mysql --defaults-extra-file="$cred_file" $mysql_force_flag "$target_db" 2> >(mysql_stderr_filter)
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
       decompress_backup "$backup_file" | filter_sql | \
-        mysql --defaults-extra-file="$cred_file" "$target_db" 2> >(mysql_stderr_filter)
+        mysql --defaults-extra-file="$cred_file" $mysql_force_flag "$target_db" 2> >(mysql_stderr_filter)
     fi
   else
     require_container "$MYSQL_CONTAINER"
@@ -355,11 +374,11 @@ mysql_restore_backup() {
     # pv counts are the source file's, not the post-decompress stream.
     if command -v pv &>/dev/null; then
       pv -N "Importing" -s "$file_size" "$backup_file" | decompress_stream_by_filename "$backup_file" | filter_sql | \
-        docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
+        docker exec -i "$MYSQL_CONTAINER" mysql --defaults-extra-file=/tmp/my.cnf $mysql_force_flag "$target_db"
     else
       log_info "Tip: Install 'pv' for progress bar (nix-shell -p pv)"
       decompress_backup "$backup_file" | filter_sql | docker exec -i "$MYSQL_CONTAINER" \
-        mysql --defaults-extra-file=/tmp/my.cnf "$target_db"
+        mysql --defaults-extra-file=/tmp/my.cnf $mysql_force_flag "$target_db"
     fi
 
     # Clean up credential file in container
@@ -369,6 +388,12 @@ mysql_restore_backup() {
   # Audit is recorded by cmd_restore (after post-restore hooks complete) so we
   # don't claim success before user-visible mutations have actually run.
   log_success "Restore complete: $target_db"
+  if [[ -n "$mysql_force_flag" ]]; then
+    log_info "Note: mysql import ran with --force (tolerant mode). Any [ERROR …] lines"
+    log_info "  above were emitted but did NOT abort the restore — typically views or"
+    log_info "  triggers referencing tables in other databases. Set DBX_STRICT_IMPORT=1"
+    log_info "  to make SQL errors fatal."
+  fi
 }
 
 # Streaming restore variant for `--transform`. mysqldump output is plain
