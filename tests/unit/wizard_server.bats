@@ -1906,3 +1906,71 @@ JSON
   [[ "$output" == *"\"stderr\""* ]]
   [[ "$output" == *"Scanning prod-mysql/b2b for PII candidates"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# /api/analyze/exclude  — build up databases[].exclude_data from the Analyze
+# table. Patches config.hosts[host].databases[db].exclude_data in place.
+# ---------------------------------------------------------------------------
+
+@test "POST /api/analyze/exclude patches databases[].exclude_data" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "databases": { "myapp": {} } } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp","exclude_data":["sessions","cache"]}' \
+    "$(api /api/analyze/exclude)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  # Stored sorted + de-duped under the right db block.
+  run python3 -c "import json;print(json.load(open('$WIZ_SCRATCH/config.json'))['hosts']['prod']['databases']['myapp']['exclude_data'])"
+  [ "$output" = "['cache', 'sessions']" ]
+}
+
+@test "POST /api/analyze/exclude with empty list removes the key" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "databases": { "myapp": { "exclude_data": ["sessions"] } } } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp","exclude_data":[]}' \
+    "$(api /api/analyze/exclude)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  run python3 -c "import json;print('exclude_data' in json.load(open('$WIZ_SCRATCH/config.json'))['hosts']['prod']['databases']['myapp'])"
+  [ "$output" = "False" ]
+}
+
+@test "POST /api/analyze/exclude rejects a host not in config" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "databases": { "myapp": {} } } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"ghost","database":"myapp","exclude_data":["sessions"]}' \
+    "$(api /api/analyze/exclude)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not in config"* ]]
+}
+
+@test "POST /api/analyze/exclude rejects a database not configured under the host" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "databases": { "myapp": {} } } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"nope","exclude_data":["sessions"]}' \
+    "$(api /api/analyze/exclude)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not configured under host"* ]]
+}
+
+@test "POST /api/analyze/exclude rejects an injection-shaped table name and leaves config untouched" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "databases": { "myapp": {} } } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp","exclude_data":["sessions","bad;rm -rf /"]}' \
+    "$(api /api/analyze/exclude)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"invalid table name"* ]]
+  # Nothing was written — the bad name aborted before the config patch.
+  run python3 -c "import json;print('exclude_data' in json.load(open('$WIZ_SCRATCH/config.json'))['hosts']['prod']['databases']['myapp'])"
+  [ "$output" = "False" ]
+}

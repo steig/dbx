@@ -50,10 +50,8 @@
   .dbx-analyze__bar i { display: block; height: 100%; background: var(--md-accent-fg-color); border-radius: 3px; }
 
   .dbx-analyze__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
-  .dbx-analyze__chip--excluded { background: rgba(218, 135, 33, 0.30); color: #8a4c10; }
   .dbx-analyze__chip--pii      { background: rgba(196, 61, 61, 0.30); color: #8a1f1f; }
   @media (prefers-color-scheme: dark) {
-    .dbx-analyze__chip--excluded { color: #ffbf6b; }
     .dbx-analyze__chip--pii      { color: #ff8a8a; }
   }
 
@@ -228,11 +226,22 @@
                x-model="filter" placeholder="Filter by table name…">
         <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;"
               x-text="filteredCountLabel()"></span>
+        <span style="font-size: 0.8125rem;"
+              :style="excludeDirty ? 'color: var(--md-accent-fg-color);' : 'color: var(--md-default-fg-color--light);'"
+              x-text="saveMsg || excludeStatusLabel()"></span>
+        <button class="dbx-backups__btn" @click="saveExclusions()"
+                :disabled="saving || !excludeDirty"
+                title="Write the checked tables to this database's exclude_data (schema kept, row data skipped on backup)">
+          <span x-show="!saving">Save exclusions</span>
+          <span x-show="saving">Saving…</span>
+        </button>
       </div>
 
       <table class="dbx-analyze__table">
         <thead>
           <tr>
+            <th style="width: 1%; text-align: center; white-space: nowrap;"
+                title="Check to dump schema only (no row data) for this table">Skip&nbsp;data</th>
             <th @click="setSort('name')"
                 :class="{ 'dbx-analyze__sort-active': sortKey === 'name' }">
               Table <span x-show="sortKey === 'name'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
@@ -252,6 +261,10 @@
         <tbody>
           <template x-for="t in sortedRows()" :key="t.name">
             <tr>
+              <td style="text-align: center;">
+                <input type="checkbox" x-model="t._exclude" @change="saveMsg = ''"
+                       :title="`Skip row data for ${t.name} on backup (schema kept)`">
+              </td>
               <td><code x-text="t.name"></code></td>
               <td class="num" x-text="formatInt(t.rows)"></td>
               <td class="num" x-text="formatBytes(t.size_bytes)"></td>
@@ -261,11 +274,8 @@
                 </span>
               </td>
               <td>
-                <template x-if="t.excluded">
-                  <span class="dbx-analyze__chip dbx-analyze__chip--excluded">excluded</span>
-                </template>
                 <template x-if="piiTablesSet.has(t.name)">
-                  <span class="dbx-analyze__chip dbx-analyze__chip--pii" style="margin-left: 0.25rem;">PII</span>
+                  <span class="dbx-analyze__chip dbx-analyze__chip--pii">PII</span>
                 </template>
               </td>
             </tr>
@@ -286,6 +296,9 @@
       result: null,
       running: false,
       error: '',
+
+      saving: false,
+      saveMsg: '',
 
       filter: '',
       sortKey: 'size_bytes',
@@ -368,11 +381,65 @@
               : `HTTP ${r.status}`;
             return;
           }
+          // Seed the per-row checkbox from the CLI's `excluded` flag (which it
+          // derives from the current config.exclude_data) BEFORE assigning
+          // result, so the property exists when Alpine makes the rows reactive.
+          // `excluded` stays the saved baseline; `_exclude` is the live edit.
+          for (const t of (body.tables || [])) t._exclude = !!t.excluded;
           this.result = body;
+          this.saveMsg = '';
         } catch (e) {
           this.error = `Analyze failed: ${e.message || e}`;
         } finally {
           this.running = false;
+        }
+      },
+
+      // --- exclude_data builder -------------------------------------------
+      excludeCount() {
+        return (this.result?.tables || []).filter(t => t._exclude).length;
+      },
+
+      // Dirty when any row's live checkbox differs from its saved baseline.
+      get excludeDirty() {
+        return (this.result?.tables || []).some(t => !!t._exclude !== !!t.excluded);
+      },
+
+      excludeStatusLabel() {
+        if (!this.result) return '';
+        const n = this.excludeCount();
+        const base = `${n} table${n === 1 ? '' : 's'} skip data`;
+        return this.excludeDirty ? `${base} • unsaved` : base;
+      },
+
+      async saveExclusions() {
+        if (!this.host || !this.database || !this.excludeDirty) return;
+        this.saving = true;
+        this.saveMsg = '';
+        this.error = '';
+        try {
+          const tables = (this.result.tables || [])
+            .filter(t => t._exclude).map(t => t.name).sort();
+          const r = await fetch(Alpine.store('dbx').api('/analyze/exclude'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host: this.host, database: this.database, exclude_data: tables }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            this.error = body.error || `HTTP ${r.status}`;
+            return;
+          }
+          // Promote the live edits to the saved baseline so excludeDirty
+          // clears and a re-run of analyze would agree with what's on disk.
+          for (const t of (this.result.tables || [])) t.excluded = !!t._exclude;
+          this.saveMsg = tables.length
+            ? `Saved — ${tables.length} table${tables.length === 1 ? '' : 's'} set to schema-only.`
+            : 'Saved — data included for all tables.';
+        } catch (e) {
+          this.error = `Save failed: ${e.message || e}`;
+        } finally {
+          this.saving = false;
         }
       },
 

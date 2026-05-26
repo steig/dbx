@@ -452,13 +452,79 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
     return True, None
 
 
+def write_exclude_data(config_path: str, host, database, tables) -> tuple[bool, str | None]:
+    """Patch config.hosts[host].databases[database].exclude_data with `tables`
+    (replace semantics — the Analyze view sends the full desired set each save).
+    An empty list removes the key so the config stays clean, matching how the
+    Form view only writes exclude_data when non-empty. The host + database must
+    already exist in config; the Analyze pickers only offer configured pairs, so
+    a missing one is a real error rather than something to silently create."""
+    if not isinstance(host, str) or not IDENT_RE.match(host):
+        return False, "host must match the alias shape"
+    if not isinstance(database, str) or not IDENT_RE.match(database):
+        return False, "database must match the db-name shape"
+    if not isinstance(tables, list) or not all(isinstance(t, str) for t in tables):
+        return False, "exclude_data must be a list of strings"
+    for t in tables:
+        # Table names flow into pg_dump --exclude-table-data= / mysqldump
+        # --ignore-table=, so constrain them to the same safe shape as db
+        # names (IDENT_RE allows a dot for schema-qualified Postgres tables).
+        if not IDENT_RE.match(t):
+            return False, f"invalid table name: {t!r}"
+    cleaned = sorted(set(tables))
+
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                return False, "existing config.json is not a JSON object"
+        else:
+            return False, "config.json not found"
+    except (OSError, json.JSONDecodeError) as e:
+        return False, f"could not read config.json: {e}"
+
+    hosts = cfg.get("hosts")
+    if not isinstance(hosts, dict):
+        return False, "hosts block missing or not in object form"
+    block = hosts.get(host)
+    if not isinstance(block, dict):
+        return False, f"host '{host}' not in config"
+    dbs = block.get("databases")
+    if not isinstance(dbs, dict):
+        return False, f"host '{host}' has no databases block"
+    db_block = dbs.get(database)
+    if not isinstance(db_block, dict):
+        return False, f"database '{database}' not configured under host '{host}'"
+
+    if cleaned:
+        db_block["exclude_data"] = cleaned
+    else:
+        db_block.pop("exclude_data", None)
+
+    cfg_tmp = config_path + ".wizard-tmp"
+    try:
+        with open(cfg_tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.chmod(cfg_tmp, 0o600)
+        os.replace(cfg_tmp, config_path)
+    except OSError as e:
+        try:
+            os.unlink(cfg_tmp)
+        except OSError:
+            pass
+        return False, f"config.json write failed: {e}"
+    return True, None
+
+
 def run_scrub_subcommand(dbx_bin: str, argv_tail: list,
                          timeout: int = 300) -> tuple[int, str, str]:
     """Run `dbx scrub <argv_tail>` synchronously. init/check are short
     in absolute terms (one schema query + JSON emit), but the schema
     query goes against the *source* host — which can be a prod box on
     the other side of a slow VPN with a 5k-table schema. 5 minutes is
-    in line with the wizard's overall 10-minute idle timeout; below
+    a generous ceiling for a slow VPN against a large schema; below
     that, internet-distant prod boxes time out spuriously."""
     try:
         result = subprocess.run(
@@ -2911,6 +2977,32 @@ def make_handler(args):
                 if stderr:
                     payload["stderr"] = stderr
                 send_json(self, 200, payload)
+                return
+
+            if path == "/api/analyze/exclude":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 1_000_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                ok, err = write_exclude_data(
+                    args.config_path,
+                    body.get("host"),
+                    body.get("database"),
+                    body.get("exclude_data"),
+                )
+                if not ok:
+                    send_json(self, 400, {"error": err})
+                    return
+                send_json(self, 200, {"ok": True})
                 return
 
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/cancel$", path)
