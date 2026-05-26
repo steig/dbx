@@ -4,6 +4,20 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-05-26
+
+### Added
+
+- **Build up `exclude_data` from the wizard's Analyze view.** Each row in the Analyze table now has a "Skip data" checkbox seeded from the database's current `exclude_data`; check the big append-only/log/cache tables you don't need row data for and hit **Save exclusions** to write them back to `config.hosts[host].databases[db].exclude_data` (schema is always kept — this is data-only skip, the same semantics as the field's existing meaning). Previously Analyze only *showed* an `excluded` chip and you had to retype table names by hand in the Form view. Backed by a new `POST /api/analyze/exclude` endpoint that patches config.json in place (replace semantics; an empty set removes the key), mirroring how the Scrub view saves. Table names are constrained to the safe identifier shape before they reach `pg_dump --exclude-table-data=` / `mysqldump --ignore-table=`.
+
+### Changed
+
+- **`dbx wizard` no longer auto-times-out.** The form-wait loop previously gave up after 10 minutes (`elapsed -ge 1200`) and exited with a warning, which bit anyone who stepped away mid-config or was filling in a large multi-host setup. The wizard now waits until you submit the form or press Ctrl-C. The startup banner drops the now-meaningless "Timeout: 10 minutes" line (remote mode keeps the "Cancel: Ctrl-C" hint). The separate per-request subprocess timeout in `run_scrub_subcommand` (5 minutes, protecting the HTTP handler from a slow source-host schema query) is unchanged.
+
+### Fixed
+
+- **Encryption config guidance pointed at the wrong key and a non-existent command.** The canonical field is `defaults.encryption_type` (`none|gpg|age`, resolved by `get_encryption_type`); the boolean `defaults.encryption` survives only as a read-time legacy fallback (`true`→gpg). Several user-facing spots disagreed: `dbx vault set-encryption-key` told you to set `"encryption": true`, `dbx config init` seeded `"encryption": false` into new configs, and the age "recipients file not found" error told you to run `dbx config init-encryption` — a command that never existed (it's `dbx vault init-age`). All now point at `encryption_type`. Also removed the dead `is_encryption_enabled()` helper, which read the legacy key, had zero callers, and would have reported `false` for any age-encrypted config.
+
 ## [0.18.0] - 2026-05-26
 
 ### Added
