@@ -4,6 +4,18 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-26
+
+### Added
+
+- **Wizard Scrub view.** New "Scrub" tab between Restore and Schedule that gives the wizard a real dashboard for PII-scrub manifests, not just the existing "Skip PII scrub gate" break-glass checkbox on Restore. Per-host status table (alias / type / safety chip / manifest path / `manifest_exists` / `scrub.required` chip) with three actions per row: **Init** drafts a manifest by shelling out to `dbx scrub init <host>/<db>`, previewing the JSON, and saving to a config-relative path while patching `hosts.<alias>.scrub.manifest` in `config.json`; **Check** runs `dbx scrub check --json` and renders the drift report (new dict-matching columns, new tables with matches, missing declared columns, undeclared JSON); **Edit** opens a per-table editor with strategy dropdowns and inline params (`length` for truncate, `max_days` for shift_date, `replacement` for redact, `reason` for passthrough) and round-trips unknown keys like `jsonb_scrub_paths.paths` via a `_extras` shadow so hand-edited shapes survive save. Five new endpoints under `/api/scrub/*` (`status`, `manifest`, `init`, `check`, `save`). The save path is containment-checked to `$HOME` / config-dir, must end `.json`, and rejects symlink targets that resolve outside the allowed roots. The Python pre-validator mirrors `lib/scrub.sh:scrub_validate_manifest` exactly — same strategy allowlist, same "tables must have either `no_pii=true` or non-empty `columns`" rule — so the wizard never saves a manifest the CLI would then reject. 16 new bats tests cover status / manifest read / init / check (clean + drift) / save (happy path, no-host, bad strategy, path escape, non-`.json`, symlink escape, orphan-on-bad-host).
+
+### Fixed
+
+- **Wizard Config form round-trips `safety` correctly.** `loadFromConfig` was loading every host field back from `config.json` *except* `safety`. A host with `safety: "prod"` silently showed up as Local on form open; clicking Save then stripped the prod marker from disk because `buildConfig` omits the field when it equals the default. Now reads the field like the other host attributes.
+- **`dbx scrub init/check` works against hosts with no `port` in config.** `scrub_schema_query_mysql` / `scrub_schema_query_pg` were invoking the mysql/psql CLI with `-P "$db_port"` / `-p "$db_port"` on argv; an empty `$db_port` expanded to a literal empty string that mysql rejects with `[ERROR] mysql: Empty value for 'port' specified`. The backup path doesn't hit this because `create_mysql_credential_file` defaults port to 3306 inside the generated `my.cnf`. Scrub now applies the same 3306 / 5432 defaults when `get_effective_port` returns empty.
+- **Wizard scrub timeout raised from 60s to 5 minutes.** The 60s cap in `run_scrub_subcommand` was tuned to the bats fake-`dbx` that returns instantly. In practice the schema query goes against the *source* host — a prod box behind a VPN with thousands of tables can easily exceed 60s. Five minutes sits comfortably inside the wizard's overall 10-minute idle timeout without spuriously killing slow-but-legitimate prod schema walks.
+
 ## [0.15.0] - 2026-05-25
 
 ### Added
