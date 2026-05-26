@@ -4,6 +4,16 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-05-26
+
+### Added
+
+- **The wizard's backup log auto-tails.** With `-v`/verbose the streaming log now follows the bottom as lines arrive, so you don't have to keep scrolling. It's sticky: scroll up to read and following pauses; scroll back to the bottom and it resumes. Resets to following on each new run and on Clear log.
+
+### Fixed
+
+- **`dbx update` installs from the latest release tag instead of `main`.** `raw.githubusercontent.com` serves `main` through a CDN that can lag a freshly-pushed release by several minutes, so running `dbx update` right after a release re-installed the *previous* version. It now resolves the latest release tag via the GitHub Releases API and installs pinned to that immutable tag (served fresh), falling back to `main` only if the API is unreachable. `install.sh` gained a `DBX_REF` knob (default `main`); the public one-liner installer is unchanged.
+
 ## [0.19.1] - 2026-05-26
 
 ### Fixed
