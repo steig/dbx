@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-05-26
+
+### Fixed
+
+- **Wizard Config view now reflects `exclude_data` saved from the Analyze view.** The wizard's tabs are `x-show`, so the Config form (`dbxBuilder`) read `config.json` only once at page load and never again. Exclusions written by the Analyze view's "Save exclusions" (a direct `config.json` patch) didn't show up when you switched to the Config tab, and a subsequent Config save would have rebuilt the `hosts` block from the stale form state and dropped them. The Config view now re-reads `config.json` on tab entry, gated on a pristine-form check so it never discards unsaved edits.
+
 ## [0.19.0] - 2026-05-26
 
 ### Added
