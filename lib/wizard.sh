@@ -250,18 +250,16 @@ EOF
     log_info "  Output:     $CONFIG_FILE"
     log_info "  Tunnel via: ssh -L $port:127.0.0.1:$port <this-host>"
     log_info "  Then open:  http://localhost:$port/?token=$token"
-    log_info "  Timeout:    10 minutes  (Ctrl-C to cancel)"
+    log_info "  Cancel:     Ctrl-C"
   else
     log_step "Config wizard ready"
     log_info "  URL:     $url"
     log_info "  Output:  $CONFIG_FILE"
-    log_info "  Timeout: 10 minutes"
     log_info "Opening browser..."
     wizard_open_browser "$url"
     log_info "Waiting for you to submit the form (Ctrl-C to cancel)..."
   fi
 
-  local elapsed=0
   while [[ ! -s "$done_marker" ]]; do
     if ! kill -0 "$srv_pid" 2>/dev/null; then
       log_error "Wizard server exited unexpectedly. Output:"
@@ -269,11 +267,6 @@ EOF
       return 1
     fi
     sleep 0.5
-    elapsed=$((elapsed + 1))
-    if [[ "$elapsed" -ge 1200 ]]; then
-      log_warn "Timed out after 10 minutes with no form submission."
-      return 1
-    fi
   done
 
   echo ""
