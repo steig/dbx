@@ -1583,7 +1583,7 @@ _analyze_emit_json() {
   db_user=$(get_config_value ".hosts[\"$host\"].user")
   db_pass=$(get_password "$host")
 
-  local engine_label engine_query stats_tsv
+  local engine_label engine_query stats_tsv query_rc
   case "$db_type" in
     postgres|postgresql)
       engine_label="postgres"
@@ -1596,9 +1596,17 @@ _analyze_emit_json() {
         FROM pg_stat_user_tables
         ORDER BY pg_total_relation_size(schemaname || '.' || quote_ident(relname)) DESC;
       "
+      # Capture stderr too — psql's "FATAL: password authentication failed"
+      # / "connection refused" / "database does not exist" messages are
+      # exactly what the wizard needs to surface. Previously this was
+      # `2>/dev/null || true` and `dbx analyze` happily returned an empty
+      # successful payload, which the user reads as "ran but nothing came
+      # back". Now stderr flows to our stderr and a non-zero exit fails
+      # the command — the wizard surfaces stderr to the UI in both cases.
       stats_tsv=$(docker exec -i -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
         psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
-        -tA -F $'\t' -c "$engine_query" 2>/dev/null || true)
+        -tA -F $'\t' -c "$engine_query")
+      query_rc=$?
       ;;
     mysql|mariadb)
       engine_label="$db_type"
@@ -1611,8 +1619,8 @@ _analyze_emit_json() {
       trap "rm -rf '$tmpdir'; docker exec '$MYSQL_CONTAINER' rm -f '$container_cnf' 2>/dev/null; true" RETURN
       cred_file=$(create_mysql_credential_file "$db_user" "$db_pass" "$db_host" "$db_port")
       mv "$cred_file" "$tmpdir/my.cnf"
-      docker cp "$tmpdir/my.cnf" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
-      docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
+      docker cp "$tmpdir/my.cnf" "$MYSQL_CONTAINER:$container_cnf"
+      docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf"
       engine_query="
         SELECT TABLE_NAME,
                COALESCE(TABLE_ROWS, 0),
@@ -1621,13 +1629,27 @@ _analyze_emit_json() {
         WHERE TABLE_SCHEMA = '$database'
         ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC;
       "
+      # See the postgres branch above: stderr is now visible. mysql emits
+      # "Unknown database 'foo'" / "Access denied for user ..." that the
+      # wizard's Analyze view needs to display.
       stats_tsv=$(docker exec -i "$MYSQL_CONTAINER" \
-        mysql --defaults-extra-file="$container_cnf" -N -e "$engine_query" 2>/dev/null || true)
+        mysql --defaults-extra-file="$container_cnf" -N -e "$engine_query")
+      query_rc=$?
       ;;
     *)
       die "Unknown database type: $db_type"
       ;;
   esac
+
+  # If the query failed OR returned empty against a database the caller
+  # named, that's a real problem — abort with a structured message so
+  # /api/analyze returns 502 + stderr instead of a "successful zero".
+  if [[ "$query_rc" -ne 0 ]]; then
+    die "Failed to query table stats for $database@$host (exit $query_rc). See stderr above for the database error."
+  fi
+  if [[ -z "$stats_tsv" ]]; then
+    die "Table stats query for $database@$host returned no rows — does the database exist and does the configured user have SELECT on information_schema (or pg_stat_user_tables)?"
+  fi
 
   # Current exclude_data list — used to mark each table row.
   local exclusions_json
@@ -1635,20 +1657,25 @@ _analyze_emit_json() {
     "$CONFIG_FILE" 2>/dev/null || printf '[]')
 
   # PII pre-scan (reuses the same code path as the human-readable mode).
+  # If the user passed --no-pii-scan we skip; otherwise we let stderr
+  # flow but don't fail-stop the analyze on a PII scan failure (the
+  # main table-stats payload is more valuable). log_warn so it shows.
   local pii_json="[]"
   if [[ "$no_pii_scan" != "true" ]]; then
     local schema_tsv schema_json manifest_json pii_tsv
-    schema_tsv=$(_scrub_query_live_schema_tsv "$host" "$database" 2>/dev/null || true)
+    schema_tsv=$(_scrub_query_live_schema_tsv "$host" "$database" || true)
     if [[ -n "$schema_tsv" ]]; then
       schema_json=$(printf '%s\n' "$schema_tsv" | scrub_schema_tsv_to_json)
       manifest_json=$(scrub_read_manifest "$host")
-      pii_tsv=$(scrub_pii_summary_tsv "$schema_json" "$manifest_json" 2>/dev/null || true)
+      pii_tsv=$(scrub_pii_summary_tsv "$schema_json" "$manifest_json" || true)
       if [[ -n "$pii_tsv" ]]; then
         pii_json=$(printf '%s\n' "$pii_tsv" \
           | jq -Rs 'split("\n") | map(select(length > 0))
                    | map(split("\t"))
                    | map({table: .[0], columns: (.[1] | split(","))})')
       fi
+    else
+      log_warn "PII pre-scan: schema query returned no rows (continuing without it)."
     fi
   fi
 

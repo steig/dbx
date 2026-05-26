@@ -138,6 +138,15 @@ time.sleep(5)
   [[ "$output" == *"ssh -L"* ]]
 }
 
+@test "dbx wizard --help advertises -v/--verbose" {
+  run "$DBX_BIN" wizard --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--verbose"* ]]
+  [[ "$output" == *"-v"* ]]
+  # Description should mention what verbose actually does, not just exist.
+  [[ "$output" == *"server"*"log"* ]] || [[ "$output" == *"stream"* ]]
+}
+
 @test "dbx wizard --port with non-numeric value errors with 'Invalid --port'" {
   # --no-browser short-circuits before port validation, so we use --remote
   # to force the path into server-mode where the numeric check fires.

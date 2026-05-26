@@ -48,9 +48,15 @@ case "$1 $2" in
   "analyze"*|"analyze "*)
     # Real CLI takes positional host + db; here $1=analyze, $2=<host>, $3=<db>.
     # Tests set DBX_FAKE_ANALYZE_FAIL=1 to flip to a non-zero exit + stderr.
+    # Tests set DBX_FAKE_ANALYZE_STDERR=<text> to add a log-step-style line
+    # to stderr alongside a successful JSON, exercising the stderr-on-200
+    # diagnostics path.
     if [[ "${DBX_FAKE_ANALYZE_FAIL:-}" == "1" ]]; then
       echo "could not connect: connection refused" >&2
       exit 1
+    fi
+    if [[ -n "${DBX_FAKE_ANALYZE_STDERR:-}" ]]; then
+      printf '%s\n' "$DBX_FAKE_ANALYZE_STDERR" >&2
     fi
     cat <<JSON
 {
@@ -1853,4 +1859,50 @@ JSON
   [[ "$output" == *"dbx analyze failed"* ]]
   [[ "$output" == *"connection refused"* ]]
   rm -f /tmp/wiz_analyze_fail_body
+}
+
+@test "POST /api/analyze passes CLI stderr through on SUCCESS too (diagnostics)" {
+  # Relaunch the server with DBX_FAKE_ANALYZE_STDERR set so the fake
+  # writes a log_step-style message to stderr alongside the successful
+  # JSON. The handler should include `stderr` in the 200 response so the
+  # wizard's diagnostics panel can render it.
+  kill "$WIZ_PID" 2>/dev/null
+  wait "$WIZ_PID" 2>/dev/null || true
+  DBX_FAKE_ANALYZE_STDERR="Scanning prod-mysql/b2b for PII candidates..." \
+  python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
+    --port "$WIZ_PORT" --token "$WIZ_TOKEN" \
+    --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
+    --form-fragment    "$WIZ_REPO_ROOT/lib/wizard-form.html" \
+    --backups-fragment "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
+    --backup-fragment  "$WIZ_REPO_ROOT/lib/wizard-backup.html" \
+    --restore-fragment "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
+    --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
+    --runs-fragment    "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
+    --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
+    --vault-fragment   "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
+    --storage-fragment "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
+    --scrub-fragment   "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --analyze-fragment "$WIZ_REPO_ROOT/lib/wizard-analyze.html" \
+    --config-path      "$WIZ_SCRATCH/config.json" \
+    --data-dir         "$WIZ_SCRATCH/data" \
+    --audit-dir        "$WIZ_AUDIT_DIR" \
+    --dbx-bin          "$WIZ_SCRATCH/dbx" \
+    --lib-dir          "$WIZ_REPO_ROOT/lib" \
+    --done-marker      "$WIZ_DONE" \
+    >"$WIZ_SCRATCH/server.log" 2>&1 &
+  WIZ_PID=$!
+  for _ in $(seq 1 20); do
+    if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"; then break; fi
+    sleep 0.1
+  done
+
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp"}' \
+    "$(api /api/analyze)"
+  [ "$status" -eq 0 ]
+  # Happy-path payload still there.
+  [[ "$output" == *"\"engine\": \"mysql\""* ]]
+  # Diagnostics passed through to the 200 response.
+  [[ "$output" == *"\"stderr\""* ]]
+  [[ "$output" == *"Scanning prod-mysql/b2b for PII candidates"* ]]
 }
