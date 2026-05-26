@@ -48,6 +48,16 @@ info() { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
+# Temp launcher path + cleanup. Declared at script scope (not `local` in main)
+# so the EXIT trap can still see it — a function-local would be out of scope by
+# the time the trap fires, and under `set -u` that reads as an unbound variable.
+DBX_TMP=""
+cleanup() {
+  [[ -n "${DBX_TMP:-}" ]] || return 0
+  rm -f "$DBX_TMP" "$DBX_TMP.rw" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 # Check dependencies
 check_deps() {
   local missing=()
@@ -87,8 +97,14 @@ main() {
   # Download files
   info "Downloading from github.com/$REPO@$REF..."
 
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/dbx" -o "$INSTALL_DIR/dbx"
-  chmod +x "$INSTALL_DIR/dbx"
+  # Download the launcher to a temp path; it's swapped into place with a single
+  # atomic rename at the very end (see below). `dbx update` runs FROM
+  # $INSTALL_DIR/dbx, and `curl -o` onto that live path truncates + rewrites the
+  # file the running bash process is still reading by offset — corrupting it
+  # mid-run ("cker,: command not found"). A rename swaps the inode instead, so
+  # the running process keeps reading its original (now-unlinked) file intact.
+  DBX_TMP="$INSTALL_DIR/.dbx.install.$$"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/dbx" -o "$DBX_TMP"
 
   for lib in core.sh tunnel.sh encrypt.sh postgres.sh mysql.sh post_restore.sh scrub.sh scrub_strategies.sh notify.sh schedule.sh storage.sh update.sh wizard.sh completion.sh; do
     curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/lib/$lib" -o "$LIB_DIR/$lib"
@@ -114,13 +130,17 @@ main() {
       -o "$MAN_DIR/$page" 2>/dev/null || true
   done
 
-  # Update lib path in main script to use installed location.
+  # Update lib path in the launcher to use the installed lib location.
   # Avoid `sed -i` — its argument shape differs between BSD and GNU sed, and
   # `uname` can't tell us which is actually first in PATH (e.g. GNU sed via
   # Nix or Homebrew on macOS). A temp-file rewrite works with either.
-  sed "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"$LIB_DIR\"|" "$INSTALL_DIR/dbx" > "$INSTALL_DIR/dbx.tmp"
-  mv "$INSTALL_DIR/dbx.tmp" "$INSTALL_DIR/dbx"
-  chmod +x "$INSTALL_DIR/dbx"
+  sed "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"$LIB_DIR\"|" "$DBX_TMP" > "$DBX_TMP.rw"
+  chmod +x "$DBX_TMP.rw"
+  # Atomic swap — the ONLY write to $INSTALL_DIR/dbx in the whole installer, and
+  # it happens last. Renaming (rather than truncating in place) means a running
+  # `dbx update` isn't corrupted, and a mid-install failure leaves the previous
+  # version untouched.
+  mv "$DBX_TMP.rw" "$INSTALL_DIR/dbx"
 
   # Extract and show version
   local version
