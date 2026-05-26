@@ -113,7 +113,7 @@
     </template>
 
     <template x-if="log.length > 0">
-      <pre class="dbx-backup__log"><template x-for="(line, i) in log" :key="i"><span x-text="line + '\n'"></span></template></pre>
+      <pre x-ref="logEl" @scroll="onLogScroll()" class="dbx-backup__log"><template x-for="(line, i) in log" :key="i"><span x-text="line + '\n'"></span></template></pre>
     </template>
   </div>
 </div>
@@ -125,6 +125,7 @@
       loadingHosts: false,
       form: { host: '', database: '', verbose: false, upload: false },
       log: [],
+      autoFollow: true,     // tail the log to the bottom unless the user scrolls up
       jobId: null,
       eventSource: null,
       running: false,
@@ -213,6 +214,7 @@
         if (this.running) return;
         if (!this.form.host) { this.status = 'Pick a host first.'; return; }
         this.log = [];
+        this.autoFollow = true;
         this.status = 'Starting backup…';
         this.running = true;
         this.startedAt = null;
@@ -274,7 +276,10 @@
         es.onmessage = (ev) => {
           try {
             const { line } = JSON.parse(ev.data);
-            if (line !== undefined) this.log.push(line);
+            if (line !== undefined) {
+              this.log.push(line);
+              if (this.autoFollow) this.scrollLogToBottom();
+            }
           } catch (e) { /* ignore */ }
         };
         es.addEventListener('done', (ev) => {
@@ -308,8 +313,26 @@
         } catch (e) { /* swallow */ }
       },
 
+      // Pin/unpin the log tail. When the user scrolls up to read, stop
+      // auto-following; when they scroll back to the bottom, resume. 24px of
+      // slack so it still counts as "at bottom" mid-render.
+      onLogScroll() {
+        const el = this.$refs.logEl;
+        if (!el) return;
+        this.autoFollow = (el.scrollHeight - el.scrollTop - el.clientHeight) < 24;
+      },
+
+      scrollLogToBottom() {
+        // Defer until Alpine has rendered the appended line(s).
+        this.$nextTick(() => {
+          const el = this.$refs.logEl;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      },
+
       clearLog() {
         this.log = [];
+        this.autoFollow = true;
         this.status = '';
         this.exitCode = null;
         this.startedAt = null;
