@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.19.4] - 2026-05-26
+
+### Documentation
+
+- **Documented the browser wizard's views.** `docs/wizards.md` previously described `dbx wizard` only as a one-shot config form. It now covers the view sidebar — including the **Analyze** view's "Save exclusions" builder (tick tables to write `exclude_data`) and the auto-tailing verbose **Backup** log — and notes the wizard no longer times out. Bumped all 17 man-page `.TH` version strings from a stale `0.12.0` to `0.19.4`.
+
 ## [0.19.3] - 2026-05-26
 
 ### Fixed
