@@ -70,6 +70,7 @@ wizard_open_browser() {
 cmd_wizard() {
   local mode="auto"  # auto | browser | no-browser | remote
   local user_port=""
+  local verbose=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-browser) mode="no-browser"; shift ;;
@@ -77,9 +78,10 @@ cmd_wizard() {
       --remote)     mode="remote";     shift ;;
       --port)       user_port="${2:-}"; shift 2 ;;
       --port=*)     user_port="${1#--port=}"; shift ;;
+      -v|--verbose) verbose=true; shift ;;
       -h|--help)
         cat <<EOF
-Usage: dbx wizard [--no-browser | --browser | --remote] [--port N]
+Usage: dbx wizard [--no-browser | --browser | --remote] [--port N] [-v]
 
 Opens a browser-based config builder + control panel at
 http://127.0.0.1:<port> and writes the result to ~/.config/dbx/config.json.
@@ -96,6 +98,11 @@ Flags:
                  on 127.0.0.1; use SSH for transport.
   --port N       Pin the local port (default: OS-assigned free port).
                  Useful with --remote so the SSH tunnel command is stable.
+  -v, --verbose  Stream the wizard server's stdout/stderr to this terminal
+                 in real time, and preserve the log file on exit instead
+                 of deleting it. Useful when an /api/* call seems to do
+                 nothing — the CLI errors that the server captures
+                 (auth/network/docker) end up here.
 EOF
         return 0
         ;;
@@ -204,7 +211,21 @@ EOF
     >"$server_log" 2>&1 &
   local srv_pid=$!
 
-  trap 'kill '"$srv_pid"' 2>/dev/null; rm -f '"$done_marker"' '"$server_log"'' EXIT INT TERM
+  # In verbose mode: stream the server log to this terminal in real time
+  # and preserve the file on exit. tail -F (capital) keeps following even
+  # if the log is briefly truncated/rotated. The streamer is a separate
+  # background process so the user can see CLI errors as they happen
+  # without us blocking on stdin.
+  local tail_pid=""
+  if [[ "$verbose" == "true" ]]; then
+    log_info "Verbose: server log → $server_log"
+    log_info "Verbose: streaming server stdout/stderr to this terminal (will be preserved on exit)."
+    tail -F "$server_log" >&2 &
+    tail_pid=$!
+    trap 'kill '"$srv_pid"' 2>/dev/null; kill '"$tail_pid"' 2>/dev/null; rm -f '"$done_marker"'' EXIT INT TERM
+  else
+    trap 'kill '"$srv_pid"' 2>/dev/null; rm -f '"$done_marker"' '"$server_log"'' EXIT INT TERM
+  fi
 
   local ready=false
   local _

@@ -65,6 +65,36 @@
     margin-bottom: 1rem;
   }
   .dbx-analyze__pii-panel h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+  /* Diagnostics panel for CLI stderr: log_step / log_warn lines that the
+     server captures while running `dbx analyze --json`. Yellow-tinted so
+     it's visually distinct from the red error panel — these are usually
+     informational ("Scanning for PII...") rather than fatal. */
+  .dbx-analyze__diag {
+    background: rgba(218, 135, 33, 0.10);
+    border: 1px solid rgba(218, 135, 33, 0.45);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    font-family: var(--md-code-font-family);
+    font-size: 0.8125rem;
+    white-space: pre-wrap;
+    color: var(--md-default-fg-color);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .dbx-analyze__diag-label {
+    display: block;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: #8a4c10;
+    margin-bottom: 0.25rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    .dbx-analyze__diag-label { color: #ffbf6b; }
+  }
   .dbx-analyze__pii-list { margin: 0; padding-left: 1.25rem; font-size: 0.875rem; }
   .dbx-analyze__pii-list code { font-size: 0.8125rem; }
   .dbx-analyze__pii-list li + li { margin-top: 0.125rem; }
@@ -165,6 +195,12 @@
           <small>tables with PII candidates</small>
         </div>
       </div>
+
+      <template x-if="result.stderr">
+        <div class="dbx-analyze__diag">
+          <span class="dbx-analyze__diag-label">CLI diagnostics</span><span x-text="result.stderr"></span>
+        </div>
+      </template>
 
       <template x-if="(result.pii || []).length > 0">
         <div class="dbx-analyze__pii-panel">

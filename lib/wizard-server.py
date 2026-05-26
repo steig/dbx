@@ -2904,6 +2904,12 @@ def make_handler(args):
                         "stderr": stderr,
                     })
                     return
+                # Pass stderr through on success too — `dbx analyze` emits
+                # log_step "Scanning for PII..." / log_warn messages on
+                # stderr that the wizard's diagnostics panel surfaces.
+                # Empty string elided so the UI doesn't render an empty box.
+                if stderr:
+                    payload["stderr"] = stderr
                 send_json(self, 200, payload)
                 return
 
