@@ -120,6 +120,11 @@ def parse_args():
         help="Path to wizard-storage.html (storage usage + retention sweep view)",
     )
     p.add_argument(
+        "--scrub-fragment",
+        required=True,
+        help="Path to wizard-scrub.html (Scrub manifest editor view)",
+    )
+    p.add_argument(
         "--audit-dir",
         default=os.environ.get(
             "DBX_AUDIT_DIR",
@@ -155,6 +160,312 @@ def _read_host_safety_map(config_path):
         s = block.get("safety", "local")
         safety[h] = s if s in ("prod", "stage", "local") else "local"
     return safety
+
+
+# ---------------------------------------------------------------------------
+# Scrub: per-host status, manifest read/write, and init/check shell-outs.
+#
+# Hosts in config.json are stored object-keyed-by-alias (see
+# wizard-form.html:1010-1044). Every helper in lib/scrub.sh looks the host
+# up by key — so the wizard's scrub side speaks the same shape. A legacy
+# list-of-{alias,...} form is tolerated for forward compatibility.
+# ---------------------------------------------------------------------------
+
+
+def _read_hosts_object(config_path: str) -> dict:
+    """Return the hosts block as {alias: block}. {} on missing / malformed."""
+    if not config_path or not os.path.isfile(config_path):
+        return {}
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    hosts = cfg.get("hosts")
+    if isinstance(hosts, dict):
+        return {k: v for k, v in hosts.items()
+                if isinstance(k, str) and IDENT_RE.match(k) and isinstance(v, dict)}
+    if isinstance(hosts, list):
+        out = {}
+        for h in hosts:
+            if isinstance(h, dict) and isinstance(h.get("alias"), str) \
+                    and IDENT_RE.match(h["alias"]):
+                out[h["alias"]] = h
+        return out
+    return {}
+
+
+def _scrub_manifest_path_for(config_path: str, host_block) -> str | None:
+    """Mirror lib/scrub.sh:scrub_manifest_path. Absolute path declared at
+    hosts.<alias>.scrub.manifest, resolved relative to the config-file
+    directory when stored as a relative path. None when unset."""
+    if not isinstance(host_block, dict):
+        return None
+    scrub = host_block.get("scrub")
+    if not isinstance(scrub, dict):
+        return None
+    raw = scrub.get("manifest")
+    if not isinstance(raw, str) or not raw:
+        return None
+    if os.path.isabs(raw):
+        return raw
+    return os.path.join(os.path.dirname(config_path), raw)
+
+
+def _scrub_required_flag(host_block) -> bool:
+    """True iff hosts.<alias>.scrub.required is the JSON boolean true. Same
+    flag scrub.sh:scrub_gate_active() reads to decide whether to enforce."""
+    if not isinstance(host_block, dict):
+        return False
+    scrub = host_block.get("scrub")
+    if not isinstance(scrub, dict):
+        return False
+    return scrub.get("required") is True
+
+
+def scrub_status(config_path: str) -> list:
+    """One entry per configured host: manifest path/existence, required
+    flag, configured database names (so the Init picker doesn't ask the
+    user to type a name they already declared elsewhere)."""
+    out = []
+    hosts = _read_hosts_object(config_path)
+    for alias in sorted(hosts):
+        block = hosts[alias]
+        manifest_path = _scrub_manifest_path_for(config_path, block)
+        manifest_exists = bool(manifest_path) and os.path.isfile(manifest_path)
+        databases_field = block.get("databases")
+        if isinstance(databases_field, dict):
+            databases = sorted(databases_field.keys())
+        elif isinstance(databases_field, list):
+            # Tolerate the wizard-form intermediate shape
+            names = [d.get("name") for d in databases_field
+                     if isinstance(d, dict) and isinstance(d.get("name"), str)]
+            databases = sorted(n for n in names if n)
+        else:
+            databases = []
+        out.append({
+            "alias": alias,
+            "type": block.get("type") if isinstance(block.get("type"), str) else None,
+            "safety": block.get("safety") if block.get("safety") in ("prod", "stage", "local") else "local",
+            "manifest_path": manifest_path,
+            "manifest_exists": manifest_exists,
+            "scrub_required": _scrub_required_flag(block),
+            "databases": databases,
+        })
+    return out
+
+
+def read_scrub_manifest(config_path: str, host: str):
+    """Return (manifest_json_or_None, resolved_path_or_None, error_or_None).
+    No manifest configured → (None, None, None). Configured but file missing
+    → (None, path, None). Parse error → (None, path, message)."""
+    hosts = _read_hosts_object(config_path)
+    block = hosts.get(host)
+    if block is None:
+        return None, None, f"host '{host}' is not configured"
+    path = _scrub_manifest_path_for(config_path, block)
+    if path is None:
+        return None, None, None
+    if not os.path.isfile(path):
+        return None, path, None
+    try:
+        with open(path) as f:
+            return json.load(f), path, None
+    except (OSError, json.JSONDecodeError) as e:
+        return None, path, f"could not read manifest at {path}: {e}"
+
+
+# Strategy names recognised by lib/scrub.sh:scrub_validate_manifest. Match
+# the case-arm list at scrub.sh:467-498. Used to gate /api/scrub/save before
+# we touch the filesystem.
+# Must match the case-arm list in lib/scrub.sh:scrub_validate_manifest.
+# Drift here means the wizard accepts a manifest the CLI then rejects.
+SCRUB_STRATEGIES = {
+    "fake_email", "fake_phone", "fake_ip", "fake_name",
+    "redact", "truncate", "shift_date", "passthrough", "jsonb_scrub_paths",
+}
+
+
+def _validate_manifest_shape(manifest) -> str | None:
+    """Lightweight pre-validation: catches the shape errors that would
+    cause `dbx scrub validate` to reject the file. Returns None on
+    accept, or a message describing the first problem. The bash side
+    validates again on next CLI use; this is just to give the wizard
+    instant feedback instead of writing a broken file."""
+    if not isinstance(manifest, dict):
+        return "manifest must be a JSON object"
+    if "version" in manifest and not isinstance(manifest["version"], str):
+        return "manifest.version must be a string"
+    tables = manifest.get("tables", {})
+    if not isinstance(tables, dict):
+        return "manifest.tables must be an object"
+    for tname, tbody in tables.items():
+        if not isinstance(tname, str) or not tname:
+            return "table names must be non-empty strings"
+        if not isinstance(tbody, dict):
+            return f"tables.{tname} must be an object"
+        has_no_pii = tbody.get("no_pii") is True
+        has_columns = isinstance(tbody.get("columns"), dict) and tbody["columns"]
+        if has_no_pii and has_columns:
+            return f"tables.{tname}: no_pii and columns are mutually exclusive"
+        if has_no_pii:
+            if not isinstance(tbody.get("reason"), str) or not tbody["reason"]:
+                return f"tables.{tname}: no_pii requires a non-empty reason"
+            continue
+        if not has_columns:
+            # Mirror lib/scrub.sh:scrub_validate_manifest which rejects
+            # tables with neither no_pii=true nor a non-empty columns
+            # object: "manifest: table 'X' has neither no_pii=true nor a
+            # 'columns' object". We have to reject here too — otherwise
+            # the wizard's save succeeds and the manifest then fails the
+            # CLI's validate step on the very next `dbx scrub` command.
+            return (f"tables.{tname}: must declare either no_pii=true (with a "
+                    f"reason) or at least one column under 'columns'")
+        for cname, cbody in tbody["columns"].items():
+            if not isinstance(cname, str) or not cname:
+                return f"tables.{tname}: column names must be non-empty strings"
+            if not isinstance(cbody, dict):
+                return f"tables.{tname}.columns.{cname} must be an object"
+            strat = cbody.get("strategy")
+            if not isinstance(strat, str) or strat not in SCRUB_STRATEGIES:
+                return (f"tables.{tname}.columns.{cname}: strategy must be one of "
+                        f"{sorted(SCRUB_STRATEGIES)}")
+    return None
+
+
+def write_scrub_manifest(target_path, config_path: str, manifest,
+                         host_for_config) -> tuple[bool, str | None]:
+    """Atomically write `manifest` to `target_path`. When `host_for_config`
+    is a non-empty string, also patch config.json so
+    hosts.<host>.scrub.manifest points at the file. The path must resolve
+    to a location under $HOME or the config directory."""
+    err = _validate_manifest_shape(manifest)
+    if err is not None:
+        return False, err
+    if not isinstance(target_path, str) or not target_path:
+        return False, "manifest path is required"
+    if "\x00" in target_path:
+        return False, "manifest path contains NUL"
+    # Validate host_for_config BEFORE any disk I/O. The old order wrote
+    # the manifest first and then rejected a bad host alias, which left
+    # an orphaned file the user was told didn't save.
+    if host_for_config is not None and host_for_config != "":
+        if not isinstance(host_for_config, str) or not IDENT_RE.match(host_for_config):
+            return False, "host alias has invalid characters"
+
+    config_dir = os.path.realpath(os.path.dirname(config_path))
+    home_raw = os.environ.get("HOME") or ""
+    home = os.path.realpath(home_raw) if home_raw else ""
+    abs_target = target_path if os.path.isabs(target_path) \
+        else os.path.join(config_dir, target_path)
+    parent = os.path.realpath(os.path.dirname(abs_target) or ".")
+    under_config = parent == config_dir or parent.startswith(config_dir + os.sep)
+    under_home = bool(home) and (parent == home or parent.startswith(home + os.sep))
+    if not (under_config or under_home):
+        return False, "manifest path must be under the config directory or $HOME"
+    if not abs_target.endswith(".json"):
+        return False, "manifest path must end with .json"
+    # Also realpath the target itself when it already exists, so a symlink
+    # at abs_target pointing outside the allowed roots is caught (only the
+    # parent dir was being resolved before — a symlinked target slipped
+    # past the containment check). New files have no symlink to resolve.
+    if os.path.lexists(abs_target):
+        resolved_target = os.path.realpath(abs_target)
+        resolved_parent = os.path.dirname(resolved_target)
+        resolved_under_config = (resolved_parent == config_dir
+                                 or resolved_parent.startswith(config_dir + os.sep))
+        resolved_under_home = bool(home) and (resolved_parent == home
+                                              or resolved_parent.startswith(home + os.sep))
+        if not (resolved_under_config or resolved_under_home):
+            return False, "manifest path resolves (via symlink) outside $HOME / config dir"
+
+    tmp_path = abs_target + ".wizard-tmp"
+    try:
+        os.makedirs(os.path.dirname(abs_target), exist_ok=True)
+        with open(tmp_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, abs_target)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return False, f"write failed: {e}"
+
+    # host_for_config was validated at the top of the function. Treat
+    # missing/empty as "manifest saved, don't touch config.json".
+    if not isinstance(host_for_config, str) or not host_for_config:
+        return True, None
+
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                return False, "existing config.json is not a JSON object"
+        else:
+            cfg = {}
+    except (OSError, json.JSONDecodeError) as e:
+        return False, f"could not read config.json: {e}"
+
+    hosts = cfg.get("hosts")
+    if not isinstance(hosts, dict):
+        return False, "cannot set scrub.manifest: hosts block missing or not in object form"
+    block = hosts.get(host_for_config)
+    if not isinstance(block, dict):
+        return False, f"cannot set scrub.manifest: host '{host_for_config}' not in config"
+
+    # Store as a config-relative path when possible so the file moves with
+    # the config dir — same convention scrub_manifest_path() uses.
+    if abs_target == config_dir or abs_target.startswith(config_dir + os.sep):
+        stored = os.path.relpath(abs_target, config_dir)
+    else:
+        stored = abs_target
+
+    scrub_block_raw = block.get("scrub")
+    scrub_block = scrub_block_raw if isinstance(scrub_block_raw, dict) else {}
+    scrub_block["manifest"] = stored
+    block["scrub"] = scrub_block
+
+    cfg_tmp = config_path + ".wizard-tmp"
+    try:
+        with open(cfg_tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.chmod(cfg_tmp, 0o600)
+        os.replace(cfg_tmp, config_path)
+    except OSError as e:
+        try:
+            os.unlink(cfg_tmp)
+        except OSError:
+            pass
+        return False, f"config.json write failed: {e}"
+    return True, None
+
+
+def run_scrub_subcommand(dbx_bin: str, argv_tail: list,
+                         timeout: int = 300) -> tuple[int, str, str]:
+    """Run `dbx scrub <argv_tail>` synchronously. init/check are short
+    in absolute terms (one schema query + JSON emit), but the schema
+    query goes against the *source* host — which can be a prod box on
+    the other side of a slow VPN with a 5k-table schema. 5 minutes is
+    in line with the wizard's overall 10-minute idle timeout; below
+    that, internet-distant prod boxes time out spuriously."""
+    try:
+        result = subprocess.run(
+            [dbx_bin, "scrub", *argv_tail],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, (bytes, bytearray)) else (e.stderr or "")
+        return 124, out, err + f"\ntimed out after {timeout}s"
+
 
 
 def list_backups(data_dir: str, config_path: str | None = None):
@@ -1548,6 +1859,8 @@ def make_handler(args):
             vault = f.read()
         with open(args.storage_fragment) as f:
             storage = f.read()
+        with open(args.scrub_fragment) as f:
+            scrub = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
@@ -1559,6 +1872,7 @@ def make_handler(args):
                  .replace("<!-- __DBX_DASHBOARD_FRAGMENT__ -->", dashboard)
                  .replace("<!-- __DBX_VAULT_FRAGMENT__ -->", vault)
                  .replace("<!-- __DBX_STORAGE_FRAGMENT__ -->", storage)
+                 .replace("<!-- __DBX_SCRUB_FRAGMENT__ -->", scrub)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -1977,6 +2291,25 @@ def make_handler(args):
                     return
                 send_json(self, 200, {"path": path_to_file, "recipients": recipients})
                 return
+            if path == "/api/scrub/status":
+                send_json(self, 200, scrub_status(args.config_path))
+                return
+            if path == "/api/scrub/manifest":
+                qs = parse_query(self.path)
+                host = (qs.get("host", [""]) or [""])[0]
+                if not host or not IDENT_RE.match(host):
+                    send_json(self, 400, {"error": "host is required and must match the alias shape"})
+                    return
+                manifest, resolved, err = read_scrub_manifest(args.config_path, host)
+                if err is not None:
+                    send_json(self, 400, {"error": err})
+                    return
+                send_json(self, 200, {
+                    "host": host,
+                    "manifest_path": resolved,
+                    "manifest": manifest,
+                })
+                return
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/events$", path)
             if m:
                 with JOBS_LOCK:
@@ -2379,6 +2712,117 @@ def make_handler(args):
                 ok, err = _remove_age_recipient(_age_recipients_path(), recipient)
                 if not ok:
                     send_json(self, 500, {"error": err})
+                    return
+                send_json(self, 200, {"ok": True})
+                return
+
+            if path in ("/api/scrub/init", "/api/scrub/check"):
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                host = body.get("host")
+                database = body.get("database")
+                if not isinstance(host, str) or not IDENT_RE.match(host):
+                    if host not in ("local", "localhost"):
+                        send_json(self, 400, {"error": "host must match the alias shape or be 'local'"})
+                        return
+                if not isinstance(database, str) or not IDENT_RE.match(database):
+                    send_json(self, 400, {"error": "database must match the db-name shape"})
+                    return
+                target = f"{host}/{database}"
+
+                if path == "/api/scrub/init":
+                    argv = ["init", target]
+                    if body.get("include_empty") is True:
+                        argv.append("--include-empty")
+                    elif body.get("include_empty") not in (None, False):
+                        send_json(self, 400, {"error": "include_empty must be a boolean"})
+                        return
+                    code, stdout, stderr = run_scrub_subcommand(args.dbx_bin, argv)
+                    if code != 0:
+                        send_json(self, 502, {
+                            "error": "scrub init failed",
+                            "exit_code": code,
+                            "stderr": stderr,
+                            "stdout": stdout,
+                        })
+                        return
+                    try:
+                        manifest = json.loads(stdout)
+                    except json.JSONDecodeError as e:
+                        send_json(self, 502, {
+                            "error": f"scrub init returned non-JSON: {e}",
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        })
+                        return
+                    send_json(self, 200, {"ok": True, "manifest": manifest, "stderr": stderr})
+                    return
+
+                argv = ["check", target, "--json"]
+                manifest_override = body.get("manifest_path")
+                if manifest_override is not None:
+                    if not isinstance(manifest_override, str) or not manifest_override:
+                        send_json(self, 400, {"error": "manifest_path must be a non-empty string"})
+                        return
+                    argv += ["--manifest", manifest_override]
+                code, stdout, stderr = run_scrub_subcommand(args.dbx_bin, argv)
+                if code in (0, 2):
+                    try:
+                        report = json.loads(stdout)
+                    except json.JSONDecodeError as e:
+                        send_json(self, 502, {
+                            "error": f"scrub check returned non-JSON: {e}",
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        })
+                        return
+                    send_json(self, 200, {
+                        "ok": code == 0,
+                        "report": report,
+                        "stderr": stderr,
+                    })
+                    return
+                send_json(self, 502, {
+                    "error": "scrub check failed",
+                    "exit_code": code,
+                    "stderr": stderr,
+                    "stdout": stdout,
+                })
+                return
+
+            if path == "/api/scrub/save":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 1_000_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                ok, err = write_scrub_manifest(
+                    body.get("manifest_path"),
+                    args.config_path,
+                    body.get("manifest"),
+                    body.get("host"),
+                )
+                if not ok:
+                    send_json(self, 400, {"error": err})
                     return
                 send_json(self, 200, {"ok": True})
                 return

@@ -642,6 +642,12 @@ scrub_schema_query_pg() {
   db_user=$(get_config_value ".hosts[\"$host\"].user")
   db_pass=$(get_password "$host")
 
+  # Backups route through create_postgres_credential_file / pg_dump which
+  # have their own engine-default fallbacks; this helper invokes psql
+  # directly with -p on argv, so an empty $db_port becomes the literal
+  # `-p ""` which postgres rejects. Mirror the cred-file default here.
+  [[ -z "$db_port" ]] && db_port=5432
+
   require_container "$POSTGRES_CONTAINER"
 
   local query="
@@ -670,6 +676,13 @@ scrub_schema_query_mysql() {
   db_port=$(get_effective_port "$host")
   db_user=$(get_config_value ".hosts[\"$host\"].user")
   db_pass=$(get_password "$host")
+
+  # Backups route through create_mysql_credential_file whose port arg
+  # defaults to 3306 — but this helper invokes the mysql CLI directly
+  # with -P on argv, so an empty $db_port becomes the literal `-P ""`
+  # which mysql rejects ("Empty value for 'port' specified."). Match
+  # the cred-file default so a host with port unset still works.
+  [[ -z "$db_port" ]] && db_port=3306
 
   require_container "$MYSQL_CONTAINER"
 

@@ -911,6 +911,15 @@
             if (block.type) h.type = block.type;
             if (block.user) h.user = block.user;
             if (block.definer_handling) h.definer_handling = block.definer_handling;
+            // Safety: read the same set of values buildConfig writes ('prod',
+            // 'stage', 'local'); anything else (or missing) stays at the
+            // emptyHost() default of 'local'. Without this round-trip read,
+            // opening + saving the wizard would silently strip an existing
+            // `safety: "prod"` marker, because the form would default the
+            // field back to 'local' and buildConfig omits the default.
+            if (block.safety === 'prod' || block.safety === 'stage' || block.safety === 'local') {
+              h.safety = block.safety;
+            }
             if (block.ssh_tunnel) {
               h.connection = 'ssh_tunnel';
               h.jump_host = block.ssh_tunnel.jump_host || '';
