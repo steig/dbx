@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.19.3] - 2026-05-26
+
+### Fixed
+
+- **`dbx update` no longer corrupts itself mid-run (`cker,: command not found`).** The installer wrote the new launcher with `curl -o` directly onto `$INSTALL_DIR/dbx` — the very file the running `dbx update` was still being read from. Bash reads scripts by offset on demand, so truncating + rewriting it in place made the in-flight process resume at a stale offset in new content and execute a mid-token fragment (e.g. a slice of `docker,`). The install still completed correctly, but the upgrade printed an alarming error. `install.sh` now downloads the launcher to a temp file and swaps it in with a single atomic rename at the very end, so the running process keeps reading its original file and a mid-install failure leaves the previous version untouched.
+
 ## [0.19.2] - 2026-05-26
 
 ### Added
