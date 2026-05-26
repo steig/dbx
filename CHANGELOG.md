@@ -4,6 +4,17 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-26
+
+### Added
+
+- **Wizard Analyze view.** New "Analyze" sidebar tab between Scrub and Schedule that surfaces what `dbx analyze <host> <db>` shows on the CLI — per-table row count + on-disk size, totals, exclusion flags, PII candidates — in a sortable, filterable browser table instead of an fzf picker. Host + database pickers source from the existing `/api/config` endpoint; a "Skip PII scan" checkbox bypasses the dictionary match for faster runs against schemas with thousands of tables. Per-row chips: `excluded` when a table appears in `config.databases[].exclude_data`, and `PII` when the pre-scan flagged it.
+- **`dbx analyze --json` mode.** Skips the fzf-aware interactive picker and the human-readable log output, emitting one structured object: `{host, database, engine, totals: {tables, rows, size_bytes}, tables: [{name, rows, size_bytes, excluded}], pii: [{table, columns: [...]}]}`. Reuses the per-engine stats query from `analyze_postgres` / `analyze_mysql` and the existing `scrub_pii_summary_tsv` helper, so the JSON path doesn't diverge from the interactive path. `--suggest-scrub` still writes its draft manifest on the side. Powers the new wizard tab via a new `POST /api/analyze` endpoint; also useful for scripted consumers.
+
+### Fixed
+
+- **`dbx vault list` actually lists credentials again.** `keychain_list()` walks `security dump-keychain` looking for entries with `"svce"<blob>="dbx"` and jumps -B5 lines back to find the matching `"acct"` attribute. On modern macOS the dump emits ~15 attribute lines per entry with `"acct"` 13 lines *before* `"svce"`, so `-B5` silently dropped every entry — `dbx vault list` showed "(none)" even when keychain had credentials, while `find-generic-password -s dbx -a <key>` continued to work. Downstream, the wizard's Vault tab also rendered empty because `/api/vault/list` shells out to this same function. Widened to `-B20` (comfortable headroom over the real ~15-line block). `sort -u` already dedupes if `-B` grabs into an adjacent entry's `"acct"` line.
+
 ## [0.16.0] - 2026-05-26
 
 ### Added
