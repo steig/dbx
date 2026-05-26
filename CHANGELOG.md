@@ -4,6 +4,17 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-26
+
+### Added
+
+- **`dbx wizard -v / --verbose`.** Streams the wizard server's stdout/stderr to the spawning terminal in real time (via a backgrounded `tail -F`) and preserves the log file on exit instead of deleting it. The path is printed on startup so you can also `tail -f` from another terminal. Without this, server-side CLI errors (auth failures, docker hiccups, missing containers) were captured by the wizard but never surfaced — they lived and died in a mktemp file the trap unlinked.
+- **`POST /api/analyze` returns CLI stderr on success too.** Previously only `502` failure responses included `stderr`; now successful runs also include it when the CLI wrote to stderr (e.g. `log_step "Scanning prod-mysql/b2b for PII candidates..."`). The wizard's Analyze view renders this in a new yellow "CLI diagnostics" panel between the totals strip and the PII section. Empty stderr is elided so the panel only appears when there's something to say.
+
+### Fixed
+
+- **`dbx analyze --json` stops silently returning empty payloads on a broken database connection.** Old code wrapped both engine's stats queries in `2>/dev/null || true`, so a psql/mysql auth failure / "database does not exist" / SSH tunnel timeout produced a 200 OK with `tables: 0, rows: 0` — the wizard's Analyze view then rendered "0 tables" and the user assumed the call simply hadn't done anything. Stderr now flows through to the wizard server, a non-zero exit fails the command (caller sees 502 with the underlying error), and an empty result set raises a clear `die`: "Table stats query for X@Y returned no rows — does the database exist and does the configured user have SELECT on information_schema (or pg_stat_user_tables)?". The PII pre-scan path also stops `2>/dev/null`-swallowing its own errors; a failed PII scan now `log_warn`s and continues with empty PII rather than hiding the failure.
+
 ## [0.17.0] - 2026-05-26
 
 ### Added
