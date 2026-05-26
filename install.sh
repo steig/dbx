@@ -8,6 +8,10 @@
 set -euo pipefail
 
 REPO="steig/dbx"
+# Git ref to install from. Defaults to main (the public one-liner installer);
+# `dbx update` sets DBX_REF to the latest release tag so the install isn't
+# served stale content from the CDN cache on main right after a release.
+REF="${DBX_REF:-main}"
 INSTALL_DIR="${DBX_INSTALL_DIR:-$HOME/.local/bin}"
 LIB_DIR="${DBX_LIB_DIR:-$HOME/.local/lib/dbx}"
 MAN_DIR="${DBX_MAN_DIR:-$HOME/.local/share/man/man1}"
@@ -81,32 +85,32 @@ main() {
   mkdir -p "$INSTALL_DIR" "$LIB_DIR" "$MAN_DIR"
 
   # Download files
-  info "Downloading from github.com/$REPO..."
+  info "Downloading from github.com/$REPO@$REF..."
 
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/dbx" -o "$INSTALL_DIR/dbx"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/dbx" -o "$INSTALL_DIR/dbx"
   chmod +x "$INSTALL_DIR/dbx"
 
   for lib in core.sh tunnel.sh encrypt.sh postgres.sh mysql.sh post_restore.sh scrub.sh scrub_strategies.sh notify.sh schedule.sh storage.sh update.sh wizard.sh completion.sh; do
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$lib" -o "$LIB_DIR/$lib"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/lib/$lib" -o "$LIB_DIR/$lib"
   done
 
   # HTML assets for the browser-based `dbx wizard` config builder. Same
   # form fragment also powers the static docs builder; downloading both
   # gives offline-capable wizard mode.
   for asset in wizard.html wizard-form.html wizard-backups.html wizard-backup.html wizard-restore.html wizard-schedule.html wizard-runs.html wizard-dashboard.html wizard-vault.html wizard-storage.html wizard-scrub.html wizard-analyze.html; do
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/$asset" -o "$LIB_DIR/$asset"
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/lib/$asset" -o "$LIB_DIR/$asset"
   done
 
   # Python HTTP server backing the wizard. Standalone file so it stays
   # readable and unit-testable; lib/wizard.sh spawns it via argparse flags.
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/lib/wizard-server.py" -o "$LIB_DIR/wizard-server.py"
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/lib/wizard-server.py" -o "$LIB_DIR/wizard-server.py"
 
   # Man pages. `man dbx` should work right after install. Skip silently
-  # on per-page download failure (e.g. the file doesn't exist yet at
-  # main) so a partial release doesn't kill the whole install.
+  # on per-page download failure (e.g. the file doesn't exist yet at the
+  # target ref) so a partial release doesn't kill the whole install.
   info "Installing man pages to $MAN_DIR..."
   for page in "${MAN_PAGES[@]}"; do
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/man/man1/$page" \
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/man/man1/$page" \
       -o "$MAN_DIR/$page" 2>/dev/null || true
   done
 

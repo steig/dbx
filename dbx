@@ -2513,8 +2513,20 @@ cmd_test() {
 
 cmd_update() {
   log_step "Updating dbx..."
-  log_info "Re-running install.sh from ${DBX_REPO_SLUG}@main"
-  curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
+  # Install from the latest release TAG, not main. raw.githubusercontent.com
+  # serves main through a CDN that can lag a freshly-pushed release by several
+  # minutes, so `dbx update` right after a release would re-install the previous
+  # version. Tag refs are immutable and served fresh, sidestepping the race.
+  local ver ref
+  ver=$(fetch_latest_release 2>/dev/null || true)   # e.g. "0.19.1" (no leading v)
+  if [[ -n "$ver" ]]; then
+    ref="v$ver"
+    log_info "Installing $ref from ${DBX_REPO_SLUG}"
+    curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/${ref}/install.sh" | DBX_REF="$ref" bash
+  else
+    log_warn "Could not resolve the latest release tag; falling back to main"
+    curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
+  fi
 }
 
 # Prompt for a TCP port and validate it's numeric. Re-prompts on
