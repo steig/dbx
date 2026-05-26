@@ -461,7 +461,13 @@ keychain_list() {
 
   case "$backend" in
     keychain)
-      security dump-keychain 2>/dev/null | grep -B5 "\"svce\"<blob>=\"$KEYCHAIN_SERVICE\"" | grep "\"acct\"" | sed 's/.*<blob>="\([^"]*\)".*/\1/' | sort -u
+      # security dump-keychain emits each entry as a block of ~15 attribute
+      # lines, with "acct" appearing 13 lines BEFORE "svce" in the modern
+      # macOS format. The previous -B5 window was too narrow and silently
+      # dropped every entry — `dbx vault list` then printed "(none)" while
+      # `find-generic-password -s dbx -a <key>` still worked. -B20 is
+      # comfortable headroom; sort -u dedupes if grep grabs adjacent blocks.
+      security dump-keychain 2>/dev/null | grep -B20 "\"svce\"<blob>=\"$KEYCHAIN_SERVICE\"" | grep "\"acct\"" | sed 's/.*<blob>="\([^"]*\)".*/\1/' | sort -u
       ;;
     secret-tool)
       secret-tool search --all service "$KEYCHAIN_SERVICE" 2>/dev/null | grep "^attribute.account" | cut -d= -f2 | tr -d ' ' | sort -u

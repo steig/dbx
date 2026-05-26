@@ -1409,12 +1409,13 @@ EOF
 }
 
 cmd_analyze() {
-  local host="" database="" suggest_scrub=false no_pii_scan=false manifest_output=""
+  local host="" database="" suggest_scrub=false no_pii_scan=false manifest_output="" as_json=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --suggest-scrub)   suggest_scrub=true; shift ;;
       --no-pii-scan)     no_pii_scan=true; shift ;;
       --manifest-output) manifest_output="$2"; shift 2 ;;
+      --json)            as_json=true; shift ;;
       --*|-*) die "Unknown analyze option: $1" ;;
       *)
         if [[ -z "$host" ]]; then
@@ -1429,8 +1430,8 @@ cmd_analyze() {
     esac
   done
 
-  [[ -z "$host" ]] && die "Usage: dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan] [--manifest-output FILE]"
-  [[ -z "$database" ]] && die "Usage: dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan] [--manifest-output FILE]"
+  [[ -z "$host" ]] && die "Usage: dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan] [--manifest-output FILE] [--json]"
+  [[ -z "$database" ]] && die "Usage: dbx analyze <host> <database> [--suggest-scrub] [--no-pii-scan] [--manifest-output FILE] [--json]"
 
   require_config
   require_jq
@@ -1447,6 +1448,19 @@ cmd_analyze() {
 
   local db_type
   db_type=$(get_db_type "$host")
+
+  # --json short-circuits the human-readable path entirely. Same data
+  # (PII candidates + per-table size/row stats) but emitted as one JSON
+  # object so the wizard's Analyze view (and any other consumer) doesn't
+  # have to scrape log lines + a table that's fzf-aware in interactive
+  # mode. --suggest-scrub still writes the manifest file on the side.
+  if [[ "$as_json" == "true" ]]; then
+    _analyze_emit_json "$host" "$database" "$db_type" "$no_pii_scan"
+    if [[ "$suggest_scrub" == "true" ]]; then
+      _analyze_write_scrub_suggestion "$host" "$database" "$manifest_output" >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
 
   # PII pre-scan: walk information_schema, dictionary-match each column,
   # surface candidates BEFORE the existing exclude-data picker. Cheap
@@ -1547,6 +1561,128 @@ _analyze_write_scrub_suggestion() {
   printf '%s\n' "$pretty" > "$out"
   log_success "Draft manifest written: $out"
   log_info "Review, edit, then point hosts.$host.scrub.manifest at this file."
+}
+
+# Emit the analyze payload as a single JSON object on stdout. Used by
+# `dbx analyze --json` (wizard's Analyze view + any scripted consumer).
+# Shape:
+#   {
+#     "host": "...", "database": "...", "engine": "postgres|mysql|mariadb",
+#     "totals": { "tables": N, "rows": N, "size_bytes": N },
+#     "tables": [
+#       { "name": "schema.table", "rows": N, "size_bytes": N, "excluded": bool }
+#     ],
+#     "pii": [ { "table": "...", "columns": ["c1", "c2"] } ]
+#   }
+# Args: $1 host, $2 database, $3 db_type, $4 no_pii_scan ("true"/"false")
+_analyze_emit_json() {
+  local host="$1" database="$2" db_type="$3" no_pii_scan="$4"
+  local db_host db_port db_user db_pass
+  db_host=$(get_effective_host "$host")
+  db_port=$(get_effective_port "$host")
+  db_user=$(get_config_value ".hosts[\"$host\"].user")
+  db_pass=$(get_password "$host")
+
+  local engine_label engine_query stats_tsv
+  case "$db_type" in
+    postgres|postgresql)
+      engine_label="postgres"
+      require_container "$POSTGRES_CONTAINER"
+      [[ -z "$db_port" ]] && db_port=5432
+      engine_query="
+        SELECT schemaname || '.' || relname,
+               COALESCE(n_live_tup, 0),
+               pg_total_relation_size(schemaname || '.' || quote_ident(relname))
+        FROM pg_stat_user_tables
+        ORDER BY pg_total_relation_size(schemaname || '.' || quote_ident(relname)) DESC;
+      "
+      stats_tsv=$(docker exec -i -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
+        -tA -F $'\t' -c "$engine_query" 2>/dev/null || true)
+      ;;
+    mysql|mariadb)
+      engine_label="$db_type"
+      require_container "$MYSQL_CONTAINER"
+      [[ -z "$db_port" ]] && db_port=3306
+      # Use a per-invocation credential file (avoids leaking creds on argv).
+      local tmpdir cred_file container_cnf
+      tmpdir=$(mktemp -d); chmod 700 "$tmpdir"
+      container_cnf="/tmp/dbx-my.$$-$RANDOM.cnf"
+      trap "rm -rf '$tmpdir'; docker exec '$MYSQL_CONTAINER' rm -f '$container_cnf' 2>/dev/null; true" RETURN
+      cred_file=$(create_mysql_credential_file "$db_user" "$db_pass" "$db_host" "$db_port")
+      mv "$cred_file" "$tmpdir/my.cnf"
+      docker cp "$tmpdir/my.cnf" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
+      docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
+      engine_query="
+        SELECT TABLE_NAME,
+               COALESCE(TABLE_ROWS, 0),
+               COALESCE(DATA_LENGTH + INDEX_LENGTH, 0)
+        FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = '$database'
+        ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC;
+      "
+      stats_tsv=$(docker exec -i "$MYSQL_CONTAINER" \
+        mysql --defaults-extra-file="$container_cnf" -N -e "$engine_query" 2>/dev/null || true)
+      ;;
+    *)
+      die "Unknown database type: $db_type"
+      ;;
+  esac
+
+  # Current exclude_data list — used to mark each table row.
+  local exclusions_json
+  exclusions_json=$(jq -c ".hosts[\"$host\"].databases[\"$database\"].exclude_data // []" \
+    "$CONFIG_FILE" 2>/dev/null || printf '[]')
+
+  # PII pre-scan (reuses the same code path as the human-readable mode).
+  local pii_json="[]"
+  if [[ "$no_pii_scan" != "true" ]]; then
+    local schema_tsv schema_json manifest_json pii_tsv
+    schema_tsv=$(_scrub_query_live_schema_tsv "$host" "$database" 2>/dev/null || true)
+    if [[ -n "$schema_tsv" ]]; then
+      schema_json=$(printf '%s\n' "$schema_tsv" | scrub_schema_tsv_to_json)
+      manifest_json=$(scrub_read_manifest "$host")
+      pii_tsv=$(scrub_pii_summary_tsv "$schema_json" "$manifest_json" 2>/dev/null || true)
+      if [[ -n "$pii_tsv" ]]; then
+        pii_json=$(printf '%s\n' "$pii_tsv" \
+          | jq -Rs 'split("\n") | map(select(length > 0))
+                   | map(split("\t"))
+                   | map({table: .[0], columns: (.[1] | split(","))})')
+      fi
+    fi
+  fi
+
+  # Stitch the per-table stats + exclusion flags into JSON via jq.
+  # stats_tsv may legitimately be empty (no tables); emit empty totals.
+  printf '%s\n' "$stats_tsv" \
+    | jq -Rs --arg host "$host" \
+            --arg database "$database" \
+            --arg engine "$engine_label" \
+            --argjson exclusions "$exclusions_json" \
+            --argjson pii "$pii_json" '
+      def to_int(s): s | tonumber? // 0;
+      ($exclusions | map({(.): true}) | add // {}) as $excl_map
+      | split("\n") | map(select(length > 0))
+      | map(split("\t"))
+      | map({
+          name: .[0],
+          rows: to_int(.[1]),
+          size_bytes: to_int(.[2]),
+          excluded: ($excl_map[.[0]] // false),
+        }) as $tables
+      | {
+          host: $host,
+          database: $database,
+          engine: $engine,
+          totals: {
+            tables: ($tables | length),
+            rows: ($tables | map(.rows) | add // 0),
+            size_bytes: ($tables | map(.size_bytes) | add // 0),
+          },
+          tables: $tables,
+          pii: $pii,
+        }
+    '
 }
 
 cmd_verify() {

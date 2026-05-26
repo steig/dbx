@@ -125,6 +125,11 @@ def parse_args():
         help="Path to wizard-scrub.html (Scrub manifest editor view)",
     )
     p.add_argument(
+        "--analyze-fragment",
+        required=True,
+        help="Path to wizard-analyze.html (Analyze view: table stats + PII pre-scan)",
+    )
+    p.add_argument(
         "--audit-dir",
         default=os.environ.get(
             "DBX_AUDIT_DIR",
@@ -459,6 +464,29 @@ def run_scrub_subcommand(dbx_bin: str, argv_tail: list,
         result = subprocess.run(
             [dbx_bin, "scrub", *argv_tail],
             capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, (bytes, bytearray)) else (e.stderr or "")
+        return 124, out, err + f"\ntimed out after {timeout}s"
+
+
+def run_analyze_json(dbx_bin: str, host: str, database: str,
+                     no_pii_scan: bool = False,
+                     timeout: int = 300) -> tuple[int, str, str]:
+    """Run `dbx analyze <host> <database> --json [--no-pii-scan]` and
+    return (exit_code, stdout, stderr). Same timeout posture as
+    run_scrub_subcommand — the analyze query goes against the *source*
+    host which may have thousands of tables behind a slow link. Pass
+    no_pii_scan=True to skip the dictionary match (the wizard's Scrub
+    tab covers that more thoroughly anyway)."""
+    argv = [dbx_bin, "analyze", host, database, "--json"]
+    if no_pii_scan:
+        argv.append("--no-pii-scan")
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False,
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired as e:
@@ -1861,6 +1889,8 @@ def make_handler(args):
             storage = f.read()
         with open(args.scrub_fragment) as f:
             scrub = f.read()
+        with open(args.analyze_fragment) as f:
+            analyze = f.read()
         save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
@@ -1873,6 +1903,7 @@ def make_handler(args):
                  .replace("<!-- __DBX_VAULT_FRAGMENT__ -->", vault)
                  .replace("<!-- __DBX_STORAGE_FRAGMENT__ -->", storage)
                  .replace("<!-- __DBX_SCRUB_FRAGMENT__ -->", scrub)
+                 .replace("<!-- __DBX_ANALYZE_FRAGMENT__ -->", analyze)
                  .replace("__DBX_SAVE_URL__", save_url)
         )
 
@@ -2825,6 +2856,55 @@ def make_handler(args):
                     send_json(self, 400, {"error": err})
                     return
                 send_json(self, 200, {"ok": True})
+                return
+
+            if path == "/api/analyze":
+                length = int(self.headers.get("Content-Length", 0))
+                if length <= 0 or length > 8_000:
+                    self._send(400, "bad length")
+                    return
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    self._send(400, f"invalid json: {e}")
+                    return
+                if not isinstance(body, dict):
+                    send_json(self, 400, {"error": "body must be a JSON object"})
+                    return
+                host = body.get("host")
+                database = body.get("database")
+                if not isinstance(host, str) or not IDENT_RE.match(host):
+                    send_json(self, 400, {"error": "host must match the alias shape"})
+                    return
+                if not isinstance(database, str) or not IDENT_RE.match(database):
+                    send_json(self, 400, {"error": "database must match the db-name shape"})
+                    return
+                no_pii = body.get("no_pii_scan")
+                if no_pii is not None and not isinstance(no_pii, bool):
+                    send_json(self, 400, {"error": "no_pii_scan must be a boolean"})
+                    return
+                code, stdout, stderr = run_analyze_json(
+                    args.dbx_bin, host, database, no_pii_scan=bool(no_pii)
+                )
+                if code != 0:
+                    send_json(self, 502, {
+                        "error": "dbx analyze failed",
+                        "exit_code": code,
+                        "stderr": stderr,
+                        "stdout": stdout,
+                    })
+                    return
+                try:
+                    payload = json.loads(stdout)
+                except json.JSONDecodeError as e:
+                    send_json(self, 502, {
+                        "error": f"dbx analyze returned non-JSON: {e}",
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    })
+                    return
+                send_json(self, 200, payload)
                 return
 
             m = re.match(r"^/api/jobs/([0-9a-f]{32})/cancel$", path)

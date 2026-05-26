@@ -45,6 +45,30 @@ mkdir -p "$(dirname "$VAULT_STORE")"
 [[ -f "$VAULT_STORE" ]] || : > "$VAULT_STORE"
 
 case "$1 $2" in
+  "analyze"*|"analyze "*)
+    # Real CLI takes positional host + db; here $1=analyze, $2=<host>, $3=<db>.
+    # Tests set DBX_FAKE_ANALYZE_FAIL=1 to flip to a non-zero exit + stderr.
+    if [[ "${DBX_FAKE_ANALYZE_FAIL:-}" == "1" ]]; then
+      echo "could not connect: connection refused" >&2
+      exit 1
+    fi
+    cat <<JSON
+{
+  "host": "$2",
+  "database": "$3",
+  "engine": "mysql",
+  "totals": { "tables": 2, "rows": 1200, "size_bytes": 1048576 },
+  "tables": [
+    { "name": "users",    "rows": 1000, "size_bytes": 786432, "excluded": false },
+    { "name": "sessions", "rows":  200, "size_bytes": 262144, "excluded": true }
+  ],
+  "pii": [
+    { "table": "users", "columns": ["email", "phone"] }
+  ]
+}
+JSON
+    exit 0
+    ;;
   "scrub init")
     cat <<'JSON'
 {
@@ -166,6 +190,7 @@ SH
     --vault-fragment    "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
     --storage-fragment   "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
     --scrub-fragment    "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --analyze-fragment  "$WIZ_REPO_ROOT/lib/wizard-analyze.html" \
     --config-path       "$WIZ_SCRATCH/config.json" \
     --data-dir          "$WIZ_SCRATCH/data" \
     --audit-dir         "$WIZ_AUDIT_DIR" \
@@ -1562,6 +1587,7 @@ JSON
     --vault-fragment   "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
     --storage-fragment "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
     --scrub-fragment   "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --analyze-fragment "$WIZ_REPO_ROOT/lib/wizard-analyze.html" \
     --config-path      "$WIZ_SCRATCH/config.json" \
     --data-dir         "$WIZ_SCRATCH/data" \
     --audit-dir        "$WIZ_AUDIT_DIR" \
@@ -1734,4 +1760,97 @@ JSON
   [[ "$output" == *"resolves (via symlink) outside"* ]]
   [ ! -e "$ESCAPE_DST/evil.json" ]
   rm -rf "$ESCAPE_DST"
+}
+
+# ---------------------------------------------------------------------------
+# /api/analyze  — table stats + PII pre-scan from `dbx analyze --json`
+# ---------------------------------------------------------------------------
+
+@test "GET / composes the Analyze fragment into the HTML shell" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dbxAnalyze()"* ]]
+  [[ "$output" == *"Per-table row count"* ]]
+}
+
+@test "POST /api/analyze returns parsed JSON from the fake dbx" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp"}' \
+    "$(api /api/analyze)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"engine\": \"mysql\""* ]]
+  [[ "$output" == *"\"tables\": 2"* ]]
+  [[ "$output" == *"\"rows\": 1200"* ]]
+  [[ "$output" == *"\"name\": \"users\""* ]]
+  [[ "$output" == *"\"excluded\": true"* ]]
+  [[ "$output" == *"\"columns\": ["* ]]
+}
+
+@test "POST /api/analyze rejects bad host shape" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d '{"host":"../etc","database":"myapp"}' \
+    "$(api /api/analyze)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/analyze rejects bad database shape" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"bad;rm"}' \
+    "$(api /api/analyze)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+}
+
+@test "POST /api/analyze rejects non-boolean no_pii_scan" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp","no_pii_scan":"yes"}' \
+    "$(api /api/analyze)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no_pii_scan must be a boolean"* ]]
+}
+
+@test "POST /api/analyze surfaces CLI failure as 502 with stderr" {
+  # Relaunch the server with DBX_FAKE_ANALYZE_FAIL=1 so the fake exits 1
+  # with a stderr message. The handler should return 502 and include the
+  # stderr in the body so the wizard UI can display it.
+  kill "$WIZ_PID" 2>/dev/null
+  wait "$WIZ_PID" 2>/dev/null || true
+  DBX_FAKE_ANALYZE_FAIL=1 python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
+    --port "$WIZ_PORT" --token "$WIZ_TOKEN" \
+    --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
+    --form-fragment    "$WIZ_REPO_ROOT/lib/wizard-form.html" \
+    --backups-fragment "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
+    --backup-fragment  "$WIZ_REPO_ROOT/lib/wizard-backup.html" \
+    --restore-fragment "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
+    --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
+    --runs-fragment    "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
+    --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
+    --vault-fragment   "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
+    --storage-fragment "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
+    --scrub-fragment   "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --analyze-fragment "$WIZ_REPO_ROOT/lib/wizard-analyze.html" \
+    --config-path      "$WIZ_SCRATCH/config.json" \
+    --data-dir         "$WIZ_SCRATCH/data" \
+    --audit-dir        "$WIZ_AUDIT_DIR" \
+    --dbx-bin          "$WIZ_SCRATCH/dbx" \
+    --lib-dir          "$WIZ_REPO_ROOT/lib" \
+    --done-marker      "$WIZ_DONE" \
+    >"$WIZ_SCRATCH/server.log" 2>&1 &
+  WIZ_PID=$!
+  for _ in $(seq 1 20); do
+    if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"; then break; fi
+    sleep 0.1
+  done
+
+  run curl -s -o /tmp/wiz_analyze_fail_body -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"host":"prod","database":"myapp"}' \
+    "$(api /api/analyze)"
+  [ "$status" -eq 0 ]
+  [ "$output" = "502" ]
+  run cat /tmp/wiz_analyze_fail_body
+  [[ "$output" == *"dbx analyze failed"* ]]
+  [[ "$output" == *"connection refused"* ]]
+  rm -f /tmp/wiz_analyze_fail_body
 }
