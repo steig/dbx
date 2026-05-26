@@ -856,6 +856,7 @@
       saving: false,
       savedMsg: '',
       savedErr: false,
+      _savedSnapshot: '',  // form state as of last load/save; drives dirty check
 
       hosts: [emptyHost()],
       storage: { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' },
@@ -876,7 +877,17 @@
         // CLI mode: pre-populate from the user's existing ~/.config/dbx/config.json
         // via the wizard server. Static mode (mkdocs embed) has no backend, so
         // we leave the form blank.
-        if (this.mode === 'cli') this.loadCurrentConfig();
+        if (this.mode === 'cli') {
+          this.loadCurrentConfig();
+          // Views are x-show, so this component inits once. The Analyze view's
+          // "Save exclusions" (and any external edit) write the same
+          // config.json, so re-read when the user switches back to Config —
+          // but only when the form has no unsaved edits, so we never clobber
+          // in-progress work.
+          this.$watch('$store.dbx.view', (v) => {
+            if (v === 'config') this.maybeReloadOnView();
+          });
+        }
       },
 
       async loadCurrentConfig() {
@@ -884,12 +895,25 @@
           const params = new URLSearchParams(window.location.search);
           const token = params.get('token') || '';
           const r = await fetch(`/api/config?token=${encodeURIComponent(token)}`);
-          if (!r.ok) return;
-          const cfg = await r.json();
-          if (cfg && typeof cfg === 'object' && Object.keys(cfg).length > 0) {
-            this.loadFromConfig(cfg);
+          if (r.ok) {
+            const cfg = await r.json();
+            if (cfg && typeof cfg === 'object' && Object.keys(cfg).length > 0) {
+              this.loadFromConfig(cfg);
+            }
           }
         } catch (_) { /* fall back to blank form */ }
+        // Baseline for dirty detection: the form state right after a (re)load.
+        this._savedSnapshot = this.previewJson();
+      },
+
+      // Re-read config.json when the user returns to the Config view, unless
+      // they have unsaved edits (current form differs from the last load/save
+      // snapshot). This surfaces exclude_data written by the Analyze view's
+      // "Save exclusions" and stops a stale Config save from clobbering it.
+      maybeReloadOnView() {
+        if (this.mode !== 'cli') return;
+        if (this.previewJson() !== this._savedSnapshot) return; // unsaved edits — keep them
+        this.loadCurrentConfig();
       },
 
       // Inverse of buildConfig(). Populates form state from a config.json
@@ -1134,6 +1158,7 @@
               ? 'Saved! You can close this tab; the terminal will continue.'
               : 'Saved. Make more changes and Save again when ready.';
             this.savedErr = false;
+            this._savedSnapshot = this.previewJson();
           } else {
             this.savedMsg = 'Save failed (HTTP ' + r.status + '). Check the terminal.';
             this.savedErr = true;

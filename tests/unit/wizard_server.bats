@@ -229,6 +229,9 @@ api() { echo "http://127.0.0.1:$WIZ_PORT$1?token=$WIZ_TOKEN"; }
   [[ "$output" == *"dbxBackups()"* ]]      # backups fragment was composed in
   [[ "$output" == *"dbxRestore()"* ]]      # restore fragment was composed in
   [[ "$output" == *"dbxBuilder()"* ]]      # config form fragment was composed in
+  # The Config form re-reads config.json on view-switch so it reflects
+  # exclude_data written by the Analyze view (and external edits).
+  [[ "$output" == *"maybeReloadOnView"* ]]
 }
 
 @test "GET / with bad token returns 403" {
