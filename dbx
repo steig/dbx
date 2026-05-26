@@ -1104,7 +1104,7 @@ cmd_vault() {
       audit_vault "set" "encryption_key" "success"
       log_success "Encryption key stored"
       log_info "Enable encryption in config: dbx config edit"
-      log_info "Set \"encryption\": true in defaults section"
+      log_info "Set \"encryption_type\": \"gpg\" in defaults section"
       ;;
 
     delete-encryption-key)
@@ -1190,7 +1190,7 @@ cmd_config() {
     "parallel_jobs": 4,
     "keep_backups": 10,
     "definer_handling": "strip",
-    "encryption": false
+    "encryption_type": "none"
   }
 }
 EOF

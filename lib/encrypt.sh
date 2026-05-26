@@ -120,7 +120,7 @@ age_encrypt_stream() {
   recipients_file=$(get_age_recipients_file)
 
   if [[ ! -f "$recipients_file" ]]; then
-    die "Age recipients file not found: $recipients_file. Run: dbx config init-encryption"
+    die "Age recipients file not found: $recipients_file. Run: dbx vault init-age"
   fi
 
   age -R "$recipients_file" -

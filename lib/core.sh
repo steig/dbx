@@ -559,12 +559,6 @@ delete_encryption_key() {
   keychain_delete "$ENCRYPTION_KEY_ACCOUNT"
 }
 
-is_encryption_enabled() {
-  local enabled
-  enabled=$(get_config_value ".defaults.encryption")
-  [[ "$enabled" == "true" ]]
-}
-
 require_gpg() {
   command -v gpg &>/dev/null || die "gpg is required for encryption but not installed"
 }
