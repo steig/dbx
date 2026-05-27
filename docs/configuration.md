@@ -38,7 +38,12 @@ Validate after edits with `dbx config validate`.
     "compression_level": 3,
     "keep_backups": 10,
     "auto_upload": false,
-    "definer_handling": "strip"
+    "definer_handling": "strip",
+    "build_missing_images": true,
+    "extension_packages": {
+      "pg_cron": { "package": "cron", "preload": "pg_cron" },
+      "my_ext": "myext"
+    }
   },
   "hosts": {
     "production": {
@@ -81,6 +86,15 @@ Validate after edits with `dbx config validate`.
   }
 }
 ```
+
+## Image-build defaults
+
+These control [build-on-demand custom Postgres images](backup.md#build-on-demand-custom-images) for third-party extensions.
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `build_missing_images` | bool | Default `true`. When a restore needs a custom image that isn't built yet, build it inline. Set `false` (or `DBX_BUILD_MISSING_IMAGES=false`) to instead fail with a `dbx build-image` hint — useful to keep scheduled jobs from ever blocking on a build. |
+| `extension_packages` | object | Escape hatch extending the built-in extension registry. Key = extension name. Value = the PGDG package suffix string (`postgresql-<major>-<suffix>`), or an object `{ "package": "<suffix>", "preload": "<lib>" }` when the extension needs `shared_preload_libraries`. Entries override built-ins of the same name. |
 
 ## Per-host options
 

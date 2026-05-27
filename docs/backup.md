@@ -39,10 +39,11 @@ The backup container (`postgres-dbx` or `mysql-dbx`) is chosen from the source's
 
 | Source | Image |
 |--------|-------|
-| Postgres (no listed extensions) | `postgres:<major>-alpine` |
+| Postgres (no extensions, or only bundled contrib like `btree_gin`, `pg_trgm`, `hstore`) | `postgres:<major>-alpine` |
 | Postgres + `vector` | `pgvector/pgvector:pg<major>` |
 | Postgres + `postgis` | `postgis/postgis:<major>-3.5` |
 | Postgres + `timescaledb` | `timescale/timescaledb:latest-pg<major>` |
+| Postgres + a buildable third-party extension (`pg_partman`, `pg_cron`, …) | `dbx-pg<major>:<hash>` (built on demand, see below) |
 | MySQL | `mysql:<major>.<minor>` |
 | MariaDB | `mariadb:<major>.<minor>` |
 
@@ -52,10 +53,32 @@ Override with `DBX_POSTGRES_IMAGE` / `DBX_MYSQL_IMAGE` or `defaults.postgres_ima
 export DBX_POSTGRES_IMAGE='myregistry/pg-everything:{major}'
 ```
 
+### Build-on-demand custom images
+
+When a backup uses a third-party extension that has no off-the-shelf image
+(`pg_partman`, `pg_cron`, `pgaudit`, …), dbx builds a small custom image on the
+fly: `FROM postgres:<major>` (Debian) + the extension's PGDG package, tagged
+`dbx-pg<major>:<hash>` where the hash is derived from the exact extension set.
+The build runs **once** and is cached by tag, so subsequent restores of the same
+extension set are network-free and reproducible. Extensions that need
+`shared_preload_libraries` (e.g. `pg_cron`) get it baked into the image.
+
+- **Toggle:** auto-build is on by default. Disable with
+  `defaults.build_missing_images: false` or `DBX_BUILD_MISSING_IMAGES=false`;
+  dbx then fails with an instruction to pre-build instead of building inline.
+- **Pre-warm** (recommended for scheduled jobs, so a restore never blocks on a
+  build): `dbx build-image --from-backup <file>` or
+  `dbx build-image pg<MAJOR> --extensions pg_partman,pg_cron`.
+- **Built-in registry:** `pg_partman`, `pg_cron`, `pgaudit`, `hypopg`,
+  `pg_repack`, `pg_hint_plan`, `hll`. Add more via `defaults.extension_packages`
+  (see [configuration](configuration.md)) — the key is the extension name, the
+  value is the PGDG package suffix (`postgresql-<major>-<suffix>`).
+
 ### Limitations
 
 - Postgres backups use the existing `postgres-dbx` client image. If you back up from a source whose major version is *newer* than `postgres-dbx`'s image, `pg_dump` will fail (older clients can't dump newer servers). Workaround: set `DBX_POSTGRES_IMAGE='postgres:N-alpine'` to the source version and let dbx recreate the container.
-- The extension allowlist is intentionally narrow. For anything else (`pg_partman`, `pg_cron`, Citus, `pgaudit`, etc.), set `DBX_POSTGRES_IMAGE` explicitly.
+- An extension that dbx neither bundles, has a specialized image for, nor can build (not in the registry or `defaults.extension_packages`) still fails with a hint — add it to `defaults.extension_packages` or set `DBX_POSTGRES_IMAGE` explicitly.
+- dbx won't auto-combine a specialized extension (`vector`/`postgis`/`timescaledb`) with a build-on-demand one in a single image. Build one image with both and point `DBX_POSTGRES_IMAGE` at it.
 
 ## Multi-database backup
 

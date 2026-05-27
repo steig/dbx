@@ -221,6 +221,12 @@ assert_line_eq() {
   assert_line_eq "--older-than" "$result"
 }
 
+@test "dbx_complete build-image --<partial> returns build-image flags" {
+  result=$(dbx_complete build-image "--")
+  assert_line_eq "--from-backup" "$result"
+  assert_line_eq "--extensions"  "$result"
+}
+
 # ----------------------------------------------------------------------------
 # Sub-action completion (config, schedule, scrub, storage, host, completion)
 # ----------------------------------------------------------------------------

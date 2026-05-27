@@ -204,11 +204,69 @@ pg_backup() {
 # PostgreSQL Restore
 # ============================================================================
 
+# Read the config escape hatch (defaults.extension_packages) into the newline
+# "ext:suffix:preload" form that resolve_extension_registry/resolve_ext_tuples
+# expect. Each entry may be a string ("suffix") or an object {package,preload}.
+pg_config_extension_registry() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  jq -r '
+    .defaults.extension_packages // {} | to_entries[] |
+    .key as $k |
+    (if (.value | type) == "string"
+       then {package: .value, preload: ""}
+       else {package: (.value.package // ""), preload: (.value.preload // "")}
+     end) as $v |
+    "\($k):\($v.package):\($v.preload)"
+  ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# Build a dbx custom postgres image from the resolved extension tuples.
+# Args: $1=major  $2=tag  $3=sorted resolved tuples (newline list)
+pg_build_custom_image() {
+  local major="$1" tag="$2" resolved="$3"
+  local tmp_root="${DATA_DIR:-/tmp}/.tmp"
+  mkdir -p "$tmp_root" 2>/dev/null || tmp_root="/tmp"
+  local build_dir
+  build_dir="$(mktemp -d "$tmp_root/dbx-build.XXXXXX")" || return 1
+  generate_pg_dockerfile "$major" "$resolved" > "$build_dir/Dockerfile"
+  if docker build -t "$tag" "$build_dir"; then
+    rm -rf "$build_dir"
+    return 0
+  fi
+  log_error "Failed to build custom image '$tag'."
+  log_error "Dockerfile kept for inspection: $build_dir/Dockerfile"
+  return 1
+}
+
+# Ensure a dbx custom image exists locally, building it on demand unless that's
+# disabled. Args: $1=major  $2=tag  $3=sorted resolved tuples (newline list)
+pg_ensure_custom_image() {
+  local major="$1" tag="$2" resolved="$3"
+  if docker image inspect "$tag" >/dev/null 2>&1; then
+    return 0  # already built; cached
+  fi
+
+  local build_enabled="${DBX_BUILD_MISSING_IMAGES:-}"
+  [[ -z "$build_enabled" ]] && build_enabled="$(get_config_value '.defaults.build_missing_images' 2>/dev/null)"
+  [[ -z "$build_enabled" ]] && build_enabled="true"
+  if [[ "$build_enabled" == "false" ]]; then
+    log_error "Custom image '$tag' for this backup's extensions is not built, and auto-build is disabled."
+    log_error "Pre-build it with:  dbx build-image --from-backup <backup-file>"
+    return 1
+  fi
+
+  local exts
+  exts=$(printf '%s\n' "$resolved" | cut -d: -f1 | tr '\n' ' ')
+  log_step "Building custom postgres image (one-time) for extensions: ${exts}"
+  pg_build_custom_image "$major" "$tag" "$resolved"
+}
+
 # Ensure POSTGRES_CONTAINER is running an image compatible with $backup_file.
 # Reads source_major_version + source_extensions from the backup's
 # .meta.json (handles .zst / .age / .gpg suffix layering); falls back to
 # the default image when meta is missing (legacy backups). Honors
-# DBX_POSTGRES_IMAGE override and defaults.postgres_image config.
+# DBX_POSTGRES_IMAGE override and defaults.postgres_image config. For a
+# buildable third-party extension set, builds (and caches) a custom image.
 # Returns non-zero on image pick failure or container-state conflict.
 # Args: $1=backup file path
 pg_ensure_image_for_backup() {
@@ -229,8 +287,19 @@ pg_ensure_image_for_backup() {
   fi
 
   override="${DBX_POSTGRES_IMAGE:-$(get_config_value '.defaults.postgres_image' 2>/dev/null || echo '')}"
-  if ! desired_image=$(pick_postgres_image "$src_major" "$src_exts" "$override"); then
+  local extra
+  extra="$(pg_config_extension_registry)"
+  if ! desired_image=$(pick_postgres_image "$src_major" "$src_exts" "$override" "$extra"); then
     return 1
+  fi
+
+  # A dbx-pg* tag means a custom image must exist before we can run it.
+  if [[ "$desired_image" == dbx-pg* ]]; then
+    local resolved
+    resolved="$(resolve_ext_tuples "$src_exts" "$extra")"
+    if ! pg_ensure_custom_image "$(normalize_pg_major "$src_major")" "$desired_image" "$resolved"; then
+      return 1
+    fi
   fi
 
   local recreate="${DBX_RECREATE_CONTAINER:-false}"

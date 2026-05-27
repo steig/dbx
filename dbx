@@ -1190,7 +1190,8 @@ cmd_config() {
     "parallel_jobs": 4,
     "keep_backups": 10,
     "definer_handling": "strip",
-    "encryption_type": "none"
+    "encryption_type": "none",
+    "build_missing_images": true
   }
 }
 EOF
@@ -2826,6 +2827,59 @@ cmd_host() {
   esac
 }
 
+# Pre-build (or verify) the custom postgres image a backup's third-party
+# extensions require. Lets scheduled-job operators warm the cache so a restore
+# never triggers a slow build inside the job.
+#   dbx build-image --from-backup <file>
+#   dbx build-image pg<MAJOR> --extensions ext1,ext2
+cmd_build_image() {
+  local major="" exts="" from_backup=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from-backup) from_backup="${2:-}"; shift 2 ;;
+      --extensions)  exts="${2//,/ }"; shift 2 ;;
+      pg[0-9]*)      major="${1#pg}"; shift ;;
+      -h|--help)
+        echo "Usage: dbx build-image (--from-backup <file> | pg<MAJOR> --extensions ext1,ext2)"
+        return 0 ;;
+      *) die "Unknown build-image argument: $1" ;;
+    esac
+  done
+
+  if [[ -n "$from_backup" ]]; then
+    local meta_file="${from_backup%.zst}.meta.json"
+    [[ ! -f "$meta_file" ]] && meta_file="${from_backup}.meta.json"
+    [[ ! -f "$meta_file" ]] && meta_file="${from_backup%.age}.meta.json"
+    [[ ! -f "$meta_file" ]] && meta_file="${from_backup%.gpg}.meta.json"
+    [[ -f "$meta_file" ]] || die "No .meta.json found for: $from_backup"
+    major=$(jq -r '.source_major_version // "unknown"' "$meta_file")
+    exts=$(jq -r '.source_extensions // [] | join(" ")' "$meta_file")
+  fi
+
+  [[ -z "$exts" ]] && die "No extensions given (use --extensions ext1,ext2 or --from-backup <file>)"
+  major=$(normalize_pg_major "$major")
+
+  local extra desired
+  extra="$(pg_config_extension_registry)"
+  desired=$(pick_postgres_image "$major" "$exts" "" "$extra") || return 1
+
+  if [[ "$desired" != dbx-pg* ]]; then
+    log_info "These extensions need no custom image — a restore would use: $desired"
+    return 0
+  fi
+
+  if docker image inspect "$desired" >/dev/null 2>&1; then
+    log_success "Custom image already built: $desired"
+    return 0
+  fi
+
+  local resolved names
+  resolved="$(resolve_ext_tuples "$exts" "$extra")"
+  names=$(printf '%s\n' "$resolved" | cut -d: -f1 | tr '\n' ' ')
+  log_step "Building $desired for extensions: ${names}"
+  pg_build_custom_image "$major" "$desired" "$resolved" && log_success "Built $desired"
+}
+
 cmd_help() {
   cat <<EOF
 ${BOLD}dbx${NC} - Database backup and restore utility
@@ -2841,6 +2895,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}clean${NC} [--keep N|--older-than D]  Prune old backups
   ${CYAN}query${NC} <host> [db]             Interactive DB shell
   ${CYAN}analyze${NC} <host> <db>           Inspect tables & build exclusion list
+  ${CYAN}build-image${NC} [--from-backup F] Pre-build a custom PG image for third-party extensions
   ${CYAN}test${NC} <host>                   Test connection to a host
 
   ${CYAN}vault${NC}                         Manage credentials & encryption keys
@@ -2893,6 +2948,9 @@ main() {
       ;;
     analyze|stats)
       cmd_analyze "$@"
+      ;;
+    build-image)
+      cmd_build_image "$@"
       ;;
     query|q|shell)
       cmd_query "$@"

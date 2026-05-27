@@ -61,6 +61,10 @@ Pick tables to exclude from backups using
 See
 .BR dbx-analyze (1).
 .TP
+.B build-image
+Pre-build a custom Postgres image for a backup's third-party extensions. See
+.BR dbx-build-image (1).
+.TP
 .B test
 Test connectivity to a host. See
 .BR dbx-test (1).
@@ -191,6 +195,7 @@ Audit log of completed backups and restores (used for ETA baselines).
 .BR dbx-query (1),
 .BR dbx-test (1),
 .BR dbx-analyze (1),
+.BR dbx-build-image (1),
 .BR dbx-host (1),
 .BR dbx-config (1),
 .BR dbx-vault (1),

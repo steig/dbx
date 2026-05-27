@@ -96,6 +96,17 @@ in
 Override the
 .B postgres-dbx
 container image.
+.TP
+.B DBX_BUILD_MISSING_IMAGES
+Set to
+.I false
+to disable build-on-demand custom images for third-party extensions
+(overrides
+.BR defaults.build_missing_images ).
+A restore that needs an unbuilt image then fails with a
+.B dbx build-image
+hint instead of building inline. See
+.BR dbx-build-image (1).
 .SH FILES
 .TP
 .I ~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst

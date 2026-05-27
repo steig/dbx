@@ -4,6 +4,14 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **Build-on-demand custom Postgres images for third-party extensions.** A backup that uses an extension with no off-the-shelf image (`pg_partman`, `pg_cron`, `pgaudit`, …) no longer hard-fails at restore. dbx now builds a small image on demand — `FROM postgres:<major>` (Debian) + the extension's PGDG package — tagged `dbx-pg<major>:<hash>` keyed by the exact extension set, builds it once, and caches it by tag so subsequent restores are network-free and reproducible. Extensions needing `shared_preload_libraries` (e.g. `pg_cron`) get it baked into the image. Auto-build is on by default (`defaults.build_missing_images`, `DBX_BUILD_MISSING_IMAGES`); the built-in registry is extensible via `defaults.extension_packages`. New `dbx build-image` command (`--from-backup <file>` or `pg<MAJOR> --extensions a,b,c`) pre-warms the cache so scheduled jobs never block on a build.
+
+### Fixed
+
+- **Restore no longer fails on bundled contrib extensions.** `pick_postgres_image` treated every extension outside `vector`/`postgis`/`timescaledb` as "no known image," so a backup using a stock contrib module (`btree_gin`, `btree_gist`, `pg_trgm`, `hstore`, `citext`, `pgcrypto`, `uuid-ossp`, …) was blocked even though those ship in `postgres:<major>-alpine`'s `postgresql-contrib`. Contrib modules are now recognized as satisfied by the stock image; only genuinely third-party, unmapped extensions fail (and most of those are now buildable — see above).
+
 ## [0.19.4] - 2026-05-26
 
 ### Documentation

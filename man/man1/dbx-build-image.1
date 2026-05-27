@@ -1,0 +1,86 @@
+.TH DBX-BUILD-IMAGE 1 "2026-05-26" "dbx 0.19.4" "User Commands"
+.SH NAME
+dbx-build-image \- pre-build a custom Postgres image for third-party extensions
+.SH SYNOPSIS
+.B dbx build-image
+.B \-\-from\-backup
+.IR file
+.br
+.B dbx build-image
+.BI pg MAJOR
+.B \-\-extensions
+.IR ext1,ext2,...
+.SH DESCRIPTION
+When a backup uses a third-party Postgres extension that has no off-the-shelf
+image (for example
+.IR pg_partman ", " pg_cron ", or " pgaudit ),
+.B dbx
+builds a small custom image on demand:
+.B FROM postgres:<major>
+(Debian) plus the extension's PGDG package, tagged
+.IR dbx-pg<major>:<hash> ,
+where the hash is derived from the exact extension set. The build runs once and
+is cached by tag, so later restores of the same extension set are network-free
+and reproducible. Extensions that require
+.B shared_preload_libraries
+(such as
+.IR pg_cron )
+get it baked into the image.
+.PP
+A restore triggers this build automatically. Use
+.B dbx build-image
+to warm the cache ahead of time \(em recommended for scheduled jobs, so a
+restore never blocks on a build.
+.PP
+The set of buildable extensions comes from a built-in registry
+.RB ( pg_partman ", " pg_cron ", " pgaudit ", " hypopg ", " pg_repack ", "
+.IR pg_hint_plan ", " hll )
+merged with the
+.B defaults.extension_packages
+config escape hatch. See
+.BR dbx-config (1).
+.SH OPTIONS
+.TP
+.BI \-\-from\-backup " file"
+Read the required major version and extension set from the backup's
+.I .meta.json
+sidecar and build whatever image it needs.
+.TP
+.BI pg MAJOR
+Target Postgres major version (e.g.
+.IR pg17 ).
+Used with
+.BR \-\-extensions .
+.TP
+.BI \-\-extensions " list"
+Comma-separated extension names to include.
+.SH EXAMPLES
+.PP
+Warm the cache for a specific backup before a scheduled restore:
+.PP
+.RS
+.nf
+dbx build-image --from-backup ~/.data/dbx/prod/app/app_20260526.sql.zst
+.fi
+.RE
+.PP
+Build a PG 17 image with two extensions explicitly:
+.PP
+.RS
+.nf
+dbx build-image pg17 --extensions pg_partman,pg_cron
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B DBX_BUILD_MISSING_IMAGES
+Set to
+.I false
+to disable build-on-demand during restores (overrides
+.BR defaults.build_missing_images ).
+Does not affect this command, which always builds when invoked explicitly.
+.SH "SEE ALSO"
+.BR dbx (1),
+.BR dbx-backup (1),
+.BR dbx-restore (1),
+.BR dbx-config (1).

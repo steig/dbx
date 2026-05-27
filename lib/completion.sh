@@ -31,6 +31,7 @@ restore
 verify
 query
 analyze
+build-image
 test
 host
 wizard
@@ -82,6 +83,8 @@ _dbx_flags() {
         --from-remote --recreate-container --keep-download ;;
     clean)
       printf '%s\n' --keep --dry-run --older-than ;;
+    build-image)
+      printf '%s\n' --from-backup --extensions ;;
     schedule)
       # --dry-run is currently only valid on `schedule sync`, but
       # offering it under the parent is fine — bash completion is a
