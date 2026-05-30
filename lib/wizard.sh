@@ -276,3 +276,94 @@ EOF
   log_info "  • Validate config:  dbx config validate"
   log_info "  • Test connection:  dbx test <alias>"
 }
+
+# Persistent, network-reachable variant of the wizard for always-on hosting
+# (e.g. an LXC on a tailnet). Unlike `dbx wizard --remote` it binds a
+# configurable address (not just loopback) and never exits on save — it runs
+# in the foreground (exec) so a process manager like systemd owns its
+# lifecycle. Reuses the same wizard server; the only server-side differences
+# are the --host bind and the omitted --done-marker (which is what makes the
+# server stay up after a config save).
+cmd_serve() {
+  local bind="${DBX_SERVE_BIND:-0.0.0.0}"
+  local port="${DBX_SERVE_PORT:-8080}"
+  local token="${DBX_SERVE_TOKEN:-}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --bind)    bind="${2:?--bind needs a value}"; shift 2 ;;
+      --bind=*)  bind="${1#--bind=}"; shift ;;
+      --port)    port="${2:?--port needs a value}"; shift 2 ;;
+      --port=*)  port="${1#--port=}"; shift ;;
+      --token)   token="${2:?--token needs a value}"; shift 2 ;;
+      --token=*) token="${1#--token=}"; shift ;;
+      -h|--help)
+        cat <<EOF
+Usage: dbx serve [--bind ADDR] [--port N] [--token TOKEN]
+
+Runs the wizard GUI as a persistent, network-reachable service (it does NOT
+exit after a config save). Intended to run under a process manager such as
+systemd on an always-on host. Access is gated by a URL token.
+
+Flags:
+  --bind ADDR   Bind address (default: 0.0.0.0 — reachable on all interfaces).
+  --port N      Listen port (default: 8080).
+  --token TOKEN Fixed access token (default: a random one, printed at startup).
+
+Env equivalents: DBX_SERVE_BIND, DBX_SERVE_PORT, DBX_SERVE_TOKEN.
+
+Access control is the URL token plus your network (e.g. a tailnet). Binding
+0.0.0.0 exposes it on every interface — only do so on a trusted network.
+EOF
+        return 0
+        ;;
+      *) die "Unknown option: $1 (see: dbx serve --help)" ;;
+    esac
+  done
+
+  [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) \
+    || die "Invalid --port value: $port"
+  command -v python3 >/dev/null 2>&1 || die "dbx serve requires python3 on the host."
+  require_jq
+  token="${token:-$(wizard_make_token)}"
+
+  local server_script="$LIB_DIR/wizard-server.py"
+  local html="$LIB_DIR/wizard.html"
+  [[ -f "$server_script" ]] || die "Wizard server missing: $server_script (re-run install.sh to repair)"
+  [[ -f "$html"          ]] || die "Wizard HTML missing: $html (re-run install.sh to repair)"
+
+  # Build the fragment args from the canonical fragment list. The fragment
+  # basename matches the flag prefix (form -> --form-fragment, etc.).
+  local -a frag_args=()
+  local frag frag_path
+  for frag in form backups backup restore schedule runs dashboard vault storage scrub analyze; do
+    frag_path="$LIB_DIR/wizard-${frag}.html"
+    [[ -f "$frag_path" ]] || die "Wizard fragment missing: $frag_path (re-run install.sh to repair)"
+    frag_args+=("--${frag}-fragment" "$frag_path")
+  done
+
+  local audit_dir dbx_bin
+  audit_dir="${AUDIT_LOG_DIR:-${DBX_AUDIT_DIR:-$HOME/.local/share/dbx}}"
+  dbx_bin="$SCRIPT_DIR/dbx"
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+
+  log_step "dbx serve — persistent wizard"
+  log_info "  URL:    http://${bind}:${port}/?token=${token}"
+  log_info "  Config: $CONFIG_FILE"
+  log_info "  Stays up after saves; stop with Ctrl-C or 'systemctl stop'."
+  [[ "$bind" == "0.0.0.0" ]] && \
+    log_warn "Binding 0.0.0.0 — reachable on all interfaces; rely on your network (e.g. tailnet) + the token for access control."
+
+  # exec: the python server becomes the foreground process so systemd (or any
+  # supervisor) tracks and signals it directly. No --done-marker => persistent.
+  exec python3 "$server_script" \
+    --host "$bind" \
+    --port "$port" \
+    --token "$token" \
+    --html "$html" \
+    "${frag_args[@]}" \
+    --config-path "$CONFIG_FILE" \
+    --data-dir "$DATA_DIR" \
+    --audit-dir "$audit_dir" \
+    --dbx-bin "$dbx_bin" \
+    --lib-dir "$LIB_DIR"
+}

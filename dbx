@@ -2940,6 +2940,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}config${NC}                        Manage configuration
   ${CYAN}host add${NC}                      Interactively add a backup host
   ${CYAN}wizard${NC}                        Browser-based config wizard
+  ${CYAN}serve${NC}                         Run the wizard GUI as a persistent service (dbx serve --help)
   ${CYAN}update${NC}                        Upgrade dbx to the latest release
   ${CYAN}completion${NC} <shell>            Print shell completion script (bash|zsh|fish)
 
@@ -2979,6 +2980,9 @@ main() {
       ;;
     wizard)
       cmd_wizard "$@"
+      ;;
+    serve)
+      cmd_serve "$@"
       ;;
     analyze|stats)
       cmd_analyze "$@"
