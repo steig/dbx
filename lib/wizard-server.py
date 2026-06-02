@@ -1126,7 +1126,10 @@ printf '__CFG__\n%s\n__INST__\n%s\n__PLAN__\n%s\n__END__\n' "$CFG" "$INST" "$PLA
             rows.append(row)
         return rows
 
-    declarative = parse_tsv_rows(sections["__CFG__"], ["host", "database", "when"])
+    # Source the declarative list straight from config.json (full fidelity:
+    # includes disabled rows + enabled/keep), since schedule_config_read now
+    # filters disabled rows out for the sync side.
+    declarative = [dict(s) for s in _read_schedules_block(config_path) if isinstance(s, dict)]
 
     # Enrich declarative rows so the Schedule view shows real "Next run" /
     # "Last run" instead of placeholders: next_at is computed from the `when`
@@ -1185,7 +1188,21 @@ def write_schedules_block(config_path: str, schedules):
             return False, f"schedules[{i}].database must match the db-name shape"
         if not isinstance(when, str) or not (1 <= len(when) <= 128):
             return False, f"schedules[{i}].when must be a string (1-128 chars)"
-        cleaned.append({"host": host, "database": database, "when": when})
+        row: dict = {"host": host, "database": database, "when": when}
+        # enabled: persist only when explicitly disabled (absent == enabled),
+        # so configs that never used the field stay byte-identical.
+        enabled = s.get("enabled")
+        if enabled is False:
+            row["enabled"] = False
+        elif enabled not in (None, True):
+            return False, f"schedules[{i}].enabled must be a boolean"
+        # keep: optional positive retention count applied by `schedule run-job`.
+        keep = s.get("keep")
+        if keep not in (None, ""):
+            if not isinstance(keep, int) or isinstance(keep, bool) or keep < 1 or keep > 100000:
+                return False, f"schedules[{i}].keep must be a positive integer"
+            row["keep"] = keep
+        cleaned.append(row)
 
     # Read existing config, replace schedules block, write back atomically.
     try:

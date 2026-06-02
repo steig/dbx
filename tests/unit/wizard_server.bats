@@ -544,6 +544,32 @@ JSON
   [[ "$output" == *"\"postgres\""* ]]
 }
 
+@test "POST /api/schedules persists enabled + keep, and GET reflects them" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres" } }, "schedules": [] }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"schedules":[{"host":"prod","database":"myapp","when":"daily@5","enabled":false,"keep":7}]}' \
+    "$(api /api/schedules)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\": true"* ]]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" == *"\"enabled\": false"* ]]
+  [[ "$output" == *"\"keep\": 7"* ]]
+  # GET surfaces the disabled row in declarative (read straight from config).
+  run curl -s "$(api /api/schedules)"
+  [[ "$output" == *"\"enabled\": false"* ]]
+  [[ "$output" == *"\"keep\": 7"* ]]
+}
+
+@test "POST /api/schedules rejects a non-positive keep" {
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"schedules":[{"host":"prod","database":"x","when":"daily","keep":0}]}' \
+    "$(api /api/schedules)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"keep must be a positive integer"* ]]
+}
+
 @test "POST /api/schedules rejects shell-metachar host" {
   run curl -s -X POST -H "Content-Type: application/json" \
     -d '{"schedules":[{"host":"bad;rm","database":"x","when":"daily"}]}' \

@@ -879,6 +879,7 @@ cmd_clean() {
   local dry_run=false
   local older_than_days=""
   local keep_explicit=false
+  local only_host="" only_db=""   # optional positional scope: clean just one host[/db]
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -899,6 +900,10 @@ cmd_clean() {
         die "Unknown option: $1"
         ;;
       *)
+        # Optional positional scope: first = host, second = database.
+        if [[ -z "$only_host" ]]; then only_host="$1"
+        elif [[ -z "$only_db" ]]; then only_db="$1"
+        else die "Unexpected argument: $1 (usage: dbx clean [host] [database] [--keep N] [--older-than D])"; fi
         shift
         ;;
     esac
@@ -925,8 +930,10 @@ cmd_clean() {
 
   for host_dir in "$DATA_DIR"/*/; do
     [[ ! -d "$host_dir" ]] && continue
+    [[ -n "$only_host" && "$(basename "$host_dir")" != "$only_host" ]] && continue
     for db_dir in "$host_dir"/*/; do
       [[ ! -d "$db_dir" ]] && continue
+      [[ -n "$only_db" && "$(basename "$db_dir")" != "$only_db" ]] && continue
 
       local backups=()
       while IFS= read -r f; do
@@ -1784,6 +1791,27 @@ cmd_schedule() {
       schedule_run "$host" "$database"
       ;;
 
+    run-job)
+      # Invoked by installed launchd/systemd units (not usually by hand):
+      # back up the pair, then — only if this schedule carries a `keep`
+      # value — prune that pair to it. No keep ⇒ identical to a plain backup.
+      local host="${1:-}"
+      local database="${2:-}"
+      [[ -z "$host" || -z "$database" ]] && die "Usage: dbx schedule run-job <host> <database>"
+      require_config
+      cmd_backup "$host" "$database"
+      local rc=$?
+      if [[ "$rc" -eq 0 ]]; then
+        local keep
+        keep=$(schedule_keep_for "$host" "$database")
+        if [[ -n "$keep" && "$keep" != "null" ]]; then
+          log_step "Applying schedule retention: keep $keep for $host/$database"
+          cmd_clean "$host" "$database" --keep "$keep"
+        fi
+      fi
+      return "$rc"
+      ;;
+
     list|ls|"")
       schedule_list
       ;;
@@ -1818,7 +1846,7 @@ cmd_schedule() {
       ;;
 
     *)
-      die "Unknown schedule action: $action (use: add, remove, list, run, sync)"
+      die "Unknown schedule action: $action (use: add, remove, list, run, run-job, sync)"
       ;;
   esac
 }

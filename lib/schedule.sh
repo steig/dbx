@@ -118,7 +118,8 @@ launchd_create() {
     <key>ProgramArguments</key>
     <array>
         <string>$dbx_path</string>
-        <string>backup</string>
+        <string>schedule</string>
+        <string>run-job</string>
         <string>$host</string>
         <string>$database</string>
     </array>
@@ -303,7 +304,7 @@ Description=DBX backup: $database@$host
 
 [Service]
 Type=oneshot
-ExecStart=$dbx_path backup $host $database
+ExecStart=$dbx_path schedule run-job $host $database
 StandardOutput=append:$HOME/.local/share/dbx/logs/${job_name}.log
 StandardError=append:$HOME/.local/share/dbx/logs/${job_name}.error.log
 
@@ -402,9 +403,23 @@ systemd_list() {
 # Returns 0 with no output if `.schedules` is missing or empty.
 schedule_config_read() {
   [[ -f "$CONFIG_FILE" ]] || return 0
+  # Disabled schedules (enabled:false) are intentionally excluded so the sync
+  # plan treats them as "not desired" — their installed unit then shows as an
+  # orphan. The wizard reads enabled/keep straight from config.json for
+  # display; only the sync side filters here.
   jq -r '
-    (.schedules // []) | .[] |
+    (.schedules // []) | .[] | select(.enabled != false) |
     [.host, .database, .when] | @tsv
+  ' "$CONFIG_FILE" 2>/dev/null
+}
+
+# Echo the `keep` retention value for a host/database schedule, or empty if it
+# has none. Used by `dbx schedule run-job` to prune that pair after a backup.
+schedule_keep_for() {
+  local host="$1" database="$2"
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  jq -r --arg h "$host" --arg d "$database" '
+    ((.schedules // []) | map(select(.host == $h and .database == $d)) | .[0] // {} | .keep) // empty
   ' "$CONFIG_FILE" 2>/dev/null
 }
 
