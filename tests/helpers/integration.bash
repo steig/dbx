@@ -25,12 +25,14 @@ dbx_run() {
 # real one) can report ready prematurely, after which the socket briefly
 # disappears — so verify an actual SELECT 1 rather than a ping, and fail loudly
 # instead of falling through to a confusing downstream "socket not found".
-# Args: container [user=postgres] [password=devpassword]
+# Args: container [user=postgres] [password=devpassword] [db=postgres]
+# (db matters when the container has a custom POSTGRES_USER/DB — psql defaults
+# to connecting to a database named after the user, which may not exist.)
 pg_wait_ready() {
-  local container="$1" user="${2:-postgres}" pass="${3:-devpassword}"
+  local container="$1" user="${2:-postgres}" pass="${3:-devpassword}" db="${4:-postgres}"
   for _ in $(seq 1 60); do
     if docker exec -e PGPASSWORD="$pass" "$container" \
-         psql -U "$user" -tAc 'SELECT 1' >/dev/null 2>&1; then
+         psql -U "$user" -d "$db" -tAc 'SELECT 1' >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
