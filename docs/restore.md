@@ -16,6 +16,8 @@ dbx restore production/myapp/latest
 
 Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
 
+If the default port is already taken on your host — e.g. you run a local Postgres on 5432 — set `DBX_POSTGRES_PORT` (or `DBX_MYSQL_PORT`) before the container is first created and connect on that port instead. The container-internal port is unchanged, so dbx's own backup/restore (which talk to the container over `docker exec`) work regardless.
+
 ## Naming
 
 If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>` until it finds an unused name in both PG and MySQL containers. Pass `--name X` to override.

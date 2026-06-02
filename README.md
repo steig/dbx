@@ -476,6 +476,8 @@ Every operation appends a JSON line to `~/.local/share/dbx/audit.log`:
 | `DBX_PG_PASSWORD` | `devpassword` | Initial password for auto-created PG container |
 | `DBX_MYSQL_PASSWORD` | `devpassword` | Initial password for auto-created MySQL container |
 | `DBX_BIND_ADDR` | `127.0.0.1` | Host bind address for the auto-managed containers |
+| `DBX_POSTGRES_PORT` | `5432` | Host port published for the auto-managed PG container (set this if a local Postgres already owns 5432) |
+| `DBX_MYSQL_PORT` | `3306` | Host port published for the auto-managed MySQL container (set this if a local MySQL already owns 3306) |
 | `DBX_POSTGRES_IMAGE` | unset | Override the auto-managed PG container image. Supports `{major}` / `{version}` template substitution. |
 | `DBX_MYSQL_IMAGE` | unset | Override the auto-managed MySQL container image. Supports `{major}`, `{minor}`, `{version}` template substitution. |
 | `DBX_RECREATE_CONTAINER` | unset | Set to `true` (or pass `--recreate-container`) to allow destroying user DBs when the container's version doesn't match the backup. |

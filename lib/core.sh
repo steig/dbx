@@ -75,6 +75,19 @@ require_docker() {
   command -v docker &>/dev/null || die "docker is required but not installed"
 }
 
+# Compose the docker `-p` publish mapping for an auto-managed dev container.
+# The host-side port is configurable (DBX_POSTGRES_PORT / DBX_MYSQL_PORT) so the
+# container can avoid clashing with a Postgres/MySQL already bound to the engine
+# default on the host (e.g. a local server on 5432). The container-internal port
+# is always the engine default. An empty/unset host port falls back to it.
+#   $1 = bind address (e.g. 127.0.0.1)
+#   $2 = host port (may be empty)
+#   $3 = container/internal port (the engine default)
+dbx_publish_arg() {
+  local bind_addr="$1" host_port="${2:-}" container_port="$3"
+  printf '%s:%s:%s' "$bind_addr" "${host_port:-$container_port}" "$container_port"
+}
+
 require_container() {
   local container="$1"
 
@@ -95,6 +108,8 @@ require_container() {
   # Bind to loopback by default so the auto-managed dev containers aren't
   # reachable from the LAN with the default password. Override with
   # DBX_BIND_ADDR (e.g. 0.0.0.0) if you have a reason to expose them.
+  # Override the published host port with DBX_POSTGRES_PORT / DBX_MYSQL_PORT
+  # if the engine default (5432 / 3306) is already taken on the host.
   # --add-host=host.docker.internal:host-gateway makes the host reachable
   # from inside the container at the same well-known name on macOS, Linux,
   # rootless docker, and podman — so SSH-tunnel mode can use one address
@@ -108,7 +123,7 @@ require_container() {
         -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
         -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
         -e LANG=C.UTF-8 \
-        -p "${bind_addr}:5432:5432" \
+        -p "$(dbx_publish_arg "$bind_addr" "${DBX_POSTGRES_PORT:-}" 5432)" \
         "${DBX_FORCE_IMAGE:-postgres:17-alpine}" >/dev/null
       unset DBX_FORCE_IMAGE
       # Wait for postgres to be ready
@@ -124,7 +139,7 @@ require_container() {
       docker run -d --name mysql-dbx \
         --add-host=host.docker.internal:host-gateway \
         -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
-        -p "${bind_addr}:3306:3306" \
+        -p "$(dbx_publish_arg "$bind_addr" "${DBX_MYSQL_PORT:-}" 3306)" \
         "${DBX_FORCE_IMAGE:-mysql:8.0}" >/dev/null
       unset DBX_FORCE_IMAGE
       # Wait for mysql to be ready

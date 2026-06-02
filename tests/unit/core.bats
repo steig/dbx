@@ -21,6 +21,26 @@ setup() {
 @test "human_size 1073741824 → 1GB" { [ "$(human_size 1073741824)" = "1GB" ]; }
 
 # ----------------------------------------------------------------------------
+# dbx_publish_arg — docker -p host:container mapping for managed containers
+# ----------------------------------------------------------------------------
+
+@test "dbx_publish_arg defaults host port to the container port when empty" {
+  [ "$(dbx_publish_arg 127.0.0.1 '' 5432)" = "127.0.0.1:5432:5432" ]
+}
+
+@test "dbx_publish_arg uses the override host port when provided" {
+  [ "$(dbx_publish_arg 127.0.0.1 5433 5432)" = "127.0.0.1:5433:5432" ]
+}
+
+@test "dbx_publish_arg keeps the container port fixed for mysql" {
+  [ "$(dbx_publish_arg 127.0.0.1 33070 3306)" = "127.0.0.1:33070:3306" ]
+}
+
+@test "dbx_publish_arg honors a non-loopback bind address" {
+  [ "$(dbx_publish_arg 0.0.0.0 5433 5432)" = "0.0.0.0:5433:5432" ]
+}
+
+# ----------------------------------------------------------------------------
 # strip_definer — sed pipeline for MySQL DEFINER clauses
 # ----------------------------------------------------------------------------
 
