@@ -9,10 +9,7 @@ setup_file() {
   docker run -d --name "$TEST_CONTAINER" \
     -e POSTGRES_PASSWORD=devpassword \
     postgres:15-alpine >/dev/null
-  for _ in $(seq 1 30); do
-    docker exec "$TEST_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-    sleep 1
-  done
+  pg_wait_ready "$TEST_CONTAINER"
 }
 
 teardown_file() {
@@ -68,10 +65,7 @@ setup() {
   docker run -d --name "$TEST_CONTAINER" \
     -e POSTGRES_PASSWORD=devpassword \
     postgres:15-alpine >/dev/null
-  for _ in $(seq 1 30); do
-    docker exec "$TEST_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-    sleep 1
-  done
+  pg_wait_ready "$TEST_CONTAINER"
   docker exec -e PGPASSWORD=devpassword "$TEST_CONTAINER" \
     psql -U postgres -c "CREATE DATABASE myapp_v1_test" >/dev/null
 
@@ -97,10 +91,7 @@ setup() {
   docker run -d --name "$TEST_CONTAINER" \
     -e POSTGRES_PASSWORD=devpassword \
     postgres:15-alpine >/dev/null
-  for _ in $(seq 1 30); do
-    docker exec "$TEST_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
-    sleep 1
-  done
+  pg_wait_ready "$TEST_CONTAINER"
 
   # We need a postgres-dbx container available as the psql client. Make sure it exists.
   if ! docker ps --format '{{.Names}}' | grep -q '^postgres-dbx$'; then
@@ -108,10 +99,7 @@ setup() {
       --add-host=host.docker.internal:host-gateway \
       -e POSTGRES_PASSWORD=devpassword \
       postgres:17-alpine >/dev/null
-    for _ in $(seq 1 30); do
-      docker exec postgres-dbx pg_isready -U postgres >/dev/null 2>&1 && break
-      sleep 1
-    done
+    pg_wait_ready postgres-dbx
   fi
 
   # Resolve the container IP so postgres-dbx can reach it via the Docker bridge.

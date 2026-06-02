@@ -25,12 +25,7 @@ ensure_sidecar_pg_container() {
       -e POSTGRES_USER=sidecaruser \
       -e POSTGRES_DB=sidecardb \
       postgres:17-alpine >/dev/null
-    for _ in $(seq 1 30); do
-      docker exec "$name" pg_isready -U sidecaruser >/dev/null 2>&1 && return 0
-      sleep 1
-    done
-    echo "$name failed to become ready" >&2
-    return 1
+    pg_wait_ready "$name" sidecaruser sidecarpass
   fi
 }
 

@@ -95,7 +95,7 @@ Probably a polluted environment. `setup_dbx_env` already unsets `DEV_SERVICES_MO
 
 ### Integration test "container failed to become ready"
 
-`ensure_mysql_container` polls for an authenticated `mysql -u root` (not just `mysqladmin ping` — ping returns success before the root password is initialised). If you get this, check `docker logs mysql-dbx` directly. If postgres-dbx is the issue, `pg_isready` is usually accurate; check the docker daemon and that port 5432 isn't already bound on the host.
+`ensure_mysql_container` polls for an authenticated `mysql -u root` (not just `mysqladmin ping` — ping returns success before the root password is initialised). Postgres readiness uses the same approach via `pg_wait_ready` (an authenticated `psql … SELECT 1`, not `pg_isready` — the postgres image's initdb double-start makes a bare ping report ready against the temporary bootstrap server before the real one is up). If you get this, check `docker logs <container>` directly, the docker daemon, and that the relevant port isn't already bound on the host.
 
 ### Inspecting a test's working directory
 

@@ -19,6 +19,26 @@ dbx_run() {
   run "$DBX_BIN" "$@"
 }
 
+# Wait until Postgres in container $1 accepts a real authenticated query.
+# Mirrors ensure_mysql_container's check: pg_isready (and the postgres image's
+# initdb double-start, where a temporary bootstrap server comes up before the
+# real one) can report ready prematurely, after which the socket briefly
+# disappears — so verify an actual SELECT 1 rather than a ping, and fail loudly
+# instead of falling through to a confusing downstream "socket not found".
+# Args: container [user=postgres] [password=devpassword]
+pg_wait_ready() {
+  local container="$1" user="${2:-postgres}" pass="${3:-devpassword}"
+  for _ in $(seq 1 60); do
+    if docker exec -e PGPASSWORD="$pass" "$container" \
+         psql -U "$user" -tAc 'SELECT 1' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "postgres container '$container' failed to become ready" >&2
+  return 1
+}
+
 # Boot postgres-dbx if it isn't running. Idempotent.
 ensure_postgres_container() {
   if ! docker ps --format '{{.Names}}' | grep -q '^postgres-dbx$'; then
@@ -33,13 +53,7 @@ ensure_postgres_container() {
         -p 127.0.0.1:5432:5432 \
         postgres:17-alpine >/dev/null
     fi
-    # Wait for ready
-    for _ in $(seq 1 30); do
-      docker exec postgres-dbx pg_isready -U postgres >/dev/null 2>&1 && return 0
-      sleep 1
-    done
-    echo "postgres-dbx failed to become ready" >&2
-    return 1
+    pg_wait_ready postgres-dbx
   fi
 }
 
@@ -176,12 +190,7 @@ ensure_pg13_source() {
     docker run -d --name dbx-pg13-source \
       -e POSTGRES_PASSWORD=devpassword \
       postgres:13-alpine >/dev/null
-    for _ in $(seq 1 30); do
-      docker exec dbx-pg13-source pg_isready -U postgres >/dev/null 2>&1 && return 0
-      sleep 1
-    done
-    echo "dbx-pg13-source failed to become ready" >&2
-    return 1
+    pg_wait_ready dbx-pg13-source
   fi
 }
 
@@ -193,11 +202,7 @@ ensure_pgvector_source() {
     docker run -d --name dbx-pgvector-source \
       -e POSTGRES_PASSWORD=devpassword \
       pgvector/pgvector:pg16 >/dev/null
-    for _ in $(seq 1 30); do
-      docker exec dbx-pgvector-source pg_isready -U postgres >/dev/null 2>&1 && return 0
-      sleep 1
-    done
-    return 1
+    pg_wait_ready dbx-pgvector-source
   fi
 }
 

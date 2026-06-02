@@ -22,13 +22,7 @@ teardown() {
 _boot_verify() {
   docker run -d --name "$VERIFY_CONTAINER" \
     -e POSTGRES_PASSWORD=devpassword "$BUILT_TAG" >/dev/null
-  local _
-  for _ in $(seq 1 30); do
-    docker exec "$VERIFY_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && return 0
-    sleep 1
-  done
-  echo "$VERIFY_CONTAINER failed to become ready" >&2
-  return 1
+  pg_wait_ready "$VERIFY_CONTAINER"
 }
 
 @test "build-image: builds an image that can CREATE EXTENSION pg_partman" {
