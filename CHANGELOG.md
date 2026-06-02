@@ -4,6 +4,21 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-02
+
+### Added
+
+- **`DBX_PG_HOST_PORT` / `DBX_MYSQL_HOST_PORT`.** The auto-managed `postgres-dbx` / `mysql-dbx` containers no longer hard-code the published host port, so dbx can run alongside a Postgres or MySQL already bound to `5432` / `3306`. Defaults are unchanged; only the published host port moves (`docker exec`-based restore/scrub are unaffected).
+
+### Fixed
+
+- **PII scrub gate now fires for `required_for`-only hosts.** A host configured with `scrub.required_for` but without `scrub.required: true` previously got **no scrub gate at all** — the per-destination logic was never wired in. The gate is now active when `scrub.required` is true **or** `scrub.required_for` is non-empty (host-wide; dbx restores always land in a local container, so there is no per-destination filtering to apply).
+- **MySQL restores now match the container image to the backup's source.** Restores reused whatever image `mysql-dbx` was running (default `mysql:8.0`) regardless of the backup's source flavor/version; only the backup path matched. Restores now select the image from the backup's `.meta.json` (flavor + major.minor) via the same fail-closed path as Postgres, honoring `DBX_RECREATE_CONTAINER`. Legacy backups with no metadata fall back to `mysql:8.0`, unchanged.
+
+### Documentation
+
+- Audited `docs/` against the code and corrected drift across the reference, scheduling, restore, backup, scrub, wizard, credentials, and configuration pages (missing commands and flags, the stale `schedule sync` "not yet shipped" note, undocumented environment variables, scrub `<host>/<database>` syntax, and a non-existent `dbx scrub update`).
+
 ## [0.21.0] - 2026-06-02
 
 ### Added
