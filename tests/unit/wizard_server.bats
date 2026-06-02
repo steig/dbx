@@ -750,6 +750,40 @@ JSON
   [[ "$output" == *"required"* ]]
 }
 
+@test "GET /api/backups/download streams the backup file bytes" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  printf 'BACKUP-BYTES-12345' > "$backup"
+  run curl -s "$(api /api/backups/download)&path=$backup"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BACKUP-BYTES-12345"* ]]
+}
+
+@test "GET /api/backups/download sends an attachment filename header" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  printf 'x' > "$backup"
+  run curl -s -D - -o /dev/null "$(api /api/backups/download)&path=$backup"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Content-Disposition: attachment"* ]]
+  [[ "$output" == *"myapp_20260520_120000.sql.zst"* ]]
+}
+
+@test "GET /api/backups/download rejects paths outside data-dir" {
+  local outside="$BATS_TEST_TMPDIR/sneaky.sql.zst"
+  touch "$outside"
+  run curl -s -o /dev/null -w '%{http_code}' "$(api /api/backups/download)&path=$outside"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+  [ -f "$outside" ]
+}
+
+@test "GET /api/backups/download requires a valid token" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  run curl -s -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:$WIZ_PORT/api/backups/download?path=$backup"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
 # ----------------------------------------------------------------------------
 # /api/audit-log  — recent audit-log entries for the Runs view
 # ----------------------------------------------------------------------------
