@@ -4,6 +4,24 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-02
+
+### Added
+
+- **Redesigned wizard control panel.** A purpose-built "Calm modern SaaS" interface replaces the documentation-derived theme: a big-picture **Overview** (health donut, needs-attention triage, recent activity, and weekly trend charts), a regrouped sidebar (**Operate / Configure / Insights**), and a consistent component system in light + dark mode across all eleven views.
+- **Backups and restores resume after a page reload.** A backup or restore runs as a server-side job that keeps running independently of the browser; the wizard now remembers the running job and re-attaches to its live log on reload instead of showing an idle form. A stale job id (after a server restart) is detected and cleared.
+- **Download a backup from the wizard.** New `GET /api/backups/download` streams a backup file (path-validated to the data dir, so traversal is rejected); the Backups view gains a **Download** action.
+- **Add and remove scrub column rules in the editor.** The Scrub view can now add a column rule, edit its name, and remove rules — not just change strategies on existing ones — saved through the existing manifest write.
+- **Dashboard trend charts.** Overview shows backups-per-week and data-backed-up-per-week for the last eight weeks, derived from the audit log.
+- **Schedule view shows next run and last run**, computed from each schedule's expression and the audit log.
+- **Enable / disable schedules.** Schedules carry an optional `enabled` flag (default on); disabling one excludes it from the sync plan so its installed unit is orphaned on the next sync. Existing configs are untouched.
+- **Per-schedule retention (opt-in).** A schedule may set `keep: N`; its unit then prunes that host/database to the newest N backups after each run. Schedules without a `keep` behave exactly as before (no deletion).
+- **`dbx schedule sync --apply`.** `schedule sync` can now execute its plan — install / update / orphan the launchd or systemd units — instead of only previewing it. The default stays a read-only preview.
+
+### Changed
+
+- **`dbx clean` accepts an optional `[host] [database]` scope** to prune a single host/database; with no arguments it still cleans every pair as before. (Enables per-schedule retention above.)
+
 ## [0.20.0] - 2026-05-27
 
 ### Added
