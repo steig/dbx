@@ -750,6 +750,40 @@ JSON
   [[ "$output" == *"required"* ]]
 }
 
+@test "GET /api/backups/download streams the backup file bytes" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  printf 'BACKUP-BYTES-12345' > "$backup"
+  run curl -s "$(api /api/backups/download)&path=$backup"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BACKUP-BYTES-12345"* ]]
+}
+
+@test "GET /api/backups/download sends an attachment filename header" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  printf 'x' > "$backup"
+  run curl -s -D - -o /dev/null "$(api /api/backups/download)&path=$backup"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Content-Disposition: attachment"* ]]
+  [[ "$output" == *"myapp_20260520_120000.sql.zst"* ]]
+}
+
+@test "GET /api/backups/download rejects paths outside data-dir" {
+  local outside="$BATS_TEST_TMPDIR/sneaky.sql.zst"
+  touch "$outside"
+  run curl -s -o /dev/null -w '%{http_code}' "$(api /api/backups/download)&path=$outside"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
+  [ -f "$outside" ]
+}
+
+@test "GET /api/backups/download requires a valid token" {
+  local backup="$WIZ_SCRATCH/data/prod/myapp/myapp_20260520_120000.sql.zst"
+  run curl -s -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:$WIZ_PORT/api/backups/download?path=$backup"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
 # ----------------------------------------------------------------------------
 # /api/audit-log  — recent audit-log entries for the Runs view
 # ----------------------------------------------------------------------------
@@ -886,6 +920,20 @@ JSONL
   [[ "$output" == *"\"total_backups\": 0"* ]]
   [[ "$output" == *"\"hosts\": 0"* ]]
   [[ "$output" == *"\"databases\": 0"* ]]
+}
+
+@test "GET /api/dashboard includes an 8-week trends series" {
+  local body
+  body="$(curl -s "$(api /api/dashboard)")"
+  run python3 -c '
+import sys, json
+t = json.loads(sys.argv[1])["trends"]
+assert isinstance(t, list) and len(t) == 8, len(t)
+assert all("backups" in w and "bytes" in w and "label" in w for w in t)
+print("ok")
+' "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ok"* ]]
 }
 
 @test "GET /api/dashboard returns one card per host/db pair on disk" {

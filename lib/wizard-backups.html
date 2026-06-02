@@ -100,6 +100,8 @@
                   <button class="btn btn--primary btn--sm" @click="restore(b)"
                           :disabled="!b.complete"
                           :title="b.complete ? 'Restore this backup' : 'Cannot restore an incomplete backup'">Restore</button>
+                  <a class="btn btn--ghost btn--sm" :href="downloadHref(b)" download
+                     title="Download this backup file">Download</a>
                   <button class="btn btn--danger btn--sm" @click="deleteBackup(b)"
                           title="Delete this backup and its .meta.json sidecar (no undo)">Delete</button>
                 </div>
@@ -246,6 +248,13 @@
         if (!major) return flavor;
         if (!flavor) return major;
         return `${flavor} ${major}`;
+      },
+
+      // Build the download URL: the shared api() helper already appends
+      // ?token=…, so the file path is added as a second query param. The
+      // server validates it resolves to a real backup file inside DATA_DIR.
+      downloadHref(b) {
+        return Alpine.store('dbx').api('/backups/download') + '&path=' + encodeURIComponent(b.path);
       },
 
       restore(b) {

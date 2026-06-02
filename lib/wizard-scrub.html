@@ -387,9 +387,10 @@
               <template x-if="t.columns.length === 0">
                 <div class="scrub-no-pii">No columns declared.</div>
               </template>
-              <template x-for="col in t.columns" :key="col.name">
+              <template x-for="(col, ci) in t.columns" :key="col._id">
                 <div class="scrub-editor-col">
-                  <code x-text="col.name"></code>
+                  <input class="scrub-param mono" x-model.trim="col.name"
+                         placeholder="column name" style="flex: 0 0 12rem;">
                   <select x-model="col.strategy">
                     <template x-for="s in strategies" :key="s">
                       <option :value="s" x-text="s"></option>
@@ -416,8 +417,13 @@
                       paths preserved verbatim — edit the JSON directly to change them
                     </span>
                   </template>
+                  <button class="btn btn--ghost btn--sm" style="margin-left: auto;"
+                          @click="t.columns.splice(ci, 1)"
+                          title="Remove this column rule">Remove</button>
                 </div>
               </template>
+              <button class="btn btn--ghost btn--sm" style="margin: 4px 12px 12px;"
+                      @click="addColumn(t)">+ Add column</button>
             </div>
           </template>
         </div>
@@ -461,6 +467,7 @@
       // Edit state
       editTables: [],
       editManifest: null,
+      _colSeq: 0,   // monotonic id source for keying editable column rows
 
       // Mirror lib/scrub.sh's strategy allowlist. The bash validator
       // rejects anything not here, so the UI dropdown must not offer
@@ -648,6 +655,18 @@
         }
       },
 
+      _newColId() { return ++this._colSeq; },
+
+      // Append a blank column rule the user can name + assign a strategy.
+      // Defaults to 'redact' (always valid); blank-named rows are dropped on
+      // save by _tablesToManifest so an unfinished add never persists.
+      addColumn(t) {
+        t.columns.push({
+          _id: this._newColId(), name: '', strategy: 'redact',
+          length: null, max_days: null, replacement: '', reason: '', _extras: {},
+        });
+      },
+
       _manifestToTables(manifest) {
         // Flatten the manifest.tables object into an array of { name,
         // no_pii, reason, columns: [{name, strategy, length, max_days,
@@ -671,6 +690,7 @@
           for (const [cname, cbody] of Object.entries(cols)) {
             if (!cbody || typeof cbody !== 'object') continue;
             const col = {
+              _id: this._newColId(),
               name: cname,
               strategy: typeof cbody.strategy === 'string' ? cbody.strategy : 'passthrough',
               length: typeof cbody.length === 'number' ? cbody.length : null,
@@ -700,6 +720,7 @@
           }
           const columns = {};
           for (const col of t.columns) {
+            if (!col.name) continue;   // skip a freshly-added row with no column name yet
             const out = { ...(col._extras || {}), strategy: col.strategy };
             if (col.strategy === 'truncate' && col.length != null && col.length !== '') {
               out.length = Number(col.length);

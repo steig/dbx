@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -626,30 +627,38 @@ def list_backups(data_dir: str, config_path: str | None = None):
     return out
 
 
-def delete_backup(data_dir: str, raw_path):
-    """Remove a backup file and its .meta.json sidecar. `raw_path` is
-    intentionally untyped — it comes from arbitrary JSON. Strict validation:
-    path must resolve (via realpath) to a regular file inside DATA_DIR with
-    a `*.sql.zst[.age|.gpg]` suffix. Returns (ok, error_or_None).
+def _resolve_backup_path(data_dir: str, raw_path):
+    """Validate that `raw_path` (arbitrary, from query string or JSON) resolves
+    via realpath to a regular `*.sql.zst[.age|.gpg]` file inside DATA_DIR.
+    Returns (resolved_path, None) or (None, error).
 
-    Symlinks: realpath resolves them and we still require the resolved path
-    to be inside DATA_DIR — so a symlink under DATA_DIR pointing outside
-    is correctly rejected. The sidecar deletion is best-effort (a backup
-    without a sidecar is "incomplete" and we still want to clear it)."""
+    Symlinks: realpath resolves them and we still require the resolved path to
+    be inside DATA_DIR — so a symlink under DATA_DIR pointing outside is
+    correctly rejected."""
     if not isinstance(raw_path, str) or not raw_path:
-        return False, "path is required"
+        return None, "path is required"
     try:
         resolved = os.path.realpath(raw_path)
     except (OSError, ValueError):
-        return False, "path could not be resolved"
+        return None, "path could not be resolved"
     data_root = os.path.realpath(data_dir)
     if not (resolved == data_root or resolved.startswith(data_root + os.sep)):
-        return False, "path must be inside data-dir"
+        return None, "path must be inside data-dir"
     if not (resolved.endswith(".sql.zst") or resolved.endswith(".sql.zst.age")
             or resolved.endswith(".sql.zst.gpg")):
-        return False, "path must be a .sql.zst[.age|.gpg] backup file"
+        return None, "path must be a .sql.zst[.age|.gpg] backup file"
     if not os.path.isfile(resolved):
-        return False, "backup file does not exist"
+        return None, "backup file does not exist"
+    return resolved, None
+
+
+def delete_backup(data_dir: str, raw_path):
+    """Remove a backup file and its .meta.json sidecar. The sidecar deletion is
+    best-effort (a backup without a sidecar is "incomplete" and we still want
+    to clear it). Returns (ok, error_or_None)."""
+    resolved, err = _resolve_backup_path(data_dir, raw_path)
+    if resolved is None:
+        return False, err
     try:
         os.unlink(resolved)
     except OSError as e:
@@ -1314,6 +1323,32 @@ def _read_schedules_block(config_path):
     return schedules
 
 
+def _compute_trends(audit_entries, now, weeks=8):
+    """Backups-per-week and bytes-backed-up-per-week for the last `weeks` weeks
+    (oldest first), from successful backup events in the audit log. On-disk
+    storage history isn't tracked, so these reflect backup *activity* over time,
+    not current disk usage (which the summary already reports)."""
+    counts = [0] * weeks
+    sizes = [0] * weeks
+    for entry in audit_entries:
+        if entry.get("action") != "backup" or entry.get("outcome") != "success":
+            continue
+        ts = _parse_iso8601_utc(entry.get("timestamp"))
+        if ts is None:
+            continue
+        weeks_ago = int((now - ts).total_seconds() // (7 * 86400))
+        if weeks_ago < 0 or weeks_ago >= weeks:
+            continue
+        idx = (weeks - 1) - weeks_ago
+        counts[idx] += 1
+        sizes[idx] += _coerce_int(entry.get("size")) or 0
+    out = []
+    for i in range(weeks):
+        label = (now - datetime.timedelta(weeks=(weeks - 1) - i)).strftime("%b %d")
+        out.append({"label": label, "backups": counts[i], "bytes": sizes[i]})
+    return out
+
+
 def compute_dashboard(data_dir, audit_dir, config_path, now=None):
     """Compose the dashboard payload from DATA_DIR + audit.log + schedules[].
 
@@ -1506,6 +1541,7 @@ def compute_dashboard(data_dir, audit_dir, config_path, now=None):
             "stale": stale,
         },
         "cards": cards,
+        "trends": _compute_trends(audit_entries, now),
     }
 
 
@@ -2170,6 +2206,27 @@ def make_handler(args):
                 return
             if path == "/api/backups":
                 send_json(self, 200, list_backups(args.data_dir, args.config_path))
+                return
+            if path == "/api/backups/download":
+                qs = parse_query(self.path)
+                raw = (qs.get("path", [""]) or [""])[0]
+                resolved, err = _resolve_backup_path(args.data_dir, raw)
+                if resolved is None:
+                    self._send(400, err or "invalid backup path")
+                    return
+                try:
+                    size = os.path.getsize(resolved)
+                    fname = os.path.basename(resolved).replace('"', "").replace("\n", "")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(size))
+                    self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    with open(resolved, "rb") as fh:
+                        shutil.copyfileobj(fh, self.wfile)
+                except (OSError, BrokenPipeError, ConnectionResetError):
+                    pass
                 return
             if path == "/api/audit-log":
                 qs = parse_query(self.path)
