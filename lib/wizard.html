@@ -6,111 +6,236 @@
   <meta name="referrer" content="no-referrer">
   <title>dbx</title>
   <style>
-    /*
-     * Design tokens.
-     *
-     * UX polish pass (PR-I) bumped:
-     *   - --md-accent-fg-color to a more saturated blue so primary buttons
-     *     + active sidebar item pop instead of fading into the surrounding
-     *     chrome (user complaint: "so dark and hard to read").
-     *   - --md-default-fg-color--lightest alpha so borders & table dividers
-     *     are visible in dark mode (was nearly invisible at #24272e on #14161a).
-     *   - --dbx-sidebar-bg distance from --md-default-bg-color so the
-     *     sidebar reads as a distinct chrome element instead of a barely-
-     *     darker continuation of main.
-     *   - status chip alphas (.dbx-backups__chip--age/gpg/complete/...) for
-     *     readability in both modes.
-     */
+    /* =====================================================================
+       dbx control panel — "Calm modern SaaS" skin.
+       Shared design system + component library. Every view fragment composes
+       from these classes; per-fragment <style> blocks should only hold
+       genuinely view-unique layout and must reference these CSS variables
+       (never hardcode colors).
+       ===================================================================== */
     :root {
-      --md-default-bg-color: #fff;
-      --md-default-fg-color: #1c1d20;
-      --md-default-fg-color--light: #5a5d63;
-      --md-default-fg-color--lighter: #b3b8c2;
-      --md-default-fg-color--lightest: #d2d6df;
-      --md-accent-fg-color: #0066ff;
-      --md-accent-fg-color--transparent: rgba(0, 102, 255, 0.18);
-      --md-accent-bg-color: #fff;
-      --md-code-bg-color: #f1f3f7;
-      --md-code-font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      --dbx-sidebar-bg: #eef1f7;
-      --dbx-sidebar-fg: #2a2d33;
-      --dbx-sidebar-active-bg: #d9e2f1;
+      --bg:        #fafafa;
+      --surface:   #ffffff;
+      --surface-2: #f6f6f8;
+      --text:      #18181b;
+      --text-2:    #52525b;
+      --text-3:    #9b9ba4;
+      --border:    #ececef;
+      --border-2:  #e2e2e6;
+      --accent:    #5b5bd6;
+      --accent-2:  #4f4fc9;
+      --accent-weak: #f0f0fb;
+      --green:     #15803d; --green-weak: #e7f6ec;
+      --amber:     #b45309; --amber-weak: #fbf1de;
+      --red:       #dc2626; --red-weak:   #fbe9e9;
+      --blue:      #1d4ed8; --blue-weak:  #e8eefc;
+      --shadow:    0 1px 2px rgba(16,16,40,.04), 0 1px 3px rgba(16,16,40,.06);
+      --shadow-lg: 0 4px 16px rgba(16,16,40,.08);
+      --radius:    14px;
+      --radius-sm: 10px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --md-default-bg-color: #14161a;
-        --md-default-fg-color: #e8eaed;
-        --md-default-fg-color--light: #b3b9c2;
-        --md-default-fg-color--lighter: #4a4f59;
-        --md-default-fg-color--lightest: #353a44;
-        --md-accent-fg-color: #4ea8de;
-        --md-accent-bg-color: #14161a;
-        --md-code-bg-color: #1d2027;
-        --dbx-sidebar-bg: #0e1014;
-        --dbx-sidebar-fg: #d4d7dd;
-        --dbx-sidebar-active-bg: #2b313a;
+        --bg:        #0a0a0e;
+        --surface:   #131318;
+        --surface-2: #17171d;
+        --text:      #ededf2;
+        --text-2:    #a1a1ab;
+        --text-3:    #6a6a76;
+        --border:    #222228;
+        --border-2:  #2c2c34;
+        --accent:    #8b8bf0;
+        --accent-2:  #9d9df5;
+        --accent-weak: #1a1a2c;
+        --green:     #54c98a; --green-weak: #122a1d;
+        --amber:     #f0b454; --amber-weak: #2a2113;
+        --red:       #f08a8a; --red-weak:   #2a1515;
+        --blue:      #8fb3ff; --blue-weak:  #16203a;
+        --shadow:    none;
+        --shadow-lg: none;
       }
     }
-    html, body { margin: 0; padding: 0; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.5; }
 
-    .dbx-app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
-    .dbx-app__sidebar { background: var(--dbx-sidebar-bg); color: var(--dbx-sidebar-fg); padding: 1.5rem 0; border-right: 1px solid var(--md-default-fg-color--lightest); }
-    .dbx-app__brand { font-size: 1.25rem; font-weight: 700; padding: 0 1.5rem 1.5rem; letter-spacing: -0.02em; }
-    .dbx-app__brand small { display: block; font-size: 0.75rem; font-weight: 400; color: var(--md-default-fg-color--light); letter-spacing: 0; }
-    .dbx-app__nav { display: flex; flex-direction: column; }
-    .dbx-app__nav a { cursor: pointer; padding: 0.5rem 1.5rem; color: inherit; text-decoration: none; border-left: 3px solid transparent; }
-    .dbx-app__nav a:hover:not(.disabled) { background: var(--dbx-sidebar-active-bg); }
-    .dbx-app__nav a.active { background: var(--dbx-sidebar-active-bg); border-left-color: var(--md-accent-fg-color); font-weight: 600; color: var(--md-accent-fg-color); }
-    .dbx-app__nav a.disabled { color: var(--md-default-fg-color--light); cursor: not-allowed; }
-    .dbx-app__nav a.disabled small { display: block; font-size: 0.7rem; }
-    .dbx-app__main { padding: 1.5rem 1.75rem 4rem; max-width: 1200px; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: var(--font); font-size: 14px; line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
 
-    .dbx-view__header { margin-bottom: 1.5rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); }
-    .dbx-view__title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.25rem; }
-    .dbx-view__subtitle { color: var(--md-default-fg-color--light); margin: 0; }
+    /* ---- App shell ---- */
+    .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
 
-    /* Backups view */
-    .dbx-backups__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
-    .dbx-backups__search { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); }
-    .dbx-backups__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
-    .dbx-backups__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-    .dbx-backups__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
-    .dbx-backups__table td { padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-    .dbx-backups__table tbody tr:hover { background: var(--md-code-bg-color); }
-    .dbx-backups__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color); }
-    /* Chip alphas bumped from 0.15-0.18 → 0.28-0.32 so they're legible on
-       both light + dark backgrounds without needing per-mode overrides. */
-    .dbx-backups__chip--age { background: rgba(74, 158, 76, 0.28); color: #2f7d31; }
-    .dbx-backups__chip--gpg { background: rgba(0, 102, 255, 0.22); color: var(--md-accent-fg-color); }
-    .dbx-backups__chip--complete   { background: rgba(74, 158, 76, 0.30); color: #1e5a20; font-weight: 600; }
-    .dbx-backups__chip--incomplete { background: rgba(196, 61, 61, 0.30); color: #8a1f1f; font-weight: 600; }
-    .dbx-backups__chip--prod  { background: rgba(196, 61, 61, 0.28); color: #8a1f1f; font-weight: 700; letter-spacing: 0.03em; }
-    .dbx-backups__chip--stage { background: rgba(218, 135, 33, 0.30); color: #8a4c10; font-weight: 700; letter-spacing: 0.03em; }
-    @media (prefers-color-scheme: dark) {
-      /* Lighter text on the dark-mode chips so the colored fill doesn't
-         drag the foreground into illegibility. */
-      .dbx-backups__chip--age { color: #6fd073; }
-      .dbx-backups__chip--gpg { color: #7cb9ff; }
-      .dbx-backups__chip--complete   { color: #6fd073; }
-      .dbx-backups__chip--incomplete { color: #ff8a8a; }
-      .dbx-backups__chip--prod  { color: #ff8a8a; }
-      .dbx-backups__chip--stage { color: #ffbf6b; }
+    /* ---- Sidebar ---- */
+    .side { padding: 22px 0; border-right: 1px solid var(--border); position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; }
+    .brand { padding: 0 22px 22px; display: flex; align-items: center; gap: 10px; }
+    .brand__mark { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), #8a6df0); display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px; letter-spacing: -.04em; }
+    .brand__name { font-weight: 700; font-size: 16px; letter-spacing: -.02em; }
+    .brand__sub  { font-size: 11px; color: var(--text-3); }
+    .nav__group { margin-top: 18px; padding: 0 14px; }
+    .nav__label { font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); padding: 0 8px 6px; }
+    .nav__item { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 7px 8px; border-radius: 8px; color: var(--text-2); font-size: 13.5px; font-weight: 500; user-select: none; text-decoration: none; }
+    .nav__item:hover { background: var(--accent-weak); color: var(--text); }
+    .nav__item.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+    .nav__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .55; }
+    .nav__badge { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--red); background: var(--red-weak); padding: 1px 7px; border-radius: 999px; }
+
+    /* ---- Main + page header ---- */
+    .main { padding: 34px 40px 80px; max-width: 1080px; }
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 26px; gap: 16px; flex-wrap: wrap; }
+    .page-title { font-size: 13px; font-weight: 600; color: var(--text-3); letter-spacing: .04em; text-transform: uppercase; margin: 0 0 4px; }
+    .page-h1 { font-size: 26px; font-weight: 700; letter-spacing: -.025em; margin: 0; }
+    .page-sub { color: var(--text-2); margin: 6px 0 0; max-width: 64ch; }
+    .head-actions { display: flex; align-items: center; gap: 12px; }
+    .updated { font-size: 12.5px; color: var(--text-3); display: flex; align-items: center; gap: 7px; }
+    .section-title { font-size: 13px; font-weight: 600; color: var(--text-3); letter-spacing: .04em; text-transform: uppercase; margin: 26px 0 10px; }
+
+    /* ---- Buttons ---- */
+    .btn { font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; border-radius: 9px; padding: 8px 14px; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 7px; }
+    .btn--ghost { background: var(--surface); color: var(--text-2); border-color: var(--border-2); }
+    .btn--ghost:hover { color: var(--text); border-color: var(--text-3); }
+    .btn--primary { background: var(--accent); color: #fff; }
+    .btn--primary:hover { background: var(--accent-2); }
+    .btn--danger { background: var(--red); color: #fff; }
+    .btn--danger:hover { filter: brightness(1.05); }
+    .btn--sm { padding: 5px 10px; font-size: 12.5px; border-radius: 8px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    /* ---- Cards ---- */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; box-shadow: var(--shadow); }
+    .card + .card { margin-top: 14px; }
+    .card__head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; gap: 12px; }
+    .card__title { font-size: 14px; font-weight: 650; letter-spacing: -.01em; }
+    .card__hint { font-size: 12px; color: var(--text-3); }
+    .bignum { font-size: 24px; font-weight: 700; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+    .card--flush { padding: 6px 10px; }
+
+    /* ---- Stat tiles ---- */
+    .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 16px 18px; box-shadow: var(--shadow); }
+    .tile__label { font-size: 11.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--text-3); }
+    .tile__value { font-size: 27px; font-weight: 700; letter-spacing: -.03em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .tile__meta { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
+    .delta { font-weight: 600; }
+    .delta--up { color: var(--green); }
+    .delta--down { color: var(--red); }
+
+    /* ---- Layout helpers ---- */
+    .cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .cols-21 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; }
+    .stack { display: flex; flex-direction: column; gap: 14px; }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .spacer { margin-left: auto; }
+    .muted { color: var(--text-3); }
+    .mono { font-family: var(--mono); }
+
+    /* ---- Pills / badges / dots ---- */
+    .pill { font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+    .pill--up { color: var(--green); background: var(--green-weak); }
+    .pill--accent { color: var(--accent); background: var(--accent-weak); }
+    .badge { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; letter-spacing: .02em; display: inline-flex; align-items: center; gap: 5px; }
+    .badge--ok   { color: var(--green); background: var(--green-weak); }
+    .badge--fail { color: var(--red);   background: var(--red-weak); }
+    .badge--age  { color: var(--amber); background: var(--amber-weak); }
+    .badge--info { color: var(--blue);  background: var(--blue-weak); }
+    .badge--mut  { color: var(--text-2); background: var(--surface-2); }
+    .sdot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+    .sdot--ok { background: var(--green); }
+    .sdot--fail { background: var(--red); }
+    .sdot--warn { background: var(--amber); }
+    .sdot--run { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+
+    /* status chips (backup file states) */
+    .chip { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; background: var(--surface-2); color: var(--text-2); }
+    .chip--fresh { color: var(--green); background: var(--green-weak); }
+    .chip--aging { color: var(--amber); background: var(--amber-weak); }
+    .chip--stale { color: var(--red); background: var(--red-weak); }
+    .chip--enc   { color: var(--accent); background: var(--accent-weak); }
+    .chip--prod  { color: var(--red); background: var(--red-weak); letter-spacing:.03em; }
+    .chip--stage { color: var(--amber); background: var(--amber-weak); letter-spacing:.03em; }
+    .chip--complete   { color: var(--green); background: var(--green-weak); }
+    .chip--incomplete { color: var(--red); background: var(--red-weak); }
+
+    /* ---- Tables ---- */
+    .tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    .tbl th { text-align: left; padding: 9px 12px; color: var(--text-3); font-weight: 600; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+    .tbl td { padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    .tbl tbody tr:last-child td { border-bottom: none; }
+    .tbl tbody tr:hover { background: var(--surface-2); }
+    .tbl .num { font-variant-numeric: tabular-nums; text-align: right; }
+    .tbl__actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+    /* ---- Toolbar / search / segmented ---- */
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .search { flex: 1; min-width: 200px; position: relative; }
+    .search input { width: 100%; padding: 9px 11px 9px 32px; }
+    .search::before { content: "⌕"; position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-3); font-size: 15px; }
+    .seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 9px; padding: 2px; gap: 2px; }
+    .seg button { font: inherit; font-size: 12.5px; font-weight: 600; border: none; background: transparent; color: var(--text-2); padding: 5px 11px; border-radius: 7px; cursor: pointer; }
+    .seg button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+
+    /* ---- Forms ---- */
+    .form-grid { display: grid; gap: 16px; max-width: 560px; }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field > label { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+    .field .hint { font-size: 12px; color: var(--text-3); }
+    input[type=text], input[type=number], input[type=password], select, textarea {
+      font: inherit; font-size: 13.5px; width: 100%;
+      padding: 9px 11px; border: 1px solid var(--border-2); border-radius: 9px;
+      background: var(--surface); color: var(--text);
     }
-    .dbx-backups__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.375rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; margin-right: 0.25rem; }
-    .dbx-backups__btn:hover:not(:disabled) { opacity: 0.92; filter: brightness(1.08); }
-    .dbx-backups__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .dbx-backups__btn--danger { background: #c43d3d; }
-    .dbx-backups__btn--secondary {
-      background: transparent;
-      color: var(--md-default-fg-color);
-      border: 1px solid var(--md-default-fg-color--lighter);
-    }
-    .dbx-backups__btn--secondary:hover:not(:disabled) {
-      background: var(--md-code-bg-color);
-      filter: none;
-    }
-    .dbx-backups__row--incomplete { opacity: 0.72; }
-    .dbx-backups__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
+    textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-size: 12.5px; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+    .check { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-2); cursor: pointer; }
+    .check input { width: auto; }
+    .field-row { display: flex; gap: 12px; flex-wrap: wrap; }
+
+    /* switch */
+    .switch { position: relative; width: 36px; height: 20px; flex: none; cursor: pointer; display: inline-block; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch__track { position: absolute; inset: 0; background: var(--border-2); border-radius: 999px; transition: .15s; }
+    .switch__track::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; background: #fff; border-radius: 50%; transition: .15s; box-shadow: var(--shadow); }
+    .switch input:checked + .switch__track { background: var(--accent); }
+    .switch input:checked + .switch__track::after { transform: translateX(16px); }
+
+    /* ---- Console / live log ---- */
+    .console { background: #0e0f13; color: #d6d9e0; font-family: var(--mono); font-size: 12.5px; line-height: 1.65; padding: 14px 16px; border-radius: var(--radius-sm); max-height: 360px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--border-2); }
+    @media (prefers-color-scheme: dark) { .console { background: #06070a; } }
+    .console__line--ok   { color: #7ee0a6; }
+    .console__line--warn { color: #f0c069; }
+    .console__line--err  { color: #f29393; }
+    .console__line--dim  { color: #6a6f7d; }
+    .console__cursor { display:inline-block; width:8px; height:14px; background:#7ee0a6; vertical-align:-2px; animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* live-job status strip */
+    .jobbar { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 12px; }
+    .jobbar__status { font-weight: 650; }
+    .progress { flex: 1; height: 7px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+    .progress__bar { height: 100%; background: var(--accent); border-radius: 999px; }
+    .elapsed { font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 13px; }
+
+    /* ---- Callouts ---- */
+    .note { border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px; color: var(--text-2); background: var(--surface); }
+    .note strong { color: var(--text); }
+    .note--warn   { border-left-color: var(--amber); background: var(--amber-weak); color: var(--amber); }
+    .note--danger { border-left-color: var(--red);   background: var(--red-weak);   color: var(--red); }
+    .note--info   { border-left-color: var(--blue);  background: var(--blue-weak);  color: var(--blue); }
+
+    /* ---- Empty state ---- */
+    .empty { padding: 48px 20px; text-align: center; color: var(--text-3); border: 1px dashed var(--border-2); border-radius: var(--radius); }
+    .empty__title { font-size: 15px; font-weight: 600; color: var(--text-2); margin-bottom: 4px; }
+
+    /* ---- Charts + misc ---- */
+    .chart { width: 100%; display: block; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 18px; font-size: 13px; }
+    .kv dt { color: var(--text-3); }
+    .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    .divider { height: 1px; background: var(--border); margin: 14px 0; border: none; }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script>
@@ -136,32 +261,46 @@
   </script>
 </head>
 <body>
-  <div class="dbx-app">
-    <aside class="dbx-app__sidebar">
-      <div class="dbx-app__brand">dbx<small>local control panel</small></div>
-      <nav class="dbx-app__nav" x-data>
-        <a @click="$store.dbx.view = 'dashboard'" :class="{active: $store.dbx.view === 'dashboard'}">Dashboard</a>
-        <a @click="$store.dbx.view = 'config'"   :class="{active: $store.dbx.view === 'config'}">Config</a>
-        <a @click="$store.dbx.view = 'backup'"   :class="{active: $store.dbx.view === 'backup'}">Backup</a>
-        <a @click="$store.dbx.view = 'backups'"  :class="{active: $store.dbx.view === 'backups'}">Backups</a>
-        <a @click="$store.dbx.view = 'runs'"     :class="{active: $store.dbx.view === 'runs'}">Runs</a>
-        <a @click="$store.dbx.view = 'restore'"  :class="{active: $store.dbx.view === 'restore'}">Restore</a>
-        <a @click="$store.dbx.view = 'vault'"    :class="{active: $store.dbx.view === 'vault'}">Vault</a>
-        <a @click="$store.dbx.view = 'scrub'"    :class="{active: $store.dbx.view === 'scrub'}">Scrub</a>
-        <a @click="$store.dbx.view = 'analyze'"  :class="{active: $store.dbx.view === 'analyze'}">Analyze</a>
-        <a @click="$store.dbx.view = 'schedule'" :class="{active: $store.dbx.view === 'schedule'}">Schedule</a>
-        <a @click="$store.dbx.view = 'storage'"  :class="{active: $store.dbx.view === 'storage'}">Storage</a>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="brand__mark">d</div>
+        <div>
+          <div class="brand__name">dbx</div>
+          <div class="brand__sub">control panel</div>
+        </div>
+      </div>
+
+      <nav x-data>
+        <div class="nav__group">
+          <a class="nav__item" :class="{active: $store.dbx.view === 'dashboard'}" @click="$store.dbx.view = 'dashboard'"><span class="nav__dot"></span> Overview</a>
+        </div>
+        <div class="nav__group">
+          <div class="nav__label">Operate</div>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'backup'}"  @click="$store.dbx.view = 'backup'"><span class="nav__dot"></span> Backup</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'restore'}" @click="$store.dbx.view = 'restore'"><span class="nav__dot"></span> Restore</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'backups'}" @click="$store.dbx.view = 'backups'"><span class="nav__dot"></span> Backups</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'runs'}"    @click="$store.dbx.view = 'runs'"><span class="nav__dot"></span> Runs</a>
+        </div>
+        <div class="nav__group">
+          <div class="nav__label">Configure</div>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'config'}"   @click="$store.dbx.view = 'config'"><span class="nav__dot"></span> Hosts &amp; databases</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'schedule'}" @click="$store.dbx.view = 'schedule'"><span class="nav__dot"></span> Schedule</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'vault'}"    @click="$store.dbx.view = 'vault'"><span class="nav__dot"></span> Vault</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'scrub'}"    @click="$store.dbx.view = 'scrub'"><span class="nav__dot"></span> Scrub rules</a>
+        </div>
+        <div class="nav__group">
+          <div class="nav__label">Insights</div>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'storage'}" @click="$store.dbx.view = 'storage'"><span class="nav__dot"></span> Storage</a>
+          <a class="nav__item" :class="{active: $store.dbx.view === 'analyze'}" @click="$store.dbx.view = 'analyze'"><span class="nav__dot"></span> Analyze</a>
+        </div>
       </nav>
     </aside>
-    <main class="dbx-app__main">
+    <main class="main">
       <section x-data x-show="$store.dbx.view === 'dashboard'">
         <!-- __DBX_DASHBOARD_FRAGMENT__ -->
       </section>
       <section x-data x-show="$store.dbx.view === 'config'">
-        <header class="dbx-view__header">
-          <h2 class="dbx-view__title">Config</h2>
-          <p class="dbx-view__subtitle">Build your <code>~/.config/dbx/config.json</code>, then click <strong>Save &amp; exit</strong>.</p>
-        </header>
         <!-- __DBX_FORM_FRAGMENT__ -->
       </section>
       <section x-data x-show="$store.dbx.view === 'backup'">

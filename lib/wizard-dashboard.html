@@ -8,209 +8,219 @@
   config.json schedules into a single payload — see lib/wizard-server.py's
   compute_dashboard() for the shape.
 
-  Refreshes on tab entry. Clicking a card jumps to the Backups view filtered
-  to that host/db via $store.dbx.backupFilter (read by wizard-backups.html
-  on its next render).
+  Refreshes on tab entry. Clicking a card/row jumps to the Backups view
+  filtered to that host/db via $store.dbx.backupFilter (read by
+  wizard-backups.html on its next render).
+
+  Skin: shared "Calm modern SaaS" classes (card / tile / badge / sdot / btn …)
+  defined in the shell (wizard.html). The only per-view CSS below is layout
+  unique to the hero/donut + the restyled "Test connection" log panel, all in
+  terms of shared CSS vars.
 -->
 <style>
-  .dbx-dash__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
-  .dbx-dash__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; margin-left: auto; }
+  /* hero band: donut + headline + CTA on one row, wraps on narrow widths */
+  .dbx-dash__hero { display: flex; align-items: center; gap: 22px; margin-bottom: 18px; flex-wrap: wrap; }
+  .dbx-dash__hero-body { flex: 1; min-width: 260px; }
+  .dbx-dash__hero-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+  .dbx-dash__hero-eyebrow--ok { color: var(--green); }
+  .dbx-dash__hero-eyebrow--warn { color: var(--amber); }
+  .dbx-dash__hero-eyebrow--bad { color: var(--red); }
+  .dbx-dash__hero-title { font-size: 22px; font-weight: 700; letter-spacing: -.02em; margin: 3px 0 5px; }
+  .dbx-dash__hero-sub { color: var(--text-2); max-width: 60ch; }
 
-  .dbx-dash__summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
-  .dbx-dash__stat { padding: 0.75rem 1rem; border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-default-bg-color); }
-  .dbx-dash__stat-label { font-size: 0.75rem; color: var(--md-default-fg-color--light); text-transform: uppercase; letter-spacing: 0.05em; }
-  .dbx-dash__stat-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.125rem; letter-spacing: -0.02em; }
-  .dbx-dash__stat-value--fresh { color: #2f7d31; }
-  .dbx-dash__stat-value--aging { color: #8a4c10; }
-  .dbx-dash__stat-value--stale { color: #8a1f1f; }
-  @media (prefers-color-scheme: dark) {
-    .dbx-dash__stat-value--fresh { color: #6fd073; }
-    .dbx-dash__stat-value--aging { color: #ffbf6b; }
-    .dbx-dash__stat-value--stale { color: #ff8a8a; }
-  }
+  /* "Needs attention" + "Recent activity" rows reuse .row/.card from the
+     shell. Per-row separators + the inline error line are the only extras. */
+  .dbx-dash__att-row { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .dbx-dash__att-row:last-child { border-bottom: none; }
+  .dbx-dash__err { font-family: var(--mono); font-size: 12px; color: var(--text-2); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 52ch; }
+  .dbx-dash__act-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .dbx-dash__act-row:last-child { border-bottom: none; }
 
-  .dbx-dash__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
-
-  .dbx-dash__card { border: 1px solid var(--md-default-fg-color--lightest); border-radius: 10px; padding: 1rem 1.125rem; background: var(--md-default-bg-color); cursor: pointer; transition: border-color 0.15s ease, transform 0.05s ease; display: flex; flex-direction: column; gap: 0.625rem; }
-  .dbx-dash__card:hover { border-color: var(--md-accent-fg-color); }
-  .dbx-dash__card:active { transform: translateY(1px); }
-  .dbx-dash__card--stale { border-left: 4px solid #c43d3d; }
-  .dbx-dash__card--aging { border-left: 4px solid #da8721; }
-  .dbx-dash__card--fresh { border-left: 4px solid #4a9e4c; }
-
-  .dbx-dash__card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
-  .dbx-dash__card-title { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
-  .dbx-dash__card-title small { font-weight: 400; color: var(--md-default-fg-color--light); font-size: 0.8125rem; }
-
-  .dbx-dash__row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.8125rem; }
-  .dbx-dash__row dt { color: var(--md-default-fg-color--light); margin: 0; }
-  .dbx-dash__row dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
-  .dbx-dash__row--failure dd { color: #c43d3d; }
-  @media (prefers-color-scheme: dark) {
-    .dbx-dash__row--failure dd { color: #ff8a8a; }
-  }
-  .dbx-dash__error { font-size: 0.75rem; color: var(--md-default-fg-color--light); font-family: var(--md-code-font-family); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-
-  .dbx-dash__empty { padding: 3rem 1rem; text-align: center; color: var(--md-default-fg-color--light); border: 1px dashed var(--md-default-fg-color--lightest); border-radius: 10px; }
-  .dbx-dash__empty a { color: var(--md-accent-fg-color); cursor: pointer; text-decoration: underline; }
-
-  /* PR-Y4: per-card "Test connection" panel. Reuses the dark monospace pill
-     used by the Backup/Restore log areas. The button styles mirror
-     .dbx-backup__btn--secondary so the action visually defers to the card's
-     primary affordance (clicking the card opens Backups). */
-  .dbx-dash__test-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .dbx-dash__test-btn { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); padding: 0.3rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; }
-  .dbx-dash__test-btn:hover:not(:disabled) { background: var(--md-code-bg-color); }
-  .dbx-dash__test-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .dbx-dash__test-pill { font-size: 0.75rem; padding: 0.15rem 0.55rem; border-radius: 999px; font-variant-numeric: tabular-nums; }
-  .dbx-dash__test-pill--idle { background: var(--md-code-bg-color); color: var(--md-default-fg-color--light); }
-  .dbx-dash__test-pill--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
-  .dbx-dash__test-pill--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
-  .dbx-dash__test-pill--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
-  @media (prefers-color-scheme: dark) {
-    .dbx-dash__test-pill--ok { color: #6fd073; }
-    .dbx-dash__test-pill--err { color: #ff8a8a; }
-  }
-  .dbx-dash__test-log { background: #1a1d22; color: #d4d7dd; font-family: var(--md-code-font-family); font-size: 0.75rem; padding: 0.625rem 0.75rem; border-radius: 6px; max-height: 20rem; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
-  .dbx-dash__test-log--empty { color: #666; font-style: italic; }
+  /* per-card "Test connection" live log — restyled console pill */
+  .dbx-dash__test-log { background: #0e0f13; color: #d6d9e0; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; padding: 12px 14px; border-radius: var(--radius-sm); max-height: 22rem; overflow-y: auto; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--border-2); margin-top: 10px; }
+  .dbx-dash__test-log--empty { color: var(--text-3); font-style: italic; }
+  @media (prefers-color-scheme: dark) { .dbx-dash__test-log { background: #06070a; } }
 </style>
 
 <div x-data="dbxDashboard()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Dashboard</h2>
-    <p class="dbx-view__subtitle">
-      At-a-glance backup health across all configured host/database pairs.
-      Stale and failing backups appear first — click a card to drill into
-      its file list.
-    </p>
-  </header>
-
-  <div class="dbx-dash__toolbar">
-    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
-    <span class="dbx-dash__count" x-text="countLabel()"></span>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Control panel</p>
+      <h1 class="page-h1">Overview</h1>
+    </div>
+    <div class="head-actions">
+      <span class="updated" x-show="!loading && cards.length > 0">
+        <span class="sdot sdot--ok"></span>
+        <span x-text="countLabel()"></span>
+      </span>
+      <button class="btn btn--ghost" @click="load()" :disabled="loading"
+              x-text="loading ? 'Refreshing…' : 'Refresh'"></button>
+      <button class="btn btn--primary" @click="$store.dbx.view = 'backup'">+ New backup</button>
+    </div>
   </div>
 
   <template x-if="loading">
-    <p class="dbx-dash__empty">Loading…</p>
+    <div class="empty">Loading…</div>
   </template>
 
   <template x-if="!loading && cards.length === 0">
-    <p class="dbx-dash__empty">
-      No backups yet. Go to the
-      <a @click="$store.dbx.view = 'backup'">Backup</a> tab to create one.
-    </p>
+    <div class="empty">
+      <div class="empty__title">No backups yet</div>
+      <div>Go to the
+        <a style="cursor:pointer;" @click="$store.dbx.view = 'backup'">Backup</a>
+        tab to create one.</div>
+    </div>
   </template>
 
   <template x-if="!loading && cards.length > 0">
     <div>
-      <div class="dbx-dash__summary">
-        <div class="dbx-dash__stat">
-          <div class="dbx-dash__stat-label">Backups</div>
-          <div class="dbx-dash__stat-value" x-text="summary.total_backups"></div>
+      <!-- HERO STATUS: donut + headline wired to summary counts -->
+      <div class="card dbx-dash__hero">
+        <svg width="72" height="72" viewBox="0 0 72 72" style="flex:none;">
+          <!-- track -->
+          <circle cx="36" cy="36" r="30" fill="none" stroke="var(--border-2)" stroke-width="10"/>
+          <!-- stale segment (red) -->
+          <circle cx="36" cy="36" r="30" fill="none" stroke="var(--red)" stroke-width="10"
+                  :stroke-dasharray="donutDash('stale')" :stroke-dashoffset="donutOffset('stale')"
+                  transform="rotate(-90 36 36)" stroke-linecap="butt"/>
+          <!-- aging segment (amber) -->
+          <circle cx="36" cy="36" r="30" fill="none" stroke="var(--amber)" stroke-width="10"
+                  :stroke-dasharray="donutDash('aging')" :stroke-dashoffset="donutOffset('aging')"
+                  transform="rotate(-90 36 36)" stroke-linecap="butt"/>
+          <!-- fresh segment (green) -->
+          <circle cx="36" cy="36" r="30" fill="none" stroke="var(--green)" stroke-width="10"
+                  :stroke-dasharray="donutDash('fresh')" :stroke-dashoffset="donutOffset('fresh')"
+                  transform="rotate(-90 36 36)" stroke-linecap="butt"/>
+          <text x="36" y="34" text-anchor="middle" font-size="17" font-weight="700" fill="var(--text)"
+                x-text="summary.fresh"></text>
+          <text x="36" y="48" text-anchor="middle" font-size="9.5" fill="var(--text-3)"
+                x-text="'of ' + summary.databases + ' fresh'"></text>
+        </svg>
+        <div class="dbx-dash__hero-body">
+          <div class="dbx-dash__hero-eyebrow" :class="heroEyebrowClass()" x-text="heroEyebrow()"></div>
+          <div class="dbx-dash__hero-title" x-text="heroTitle()"></div>
+          <div class="dbx-dash__hero-sub" x-text="heroSub()"></div>
         </div>
-        <div class="dbx-dash__stat">
-          <div class="dbx-dash__stat-label">On disk</div>
-          <div class="dbx-dash__stat-value" x-text="formatSize(summary.total_bytes)"></div>
+        <template x-if="topRisk()">
+          <button class="btn btn--primary" style="flex:none;" @click="openInBackups(topRisk())"
+                  x-text="'Review ' + topRisk().host + ' / ' + topRisk().database + ' →'"></button>
+        </template>
+      </div>
+
+      <!-- STAT TILES: wired to summary + derived oldest/at-risk -->
+      <div class="tiles" style="margin-bottom:18px;">
+        <div class="tile">
+          <div class="tile__label">Backups</div>
+          <div class="tile__value" x-text="summary.total_backups"></div>
+          <div class="tile__meta" x-text="'across ' + summary.hosts + countLabelHosts()"></div>
         </div>
-        <div class="dbx-dash__stat">
-          <div class="dbx-dash__stat-label">Hosts / DBs</div>
-          <div class="dbx-dash__stat-value" x-text="summary.hosts + ' / ' + summary.databases"></div>
+        <div class="tile">
+          <div class="tile__label">On disk</div>
+          <div class="tile__value" x-text="formatSize(summary.total_bytes)"></div>
+          <div class="tile__meta">total backup size</div>
         </div>
-        <div class="dbx-dash__stat">
-          <div class="dbx-dash__stat-label">Fresh</div>
-          <div class="dbx-dash__stat-value dbx-dash__stat-value--fresh" x-text="summary.fresh"></div>
+        <div class="tile">
+          <div class="tile__label">Databases</div>
+          <div class="tile__value" x-text="summary.databases"></div>
+          <div class="tile__meta" x-text="summary.hosts + countLabelHosts()"></div>
         </div>
-        <div class="dbx-dash__stat">
-          <div class="dbx-dash__stat-label">Aging</div>
-          <div class="dbx-dash__stat-value dbx-dash__stat-value--aging" x-text="summary.aging"></div>
-        </div>
-        <div class="dbx-dash__stat">
-          <div class="dbx-dash__stat-label">Stale</div>
-          <div class="dbx-dash__stat-value dbx-dash__stat-value--stale" x-text="summary.stale"></div>
+        <div class="tile">
+          <div class="tile__label">Oldest backup</div>
+          <div class="tile__value" x-text="oldestAgeLabel()"></div>
+          <div class="tile__meta" x-text="oldestPairLabel()"></div>
         </div>
       </div>
 
-      <div class="dbx-dash__grid">
-        <template x-for="c in cards" :key="c.host + '/' + c.database">
-          <div class="dbx-dash__card"
-               :class="{
-                 'dbx-dash__card--stale': c.status === 'stale',
-                 'dbx-dash__card--aging': c.status === 'aging',
-                 'dbx-dash__card--fresh': c.status === 'fresh',
-               }"
-               @click="openInBackups(c)"
-               role="button" tabindex="0"
-               @keydown.enter.prevent="openInBackups(c)"
-               @keydown.space.prevent="openInBackups(c)">
-            <div class="dbx-dash__card-head">
-              <h3 class="dbx-dash__card-title">
-                <span x-text="c.host"></span>
-                <small x-text="' / ' + c.database"></small>
-              </h3>
-              <template x-if="c.status === 'fresh'">
-                <span class="dbx-backups__chip dbx-backups__chip--complete">✓ fresh</span>
-              </template>
-              <template x-if="c.status === 'aging'">
-                <span class="dbx-backups__chip dbx-backups__chip--stage">⚠ aging</span>
-              </template>
-              <template x-if="c.status === 'stale'">
-                <span class="dbx-backups__chip dbx-backups__chip--incomplete">✗ stale</span>
-              </template>
-            </div>
+      <!-- TODO: trend charts need a time-series from /api/dashboard -->
 
-            <dl class="dbx-dash__row">
-              <dt>Last success</dt>
-              <dd x-text="lastSuccessLabel(c)"></dd>
-            </dl>
+      <!-- NEEDS ATTENTION: real cards filtered to non-fresh / failures -->
+      <template x-if="attentionCards().length > 0">
+        <div class="card" style="border-color: color-mix(in srgb, var(--amber) 35%, var(--border));">
+          <div class="card__head" style="margin-bottom:4px;">
+            <div class="card__title">Needs attention</div>
+            <div class="card__hint" x-text="attentionCards().length + (attentionCards().length === 1 ? ' pair' : ' pairs')"></div>
+          </div>
 
-            <template x-if="c.last_failure">
-              <dl class="dbx-dash__row dbx-dash__row--failure">
-                <dt>Last failure</dt>
-                <dd x-text="formatAge(c.last_failure.timestamp) + ' ago'"></dd>
-              </dl>
-            </template>
-            <template x-if="c.last_failure && c.last_failure.error">
-              <div class="dbx-dash__error" :title="c.last_failure.error" x-text="c.last_failure.error"></div>
-            </template>
-
-            <template x-if="c.next_scheduled">
-              <dl class="dbx-dash__row">
-                <dt>Next run</dt>
-                <dd>
-                  <span x-text="c.next_scheduled.when"></span>
-                  <span style="color: var(--md-default-fg-color--light);"
-                        x-text="' (' + formatNextAt(c.next_scheduled.next_at) + ')'"></span>
-                </dd>
-              </dl>
-            </template>
-
-            <!--
-              PR-Y4: per-card "Test connection" affordance. Wraps `dbx test
-              <host>` so the user can validate connectivity (ssh → container
-              → creds → SELECT 1) without leaving the dashboard. The button
-              and panel stop click propagation so they don't also trigger
-              the card's openInBackups() handler.
-            -->
-            <div class="dbx-dash__test-row" @click.stop>
-              <button class="dbx-dash__test-btn"
-                      @click.stop="toggleTest(c)"
-                      x-text="testButtonLabel(c)"></button>
-              <span class="dbx-dash__test-pill"
-                    :class="testPillClass(c)"
-                    x-text="testPillLabel(c)"></span>
-            </div>
-            <template x-if="testState(c).expanded">
-              <div class="dbx-dash__test-log"
-                   :class="{ 'dbx-dash__test-log--empty': testState(c).log.length === 0 }"
-                   @click.stop>
-                <template x-if="testState(c).log.length === 0">
-                  <span>(starting…)</span>
+          <template x-for="c in attentionCards()" :key="c.host + '/' + c.database">
+            <div class="dbx-dash__att-row">
+              <div class="row">
+                <template x-if="c.last_failure">
+                  <span class="badge badge--fail">✕ failing</span>
                 </template>
-                <template x-for="(line, i) in testState(c).log" :key="i">
-                  <div x-text="line"></div>
+                <template x-if="!c.last_failure && c.status === 'stale'">
+                  <span class="badge badge--fail">stale</span>
                 </template>
+                <template x-if="!c.last_failure && c.status === 'aging'">
+                  <span class="badge badge--age">aging</span>
+                </template>
+                <div>
+                  <div style="font-weight:600;">
+                    <span x-text="c.host"></span>
+                    <span class="muted" style="font-weight:400;" x-text="'/ ' + c.database"></span>
+                  </div>
+                  <template x-if="c.last_failure && c.last_failure.error">
+                    <div class="dbx-dash__err" :title="c.last_failure.error"
+                         x-text="c.last_failure.error + ' · ' + formatAge(c.last_failure.timestamp) + ' ago'"></div>
+                  </template>
+                  <template x-if="c.last_failure && !c.last_failure.error">
+                    <div class="dbx-dash__err" x-text="'last failure ' + formatAge(c.last_failure.timestamp) + ' ago'"></div>
+                  </template>
+                  <template x-if="!c.last_failure">
+                    <div class="dbx-dash__err" x-text="'last success ' + lastSuccessLabel(c) + ' ago'"></div>
+                  </template>
+                </div>
+                <div class="spacer"></div>
+                <!--
+                  PR-Y4: per-card "Test connection" affordance. Wraps `dbx test
+                  <host>` so the user can validate connectivity (ssh → container
+                  → creds → SELECT 1) without leaving the dashboard. Restyled to
+                  the shared .btn look.
+                -->
+                <button class="btn btn--ghost btn--sm"
+                        @click="toggleTest(c)"
+                        x-text="testButtonLabel(c)"></button>
+                <span class="badge" :class="testBadgeClass(c)" x-show="testPillLabel(c)"
+                      x-text="testPillLabel(c)"></span>
+                <button class="btn btn--primary btn--sm" @click="openInBackups(c)">Back up now</button>
               </div>
-            </template>
+
+              <template x-if="testState(c).expanded">
+                <div class="dbx-dash__test-log"
+                     :class="{ 'dbx-dash__test-log--empty': testState(c).log.length === 0 }">
+                  <template x-if="testState(c).log.length === 0">
+                    <span>(starting…)</span>
+                  </template>
+                  <template x-for="(line, i) in testState(c).log" :key="i">
+                    <div x-text="line"></div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <template x-if="attentionCards().length === 0">
+        <div class="note note--info">
+          <strong>All clear.</strong> Every host / database pair has a fresh backup.
+        </div>
+      </template>
+
+      <!-- RECENT ACTIVITY: derived from cards' last_success/last_failure -->
+      <div class="section-title">Recent activity</div>
+      <div class="card" style="padding-top:6px; padding-bottom:6px;">
+        <template x-for="a in recentActivity()" :key="a.host + '/' + a.database + '/' + a.kind">
+          <div class="dbx-dash__act-row row" style="cursor:pointer;" @click="openInBackups(a)"
+               role="button" tabindex="0"
+               @keydown.enter.prevent="openInBackups(a)"
+               @keydown.space.prevent="openInBackups(a)">
+            <span class="sdot" :class="a.kind === 'failure' ? 'sdot--fail' : 'sdot--ok'"></span>
+            <div style="font-weight:550;">
+              <span x-text="a.host"></span>
+              <span class="muted" style="font-weight:400;" x-text="'/ ' + a.database"></span>
+            </div>
+            <span class="spacer muted" x-text="a.ageLabel"></span>
+            <span class="num" style="width:72px; text-align:right;" x-text="a.sizeLabel"></span>
           </div>
         </template>
       </div>
@@ -264,14 +274,6 @@
         if (s.status === 'ok')      return '✓ Connected';
         if (s.status === 'err')     return '✗ Failed (exit ' + (s.exitCode == null ? '?' : s.exitCode) + ')';
         return '';
-      },
-
-      testPillClass(c) {
-        const s = this.testState(c);
-        if (s.status === 'running') return 'dbx-dash__test-pill--running';
-        if (s.status === 'ok')      return 'dbx-dash__test-pill--ok';
-        if (s.status === 'err')     return 'dbx-dash__test-pill--err';
-        return 'dbx-dash__test-pill--idle';
       },
 
       // PR-Y4: button is a tri-state — collapsed/idle → start; running →
@@ -429,6 +431,130 @@
         if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
         if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
         return (n / 1024 ** 3).toFixed(2) + ' GB';
+      },
+
+      // Hero badge: map test status → shared .badge variant.
+      testBadgeClass(c) {
+        const s = this.testState(c);
+        if (s.status === 'running') return 'badge--info';
+        if (s.status === 'ok')      return 'badge--ok';
+        if (s.status === 'err')     return 'badge--fail';
+        return 'badge--mut';
+      },
+
+      // Donut geometry. Circumference of r=30 ≈ 188.5. Each status segment's
+      // arc length is proportional to its share of the total pairs.
+      _donutCirc() { return 2 * Math.PI * 30; },
+      _donutTotal() {
+        const t = this.summary.fresh + this.summary.aging + this.summary.stale;
+        return t > 0 ? t : 1;
+      },
+      _donutLen(kind) {
+        return (this.summary[kind] / this._donutTotal()) * this._donutCirc();
+      },
+      donutDash(kind) {
+        const len = this._donutLen(kind);
+        return `${len} ${this._donutCirc() - len}`;
+      },
+      // Stack segments in draw order stale → aging → fresh (matches markup).
+      donutOffset(kind) {
+        const c = this._donutCirc();
+        if (kind === 'stale') return 0;
+        if (kind === 'aging') return -this._donutLen('stale');
+        return -(this._donutLen('stale') + this._donutLen('aging'));
+      },
+
+      // Cards needing attention: any non-fresh status or a recorded failure,
+      // highest-risk first (cards already arrive stale→aging→fresh sorted).
+      attentionCards() {
+        return this.cards.filter(c => c.status !== 'fresh' || c.last_failure);
+      },
+
+      // The single worst pair, used by the hero CTA. null when all fresh.
+      topRisk() {
+        const a = this.attentionCards();
+        return a.length > 0 ? a[0] : null;
+      },
+
+      heroEyebrow() {
+        const n = this.attentionCards().length;
+        if (n === 0) return 'All healthy';
+        return `${n} need${n === 1 ? 's' : ''} attention`;
+      },
+      heroEyebrowClass() {
+        if (this.summary.stale > 0 || this.cards.some(c => c.last_failure)) return 'dbx-dash__hero-eyebrow--bad';
+        if (this.summary.aging > 0) return 'dbx-dash__hero-eyebrow--warn';
+        return 'dbx-dash__hero-eyebrow--ok';
+      },
+      heroTitle() {
+        const t = this.topRisk();
+        if (!t) return 'Everything is healthy';
+        if (this.attentionCards().length === 1) return 'Almost everything is healthy';
+        return 'Some backups need attention';
+      },
+      heroSub() {
+        const total = this.summary.databases;
+        const fresh = this.summary.fresh;
+        const t = this.topRisk();
+        const head = `${fresh} of your ${total} host / database pair${total === 1 ? '' : 's'} ${fresh === 1 ? 'has' : 'have'} a fresh backup.`;
+        if (!t) return head;
+        const where = `${t.host} / ${t.database}`;
+        if (t.last_failure) {
+          return `${head} ${where} has been failing — its last successful backup is ${t.status}.`;
+        }
+        return `${head} ${where}'s last backup is ${t.status} (${this.lastSuccessLabel(t)}).`;
+      },
+
+      countLabelHosts() {
+        return this.summary.hosts === 1 ? ' host' : ' hosts';
+      },
+
+      // Oldest backup tile: the pair with the largest last_success age.
+      _oldestCard() {
+        let best = null;
+        for (const c of this.cards) {
+          const age = (c.last_success && c.last_success.age_seconds) || 0;
+          if (!best || age > best._age) { best = { card: c, _age: age }; }
+        }
+        return best;
+      },
+      oldestAgeLabel() {
+        const o = this._oldestCard();
+        if (!o || !o.card.last_success) return '—';
+        return this.formatAge(o.card.last_success.timestamp);
+      },
+      oldestPairLabel() {
+        const o = this._oldestCard();
+        if (!o) return '—';
+        return `${o.card.host} / ${o.card.database}`;
+      },
+
+      // Recent activity feed: one row per pair, using the more-recent of its
+      // last_success / last_failure, newest first, capped to a short list.
+      recentActivity() {
+        const rows = [];
+        for (const c of this.cards) {
+          let kind = null, ts = null, size = null;
+          const succ = c.last_success && c.last_success.timestamp ? new Date(c.last_success.timestamp).getTime() : null;
+          const fail = c.last_failure && c.last_failure.timestamp ? new Date(c.last_failure.timestamp).getTime() : null;
+          if (fail != null && (succ == null || fail >= succ)) {
+            kind = 'failure'; ts = c.last_failure.timestamp; size = null;
+          } else if (succ != null) {
+            kind = 'success'; ts = c.last_success.timestamp; size = c.last_success.size;
+          } else {
+            continue;
+          }
+          rows.push({
+            host: c.host,
+            database: c.database,
+            kind,
+            _t: new Date(ts).getTime() || 0,
+            ageLabel: this.formatAge(ts) + ' ago',
+            sizeLabel: kind === 'failure' ? '—' : this.formatSize(size),
+          });
+        }
+        rows.sort((a, b) => b._t - a._t);
+        return rows.slice(0, 8);
       },
     };
   }

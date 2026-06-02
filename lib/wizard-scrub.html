@@ -15,230 +15,150 @@
   containment used by /api/backups/delete.
 -->
 <style>
-  .dbx-scrub__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
-  .dbx-scrub__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; margin-bottom: 1.5rem; }
-  .dbx-scrub__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
-  .dbx-scrub__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-  .dbx-scrub__table tbody tr:hover { background: var(--md-code-bg-color); }
-
-  .dbx-scrub__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
-  .dbx-scrub__path  { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
-  .dbx-scrub__path--missing { color: #c43d3d; }
-
-  /* Chips reuse Backups view's palette so the visual vocabulary stays consistent. */
-  .dbx-scrub__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
-  .dbx-scrub__chip--ok      { background: rgba(74, 158, 76, 0.30); color: #1e5a20; }
-  .dbx-scrub__chip--missing { background: rgba(196, 61, 61, 0.30); color: #8a1f1f; }
-  .dbx-scrub__chip--required{ background: rgba(0, 102, 255, 0.22); color: var(--md-accent-fg-color); }
-  .dbx-scrub__chip--prod    { background: rgba(196, 61, 61, 0.28); color: #8a1f1f; letter-spacing: 0.03em; }
-  .dbx-scrub__chip--stage   { background: rgba(218, 135, 33, 0.30); color: #8a4c10; letter-spacing: 0.03em; }
-  @media (prefers-color-scheme: dark) {
-    .dbx-scrub__chip--ok      { color: #6fd073; }
-    .dbx-scrub__chip--missing { color: #ff8a8a; }
-    .dbx-scrub__chip--required{ color: #7cb9ff; }
-    .dbx-scrub__chip--prod    { color: #ff8a8a; }
-    .dbx-scrub__chip--stage   { color: #ffbf6b; }
-  }
-
-  .dbx-scrub__panel {
-    background: var(--md-code-bg-color);
-    border: 1px solid var(--md-default-fg-color--lightest);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    margin-bottom: 1rem;
-  }
-  .dbx-scrub__panel h3 { margin: 0 0 0.75rem; font-size: 1rem; }
-  .dbx-scrub__close {
-    float: right;
-    background: transparent;
-    border: 0;
-    color: var(--md-default-fg-color--light);
-    cursor: pointer;
-    font-size: 1.25rem;
-    line-height: 1;
-  }
-
-  .dbx-scrub__row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; }
-  .dbx-scrub__row label { min-width: 140px; color: var(--md-default-fg-color--light); font-size: 0.875rem; }
-  .dbx-scrub__input, .dbx-scrub__select {
-    flex: 1; min-width: 220px;
-    padding: 0.375rem 0.5rem; border-radius: 4px;
-    border: 1px solid var(--md-default-fg-color--lighter);
-    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
-    font-size: 0.875rem;
-  }
-  .dbx-scrub__select--narrow { min-width: 160px; flex: 0 1 auto; }
-
-  .dbx-scrub__textarea {
-    width: 100%; min-height: 240px;
-    padding: 0.5rem;
-    border: 1px solid var(--md-default-fg-color--lighter);
-    border-radius: 4px;
-    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
-    font-family: var(--md-code-font-family); font-size: 0.8125rem;
-  }
-
-  .dbx-scrub__error {
-    color: #8a1f1f;
-    background: rgba(196, 61, 61, 0.10);
-    padding: 0.5rem 0.75rem;
-    border-radius: 4px;
-    margin: 0.5rem 0;
-    font-size: 0.875rem;
-  }
-  .dbx-scrub__note {
-    color: var(--md-default-fg-color--light);
-    font-size: 0.8125rem;
-    margin: 0.25rem 0 0.75rem;
-  }
-
-  /* Drift report formatting. */
-  .dbx-scrub__drift-section { margin-top: 0.75rem; }
-  .dbx-scrub__drift-section h4 { margin: 0 0 0.25rem; font-size: 0.9375rem; }
-  .dbx-scrub__drift-list { margin: 0; padding-left: 1.25rem; font-size: 0.875rem; }
-  .dbx-scrub__drift-list code { font-size: 0.8125rem; }
-
-  /* Editor: per-table card with per-column strategy rows. */
-  .dbx-scrub__editor-table {
-    border: 1px solid var(--md-default-fg-color--lightest);
-    border-radius: 6px;
-    margin-bottom: 0.75rem;
-    background: var(--md-default-bg-color);
-  }
-  .dbx-scrub__editor-thead {
-    padding: 0.5rem 0.75rem;
-    background: var(--md-code-bg-color);
-    border-bottom: 1px solid var(--md-default-fg-color--lightest);
-    display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
-  }
-  .dbx-scrub__editor-thead strong { font-family: var(--md-code-font-family); font-size: 0.9375rem; }
-  .dbx-scrub__editor-col { display: flex; gap: 0.5rem; align-items: center; padding: 0.375rem 0.75rem; font-size: 0.875rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); }
-  .dbx-scrub__editor-col:last-child { border-bottom: none; }
-  .dbx-scrub__editor-col code { font-family: var(--md-code-font-family); font-size: 0.8125rem; min-width: 180px; }
-  .dbx-scrub__editor-col .dbx-scrub__param {
-    flex: 1; min-width: 100px;
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--md-default-fg-color--lighter);
-    border-radius: 4px;
-    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
-    font-size: 0.8125rem;
-  }
-  .dbx-scrub__no-pii { padding: 0.5rem 0.75rem; color: var(--md-default-fg-color--light); font-size: 0.875rem; }
+  .scrub-path { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); word-break: break-all; }
+  .scrub-path--missing { color: var(--red); }
+  .scrub-panel { margin-top: 14px; }
+  .scrub-panel__close { margin-left: auto; }
+  .scrub-drift-section { margin-top: 14px; }
+  .scrub-drift-section h4 { margin: 0 0 6px; font-size: 13px; font-weight: 650; }
+  .scrub-drift-list { margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-2); }
+  .scrub-drift-list code { font-family: var(--mono); font-size: 12.5px; }
+  .scrub-editor-col { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .scrub-editor-col:last-child { border-bottom: none; }
+  .scrub-editor-col code { font-family: var(--mono); font-size: 12.5px; min-width: 180px; flex: none; }
+  .scrub-editor-col select { width: auto; min-width: 160px; flex: 0 1 auto; }
+  .scrub-editor-col input.scrub-param { width: auto; flex: 1; min-width: 120px; }
+  .scrub-no-pii { padding: 10px 12px; color: var(--text-2); font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .scrub-no-pii input { width: auto; flex: 1; min-width: 200px; }
 </style>
 
 <div x-data="dbxScrub()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Scrub</h2>
-    <p class="dbx-view__subtitle">
-      Per-host PII manifests. <code>dbx scrub init</code> drafts one from
-      a live schema; <code>dbx scrub check</code> diffs the manifest
-      against the schema and refuses restores when it drifts. The
-      "Skip PII scrub gate" checkbox on the Restore view bypasses this
-      entirely — use it sparingly.
-    </p>
-  </header>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Configure</p>
+      <h1 class="page-h1">Scrub rules</h1>
+      <p class="page-sub">
+        Per-host PII manifests. <code class="mono">dbx scrub init</code> drafts one from
+        a live schema; <code class="mono">dbx scrub check</code> diffs the manifest
+        against the schema and refuses restores when it drifts.
+      </p>
+    </div>
+    <div class="head-actions">
+      <span class="muted" x-text="hosts.length === 0 ? '' : `${hosts.length} host${hosts.length === 1 ? '' : 's'}`"></span>
+      <button class="btn btn--ghost" @click="loadStatus()" :disabled="loading">Refresh</button>
+    </div>
+  </div>
 
-  <div class="dbx-scrub__toolbar">
-    <button class="dbx-backups__btn" @click="loadStatus()" :disabled="loading">Refresh</button>
-    <span class="dbx-runs__count" x-text="hosts.length === 0 ? '' : `${hosts.length} host${hosts.length === 1 ? '' : 's'}`"></span>
+  <div class="note note--warn" style="margin-bottom:18px;">
+    Rules are applied at backup time, to a copy of the data. The original <strong>prod data is never modified</strong>.
+    The "Skip PII scrub gate" checkbox on the Restore view bypasses this entirely — use it sparingly.
   </div>
 
   <template x-if="error">
-    <p class="dbx-scrub__error" x-text="error"></p>
+    <div class="note note--danger" style="margin-bottom:18px; white-space: pre-wrap;" x-text="error"></div>
   </template>
 
   <template x-if="loading && hosts.length === 0">
-    <p class="dbx-scrub__empty">Loading…</p>
+    <div class="empty"><div class="empty__title">Loading…</div></div>
   </template>
 
   <template x-if="!loading && hosts.length === 0">
-    <p class="dbx-scrub__empty">
-      No hosts configured. Add one in the <a @click="$store.dbx.view = 'config'" style="cursor: pointer; color: var(--md-accent-fg-color);">Config view</a> first, then return here to draft a scrub manifest.
-    </p>
+    <div class="empty">
+      <div class="empty__title">No hosts configured</div>
+      Add one in the
+      <a @click="$store.dbx.view = 'config'" style="cursor: pointer;">Config view</a>
+      first, then return here to draft a scrub manifest.
+    </div>
   </template>
 
   <template x-if="hosts.length > 0">
-    <table class="dbx-scrub__table">
-      <thead>
-        <tr>
-          <th>Host</th>
-          <th>Type</th>
-          <th>Safety</th>
-          <th>Manifest</th>
-          <th>Status</th>
-          <th style="width: 280px;">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        <template x-for="h in hosts" :key="h.alias">
+    <div class="card card--flush">
+      <table class="tbl">
+        <thead>
           <tr>
-            <td><strong x-text="h.alias"></strong></td>
-            <td x-text="h.type || '—'"></td>
-            <td>
-              <template x-if="h.safety === 'prod'">
-                <span class="dbx-scrub__chip dbx-scrub__chip--prod">PROD</span>
-              </template>
-              <template x-if="h.safety === 'stage'">
-                <span class="dbx-scrub__chip dbx-scrub__chip--stage">STAGE</span>
-              </template>
-              <template x-if="h.safety === 'local' || !h.safety">
-                <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;">local</span>
-              </template>
-            </td>
-            <td>
-              <template x-if="h.manifest_path">
-                <span class="dbx-scrub__path" :class="{ 'dbx-scrub__path--missing': !h.manifest_exists }"
-                      x-text="h.manifest_path"></span>
-              </template>
-              <template x-if="!h.manifest_path">
-                <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;">(not configured)</span>
-              </template>
-            </td>
-            <td>
-              <template x-if="!h.manifest_path">
-                <span class="dbx-scrub__chip dbx-scrub__chip--missing">no manifest</span>
-              </template>
-              <template x-if="h.manifest_path && !h.manifest_exists">
-                <span class="dbx-scrub__chip dbx-scrub__chip--missing">file missing</span>
-              </template>
-              <template x-if="h.manifest_exists">
-                <span class="dbx-scrub__chip dbx-scrub__chip--ok">ready</span>
-              </template>
-              <template x-if="h.scrub_required">
-                <span class="dbx-scrub__chip dbx-scrub__chip--required" style="margin-left: 0.25rem;">required</span>
-              </template>
-            </td>
-            <td>
-              <button class="dbx-backups__btn dbx-backups__btn--secondary"
-                      @click="openInit(h)"
-                      :disabled="busyAlias === h.alias">Init…</button>
-              <button class="dbx-backups__btn"
-                      @click="openCheck(h)"
-                      :disabled="busyAlias === h.alias || !h.manifest_exists"
-                      :title="!h.manifest_exists ? 'Configure a manifest first via Init' : ''">Check</button>
-              <button class="dbx-backups__btn"
-                      @click="openEdit(h)"
-                      :disabled="busyAlias === h.alias || !h.manifest_exists"
-                      :title="!h.manifest_exists ? 'No manifest to edit yet' : ''">Edit…</button>
-            </td>
+            <th>Host</th>
+            <th>Type</th>
+            <th>Safety</th>
+            <th>Manifest</th>
+            <th>Status</th>
+            <th></th>
           </tr>
-        </template>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          <template x-for="h in hosts" :key="h.alias">
+            <tr>
+              <td><strong x-text="h.alias"></strong></td>
+              <td class="muted" x-text="h.type || '—'"></td>
+              <td>
+                <template x-if="h.safety === 'prod'">
+                  <span class="chip chip--prod">PROD</span>
+                </template>
+                <template x-if="h.safety === 'stage'">
+                  <span class="chip chip--stage">STAGE</span>
+                </template>
+                <template x-if="h.safety === 'local' || !h.safety">
+                  <span class="muted">local</span>
+                </template>
+              </td>
+              <td>
+                <template x-if="h.manifest_path">
+                  <span class="scrub-path" :class="{ 'scrub-path--missing': !h.manifest_exists }"
+                        x-text="h.manifest_path"></span>
+                </template>
+                <template x-if="!h.manifest_path">
+                  <span class="muted">(not configured)</span>
+                </template>
+              </td>
+              <td>
+                <template x-if="!h.manifest_path">
+                  <span class="chip chip--stale">no manifest</span>
+                </template>
+                <template x-if="h.manifest_path && !h.manifest_exists">
+                  <span class="chip chip--stale">file missing</span>
+                </template>
+                <template x-if="h.manifest_exists">
+                  <span class="chip chip--fresh">ready</span>
+                </template>
+                <template x-if="h.scrub_required">
+                  <span class="chip chip--enc" style="margin-left: 4px;">required</span>
+                </template>
+              </td>
+              <td>
+                <div class="tbl__actions">
+                  <button class="btn btn--ghost btn--sm"
+                          @click="openInit(h)"
+                          :disabled="busyAlias === h.alias">Init…</button>
+                  <button class="btn btn--ghost btn--sm"
+                          @click="openCheck(h)"
+                          :disabled="busyAlias === h.alias || !h.manifest_exists"
+                          :title="!h.manifest_exists ? 'Configure a manifest first via Init' : ''">Check</button>
+                  <button class="btn btn--ghost btn--sm"
+                          @click="openEdit(h)"
+                          :disabled="busyAlias === h.alias || !h.manifest_exists"
+                          :title="!h.manifest_exists ? 'No manifest to edit yet' : ''">Edit…</button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </template>
 
   <!-- Init panel: pick a database, run scrub init, preview draft, save. -->
   <template x-if="panel === 'init'">
-    <div class="dbx-scrub__panel">
-      <button class="dbx-scrub__close" @click="closePanel()">×</button>
-      <h3>Init manifest for <code x-text="active.alias"></code></h3>
+    <div class="card scrub-panel">
+      <div class="card__head">
+        <div class="card__title">Init manifest for <code class="mono" x-text="active.alias"></code></div>
+        <button class="btn btn--ghost btn--sm scrub-panel__close" @click="closePanel()">Close</button>
+      </div>
 
       <template x-if="!draft">
-        <div>
-          <div class="dbx-scrub__row">
+        <div class="form-grid">
+          <div class="field">
             <label for="dbx-scrub-init-db">Database</label>
             <template x-if="active.databases && active.databases.length > 0">
-              <select id="dbx-scrub-init-db" class="dbx-scrub__select" x-model="initDatabase">
+              <select id="dbx-scrub-init-db" x-model="initDatabase">
                 <option value="">(pick a database)</option>
                 <template x-for="db in active.databases" :key="db">
                   <option :value="db" x-text="db"></option>
@@ -247,61 +167,58 @@
               </select>
             </template>
             <template x-if="!active.databases || active.databases.length === 0">
-              <input id="dbx-scrub-init-db" class="dbx-scrub__input"
+              <input id="dbx-scrub-init-db" type="text"
                      x-model="initDatabase"
                      placeholder="e.g. myapp_production">
             </template>
           </div>
           <template x-if="initDatabase === '__custom__'">
-            <div class="dbx-scrub__row">
+            <div class="field">
               <label for="dbx-scrub-init-db-free">Custom name</label>
-              <input id="dbx-scrub-init-db-free" class="dbx-scrub__input"
+              <input id="dbx-scrub-init-db-free" type="text"
                      x-model="initDatabaseCustom"
                      placeholder="myapp_production">
             </div>
           </template>
-          <div class="dbx-scrub__row">
-            <label></label>
-            <label style="min-width: auto;">
-              <input type="checkbox" x-model="initIncludeEmpty">
-              Include empty tables (marks them <code>no_pii: true</code>)
-            </label>
-          </div>
-          <p class="dbx-scrub__note">
-            Runs <code>dbx scrub init <span x-text="active.alias"></span>/<span
+          <label class="check">
+            <input type="checkbox" x-model="initIncludeEmpty">
+            <span>Include empty tables (marks them <code class="mono">no_pii: true</code>)</span>
+          </label>
+          <p class="page-sub" style="margin:0;">
+            Runs <code class="mono">dbx scrub init <span x-text="active.alias"></span>/<span
               x-text="effectiveInitDb() || '&lt;db&gt;'"></span></code> and
             shows the draft before writing anything. Requires docker — the
-            CLI connects to the host to walk <code>information_schema</code>.
+            CLI connects to the host to walk <code class="mono">information_schema</code>.
           </p>
-          <div class="dbx-scrub__row">
-            <button class="dbx-backups__btn" @click="runInit()"
+          <div class="row">
+            <button class="btn btn--primary" @click="runInit()"
                     :disabled="!effectiveInitDb() || busyAlias === active.alias">
               <span x-show="busyAlias !== active.alias">Run scrub init</span>
               <span x-show="busyAlias === active.alias">Running…</span>
             </button>
-            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Cancel</button>
+            <button class="btn btn--ghost" @click="closePanel()">Cancel</button>
           </div>
         </div>
       </template>
 
       <template x-if="draft">
-        <div>
-          <p class="dbx-scrub__note">
+        <div class="form-grid" style="max-width: none;">
+          <p class="page-sub" style="margin:0;">
             Draft generated. Review the JSON, set a save path, and write it
-            to disk. We'll also set <code>hosts.<span x-text="active.alias"></span>.scrub.manifest</code>
+            to disk. We'll also set <code class="mono">hosts.<span x-text="active.alias"></span>.scrub.manifest</code>
             in your config so future runs find it.
           </p>
-          <div class="dbx-scrub__row">
+          <div class="field">
             <label for="dbx-scrub-save-path">Save to</label>
-            <input id="dbx-scrub-save-path" class="dbx-scrub__input" x-model="savePath">
+            <input id="dbx-scrub-save-path" type="text" x-model="savePath">
           </div>
-          <textarea class="dbx-scrub__textarea" x-model="draftText" spellcheck="false"></textarea>
-          <div class="dbx-scrub__row" style="margin-top: 0.5rem;">
-            <button class="dbx-backups__btn" @click="saveDraft()" :disabled="busyAlias === active.alias">
+          <textarea x-model="draftText" spellcheck="false" style="min-height: 240px;"></textarea>
+          <div class="row">
+            <button class="btn btn--primary" @click="saveDraft()" :disabled="busyAlias === active.alias">
               <span x-show="busyAlias !== active.alias">Save manifest</span>
               <span x-show="busyAlias === active.alias">Saving…</span>
             </button>
-            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="draft = null; draftText = ''">Back</button>
+            <button class="btn btn--ghost" @click="draft = null; draftText = ''">Back</button>
           </div>
         </div>
       </template>
@@ -310,16 +227,18 @@
 
   <!-- Check panel: run scrub check, render drift report. -->
   <template x-if="panel === 'check'">
-    <div class="dbx-scrub__panel">
-      <button class="dbx-scrub__close" @click="closePanel()">×</button>
-      <h3>Drift check for <code x-text="active.alias"></code></h3>
+    <div class="card scrub-panel">
+      <div class="card__head">
+        <div class="card__title">Drift check for <code class="mono" x-text="active.alias"></code></div>
+        <button class="btn btn--ghost btn--sm scrub-panel__close" @click="closePanel()">Close</button>
+      </div>
 
       <template x-if="!checkResult">
-        <div>
-          <div class="dbx-scrub__row">
+        <div class="form-grid">
+          <div class="field">
             <label for="dbx-scrub-check-db">Database</label>
             <template x-if="active.databases && active.databases.length > 0">
-              <select id="dbx-scrub-check-db" class="dbx-scrub__select" x-model="checkDatabase">
+              <select id="dbx-scrub-check-db" x-model="checkDatabase">
                 <option value="">(pick a database)</option>
                 <template x-for="db in active.databases" :key="db">
                   <option :value="db" x-text="db"></option>
@@ -327,22 +246,22 @@
               </select>
             </template>
             <template x-if="!active.databases || active.databases.length === 0">
-              <input id="dbx-scrub-check-db" class="dbx-scrub__input" x-model="checkDatabase"
+              <input id="dbx-scrub-check-db" type="text" x-model="checkDatabase"
                      placeholder="e.g. myapp_production">
             </template>
           </div>
-          <p class="dbx-scrub__note">
+          <p class="page-sub" style="margin:0;">
             Compares the configured manifest against the live schema.
-            Same exit semantics as <code>dbx scrub check --json</code>:
+            Same exit semantics as <code class="mono">dbx scrub check --json</code>:
             0 = clean, 2 = drift, 1 = error.
           </p>
-          <div class="dbx-scrub__row">
-            <button class="dbx-backups__btn" @click="runCheck()"
+          <div class="row">
+            <button class="btn btn--primary" @click="runCheck()"
                     :disabled="!checkDatabase || busyAlias === active.alias">
               <span x-show="busyAlias !== active.alias">Run check</span>
               <span x-show="busyAlias === active.alias">Running…</span>
             </button>
-            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Cancel</button>
+            <button class="btn btn--ghost" @click="closePanel()">Cancel</button>
           </div>
         </div>
       </template>
@@ -350,22 +269,22 @@
       <template x-if="checkResult">
         <div>
           <template x-if="checkResult.ok">
-            <p>
-              <span class="dbx-scrub__chip dbx-scrub__chip--ok">no drift</span>
-              <span style="margin-left: 0.5rem;">The manifest matches the live schema.</span>
-            </p>
+            <div class="row">
+              <span class="chip chip--fresh">no drift</span>
+              <span>The manifest matches the live schema.</span>
+            </div>
           </template>
           <template x-if="!checkResult.ok">
             <div>
-              <p>
-                <span class="dbx-scrub__chip dbx-scrub__chip--missing">drift detected</span>
-                <span style="margin-left: 0.5rem;">This manifest does not cover the current schema. A clone scrubbed against it may leak PII.</span>
-              </p>
+              <div class="row" style="margin-bottom: 4px;">
+                <span class="chip chip--stale">drift detected</span>
+                <span>This manifest does not cover the current schema. A clone scrubbed against it may leak PII.</span>
+              </div>
 
               <template x-if="(checkResult.report.new_columns_with_dict_match || []).length > 0">
-                <div class="dbx-scrub__drift-section">
+                <div class="scrub-drift-section">
                   <h4>New columns matching the PII dictionary</h4>
-                  <ul class="dbx-scrub__drift-list">
+                  <ul class="scrub-drift-list">
                     <template x-for="c in checkResult.report.new_columns_with_dict_match" :key="`${c.table}.${c.column}`">
                       <li>
                         <code x-text="`${c.table}.${c.column}`"></code> —
@@ -378,9 +297,9 @@
               </template>
 
               <template x-if="(checkResult.report.new_tables_with_dict_matches || []).length > 0">
-                <div class="dbx-scrub__drift-section">
+                <div class="scrub-drift-section">
                   <h4>New tables (not in manifest) with dictionary matches</h4>
-                  <ul class="dbx-scrub__drift-list">
+                  <ul class="scrub-drift-list">
                     <template x-for="t in checkResult.report.new_tables_with_dict_matches" :key="t.table">
                       <li>
                         <code x-text="t.table"></code> —
@@ -392,9 +311,9 @@
               </template>
 
               <template x-if="(checkResult.report.missing_declared_columns || []).length > 0">
-                <div class="dbx-scrub__drift-section">
+                <div class="scrub-drift-section">
                   <h4>Missing declared columns (strategy would no-op — PII may leak)</h4>
-                  <ul class="dbx-scrub__drift-list">
+                  <ul class="scrub-drift-list">
                     <template x-for="c in checkResult.report.missing_declared_columns" :key="`${c.table}.${c.column}`">
                       <li><code x-text="`${c.table}.${c.column}`"></code></li>
                     </template>
@@ -403,9 +322,9 @@
               </template>
 
               <template x-if="(checkResult.report.json_columns_undeclared || []).length > 0">
-                <div class="dbx-scrub__drift-section">
+                <div class="scrub-drift-section">
                   <h4>Undeclared JSON columns (declare jsonb_scrub_paths, redact, or passthrough)</h4>
-                  <ul class="dbx-scrub__drift-list">
+                  <ul class="scrub-drift-list">
                     <template x-for="c in checkResult.report.json_columns_undeclared" :key="`${c.table}.${c.column}`">
                       <li><code x-text="`${c.table}.${c.column}`"></code></li>
                     </template>
@@ -415,9 +334,9 @@
             </div>
           </template>
 
-          <div class="dbx-scrub__row" style="margin-top: 0.75rem;">
-            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="checkResult = null">Run again</button>
-            <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Close</button>
+          <div class="row" style="margin-top: 14px;">
+            <button class="btn btn--ghost" @click="checkResult = null">Run again</button>
+            <button class="btn btn--ghost" @click="closePanel()">Close</button>
           </div>
         </div>
       </template>
@@ -426,72 +345,74 @@
 
   <!-- Edit panel: per-table column editor with strategy dropdowns. -->
   <template x-if="panel === 'edit'">
-    <div class="dbx-scrub__panel">
-      <button class="dbx-scrub__close" @click="closePanel()">×</button>
-      <h3>Edit manifest for <code x-text="active.alias"></code></h3>
-      <p class="dbx-scrub__note">
-        Editing <code x-text="active.manifest_path"></code>. Per-column
+    <div class="card scrub-panel">
+      <div class="card__head">
+        <div class="card__title">Edit manifest for <code class="mono" x-text="active.alias"></code></div>
+        <button class="btn btn--ghost btn--sm scrub-panel__close" @click="closePanel()">Close</button>
+      </div>
+      <p class="page-sub" style="margin: 0 0 14px;">
+        Editing <code class="mono" x-text="active.manifest_path"></code>. Per-column
         strategies map to the SQL emitters in
-        <code>lib/scrub_strategies.sh</code>. Strategy-specific params
+        <code class="mono">lib/scrub_strategies.sh</code>. Strategy-specific params
         (length, max_days, replacement, reason) appear inline when
-        relevant. Complex shapes (<code>jsonb_scrub_paths</code>'s
-        <code>paths</code> object, <code>dictionary.extend</code>) keep
+        relevant. Complex shapes (<code class="mono">jsonb_scrub_paths</code>'s
+        <code class="mono">paths</code> object, <code class="mono">dictionary.extend</code>) keep
         their existing values verbatim on save.
       </p>
 
       <template x-if="editTables.length === 0">
-        <p class="dbx-scrub__note">
-          This manifest has no tables. Run <code>dbx scrub init</code>
+        <p class="page-sub" style="margin:0;">
+          This manifest has no tables. Run <code class="mono">dbx scrub init</code>
           first, or hand-edit the JSON directly on disk.
         </p>
       </template>
 
       <template x-for="t in editTables" :key="t.name">
-        <div class="dbx-scrub__editor-table">
-          <div class="dbx-scrub__editor-thead">
-            <strong x-text="t.name"></strong>
-            <label style="margin-left: auto; min-width: auto;">
+        <div class="card" style="margin-bottom: 14px; padding: 0;">
+          <div class="card__head" style="margin: 0; padding: 12px 12px; border-bottom: 1px solid var(--border);">
+            <div class="card__title mono" x-text="t.name"></div>
+            <label class="check" style="margin-left: auto;">
               <input type="checkbox" :checked="t.no_pii" @change="toggleNoPii(t, $event.target.checked)">
-              <span style="font-size: 0.8125rem;">no_pii (table contains no PII)</span>
+              <span>no_pii (table contains no PII)</span>
             </label>
           </div>
           <template x-if="t.no_pii">
-            <div class="dbx-scrub__no-pii">
-              Reason:
-              <input class="dbx-scrub__param" x-model="t.reason" placeholder="(required when no_pii is on)">
+            <div class="scrub-no-pii">
+              <span>Reason:</span>
+              <input type="text" x-model="t.reason" placeholder="(required when no_pii is on)">
             </div>
           </template>
           <template x-if="!t.no_pii">
             <div>
               <template x-if="t.columns.length === 0">
-                <div class="dbx-scrub__no-pii">No columns declared.</div>
+                <div class="scrub-no-pii">No columns declared.</div>
               </template>
               <template x-for="col in t.columns" :key="col.name">
-                <div class="dbx-scrub__editor-col">
+                <div class="scrub-editor-col">
                   <code x-text="col.name"></code>
-                  <select class="dbx-scrub__select dbx-scrub__select--narrow" x-model="col.strategy">
+                  <select x-model="col.strategy">
                     <template x-for="s in strategies" :key="s">
                       <option :value="s" x-text="s"></option>
                     </template>
                   </select>
                   <template x-if="col.strategy === 'truncate'">
-                    <input type="number" class="dbx-scrub__param" min="1" max="65535"
+                    <input type="number" class="scrub-param" min="1" max="65535"
                            x-model.number="col.length" placeholder="length">
                   </template>
                   <template x-if="col.strategy === 'shift_date'">
-                    <input type="number" class="dbx-scrub__param" min="1" max="3650"
+                    <input type="number" class="scrub-param" min="1" max="3650"
                            x-model.number="col.max_days" placeholder="max_days">
                   </template>
                   <template x-if="col.strategy === 'redact'">
-                    <input type="text" class="dbx-scrub__param"
+                    <input type="text" class="scrub-param"
                            x-model="col.replacement" placeholder="replacement (optional)">
                   </template>
                   <template x-if="col.strategy === 'passthrough'">
-                    <input type="text" class="dbx-scrub__param"
+                    <input type="text" class="scrub-param"
                            x-model="col.reason" placeholder="reason (required)">
                   </template>
                   <template x-if="col.strategy === 'jsonb_scrub_paths'">
-                    <span class="dbx-scrub__path" style="flex: 1;">
+                    <span class="scrub-path" style="flex: 1;">
                       paths preserved verbatim — edit the JSON directly to change them
                     </span>
                   </template>
@@ -502,12 +423,12 @@
         </div>
       </template>
 
-      <div class="dbx-scrub__row" style="margin-top: 0.75rem;">
-        <button class="dbx-backups__btn" @click="saveEdits()" :disabled="busyAlias === active.alias">
+      <div class="row" style="margin-top: 14px;">
+        <button class="btn btn--primary" @click="saveEdits()" :disabled="busyAlias === active.alias">
           <span x-show="busyAlias !== active.alias">Save manifest</span>
           <span x-show="busyAlias === active.alias">Saving…</span>
         </button>
-        <button class="dbx-backups__btn dbx-backups__btn--secondary" @click="closePanel()">Cancel</button>
+        <button class="btn btn--ghost" @click="closePanel()">Cancel</button>
       </div>
     </div>
   </template>

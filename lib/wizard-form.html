@@ -10,468 +10,114 @@
 -->
 
 <style>
-  /* ---------------------------------------------------------------------
-   * dbx config builder — scoped under .dbx-builder so we never leak into
-   * the surrounding mkdocs-material page or any other host context.
-   *
-   * Design system (in 4px-base scale):
-   *   --dbxb-space-{1..7}    spacing scale (4, 8, 12, 16, 24, 32, 48)
-   *   --dbxb-radius-{1..3}   corners (4, 8, 12)
-   *   --dbxb-shadow-{1,2}    elevation
-   *   --dbxb-accent          primary accent (inherits from mkdocs-material
-   *                          when available; falls back to a slate-cyan)
-   * --------------------------------------------------------------------- */
+  /* Config-builder styles, scoped under .dbx-builder. */
 
   .dbx-builder {
-    --dbxb-space-1: 0.25rem;
-    --dbxb-space-2: 0.5rem;
-    --dbxb-space-3: 0.75rem;
-    --dbxb-space-4: 1rem;
-    --dbxb-space-5: 1.5rem;
-    --dbxb-space-6: 2rem;
-    --dbxb-space-7: 3rem;
-    --dbxb-radius-1: 0.25rem;
-    --dbxb-radius-2: 0.5rem;
-    --dbxb-radius-3: 0.75rem;
-    --dbxb-shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05), 0 0 0 1px rgba(15, 23, 42, 0.04);
-    --dbxb-shadow-2: 0 4px 16px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.06);
-    --dbxb-accent: var(--md-accent-fg-color, #06b6d4);
-    --dbxb-accent-soft: color-mix(in srgb, var(--dbxb-accent) 12%, transparent);
-    --dbxb-fg:        var(--md-default-fg-color, #0f172a);
-    --dbxb-fg-muted:  var(--md-default-fg-color--light, #475569);
-    --dbxb-fg-faint:  var(--md-default-fg-color--lighter, #94a3b8);
-    --dbxb-border:    var(--md-default-fg-color--lightest, rgba(15, 23, 42, 0.1));
-    --dbxb-bg:        var(--md-default-bg-color, #fff);
-    --dbxb-bg-soft:   var(--md-code-bg-color, #f8fafc);
-    --dbxb-danger:    #dc2626;
-    --dbxb-success:   #16a34a;
-
     display: grid;
-    gap: var(--dbxb-space-5);
+    gap: 14px;
     grid-template-columns: 1fr;
-    font-size: 0.925rem;
-    line-height: 1.5;
-    color: var(--dbxb-fg);
+    color: var(--text);
   }
-  @media (prefers-color-scheme: dark) {
-    .dbx-builder {
-      --dbxb-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05);
-      --dbxb-shadow-2: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
-    }
-  }
-  /* Side-by-side only at very wide viewports (≥1500px). At typical
-     mkdocs-material content widths (~1220px), the preview reserved 26rem
-     leaving the form too narrow for cols-2 fields ("PostgreSQ|" truncation).
-     Stack by default — form gets full width, preview lives below as a
-     sticky panel so it's still always-visible. */
+  /* Side-by-side only at very wide viewports: form on the left, the live
+     JSON preview pinned on the right. Stacks below that width. */
   @media (min-width: 1500px) {
-    .dbx-builder { grid-template-columns: minmax(0, 1fr) minmax(0, 24rem); }
+    .dbx-builder { grid-template-columns: minmax(0, 1fr) minmax(0, 24rem); align-items: start; }
   }
 
-  /* Trust banner --------------------------------------------------------- */
-  .dbx-builder__trust {
-    display: flex;
-    gap: var(--dbxb-space-3);
-    align-items: center;
-    padding: var(--dbxb-space-3) var(--dbxb-space-4);
-    background: var(--dbxb-accent-soft);
-    border-left: 3px solid var(--dbxb-accent);
-    border-radius: var(--dbxb-radius-1);
-    font-size: 0.85rem;
-    color: var(--dbxb-fg);
-    line-height: 1.45;
-  }
-  .dbx-builder__trust::before {
-    content: "🔒";
-    flex: 0 0 auto;
-    font-size: 1rem;
-    line-height: 1;
-  }
-  .dbx-builder__trust-text {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-  .dbx-builder__trust-text > strong,
-  .dbx-builder__trust-text > span { display: inline; margin-right: 0.25em; }
-  .dbx-builder__trust strong { color: var(--dbxb-fg); font-weight: 600; }
-  .dbx-builder__trust code {
-    background: var(--dbxb-bg);
-    padding: 0.05em 0.4em;
-    border-radius: var(--dbxb-radius-1);
-    font-size: 0.85em;
-    border: 1px solid var(--dbxb-border);
-    white-space: nowrap;
-  }
+  /* A host/section block reuses .card; this just spaces its inner rows. */
+  .dbx-builder .stack-sm { display: flex; flex-direction: column; gap: 14px; }
 
-  /* Section (fieldset) — flat, no outer card; legend acts as the title.
-     Reduces nesting (was: fieldset-card holding host-cards = card-in-card). */
-  .dbx-builder fieldset {
-    border: 0;
-    background: transparent;
-    box-shadow: none;
-    padding: 0;
-    margin: 0;
-  }
-  .dbx-builder fieldset + fieldset { margin-top: var(--dbxb-space-6); }
-  .dbx-builder legend {
-    padding: 0;
-    font-weight: 700;
-    font-size: 1.05rem;
-    color: var(--dbxb-fg);
-    margin-bottom: var(--dbxb-space-3);
-    width: 100%;
-    border-bottom: 1px solid var(--dbxb-border);
-    padding-bottom: var(--dbxb-space-2);
-  }
+  /* Required-field marker */
+  .dbx-builder .req { color: var(--red); font-weight: 700; margin-left: .15em; }
 
-  /* Form fields ---------------------------------------------------------- */
-  .dbx-builder label {
-    display: block;
-    font-size: 0.8rem;
+  /* Inline validation error under a field */
+  .dbx-builder .field-error {
+    color: var(--red);
+    font-size: 12px;
     font-weight: 500;
-    margin-bottom: var(--dbxb-space-1);
-    color: var(--dbxb-fg-muted);
-    letter-spacing: 0.005em;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
   }
-  .dbx-builder label .req {
-    color: var(--dbxb-danger);
-    font-weight: 700;
-    margin-left: 0.15em;
-  }
-  .dbx-builder input[type=text],
-  .dbx-builder input[type=number],
-  .dbx-builder select,
-  .dbx-builder textarea {
-    width: 100%;
-    height: 2.5rem;
-    padding: 0 var(--dbxb-space-3);
-    border: 1px solid var(--dbxb-border);
-    border-radius: var(--dbxb-radius-1);
-    background: var(--dbxb-bg);
-    color: var(--dbxb-fg);
-    font: inherit;
-    font-size: 0.9rem;
-    transition: border-color 120ms ease, box-shadow 120ms ease;
-  }
-  .dbx-builder textarea {
-    height: auto;
-    min-height: 5.5rem;
-    padding: var(--dbxb-space-2) var(--dbxb-space-3);
-    font-family: var(--md-code-font-family, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
-    font-size: 0.82rem;
-    line-height: 1.45;
-    resize: vertical;
-  }
-  .dbx-builder select {
-    appearance: none;
-    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-                      linear-gradient(135deg, currentColor 50%, transparent 50%);
-    background-position: calc(100% - 1rem) 50%, calc(100% - 0.65rem) 50%;
-    background-size: 0.35rem 0.35rem, 0.35rem 0.35rem;
-    background-repeat: no-repeat;
-    padding-right: 2rem;
-    color: var(--dbxb-fg);
-  }
-  .dbx-builder input:hover:not(:focus),
-  .dbx-builder select:hover:not(:focus),
-  .dbx-builder textarea:hover:not(:focus) {
-    border-color: color-mix(in srgb, var(--dbxb-fg) 25%, var(--dbxb-border));
-  }
-  .dbx-builder input:focus,
-  .dbx-builder select:focus,
-  .dbx-builder textarea:focus {
-    outline: none;
-    border-color: var(--dbxb-accent);
-    box-shadow: 0 0 0 3px var(--dbxb-accent-soft);
-  }
+  .dbx-builder .field-error::before { content: "⚠"; font-size: .9em; }
+
+  /* invalid input outline */
   .dbx-builder input.invalid,
   .dbx-builder select.invalid {
-    border-color: var(--dbxb-danger);
+    border-color: var(--red);
   }
   .dbx-builder input.invalid:focus,
   .dbx-builder select.invalid:focus {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--dbxb-danger) 18%, transparent);
+    box-shadow: 0 0 0 3px var(--red-weak);
   }
 
-  .dbx-builder__row { display: grid; gap: var(--dbxb-space-3); grid-template-columns: 1fr; }
-  .dbx-builder__row + .dbx-builder__row { margin-top: var(--dbxb-space-3); }
-  @media (min-width: 600px) {
-    .dbx-builder__row.cols-2 { grid-template-columns: 1fr 1fr; }
-    .dbx-builder__row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
-  }
+  /* Section heading inside the form column (replaces fieldset/legend chrome) */
+  .dbx-builder .section-title { margin-top: 26px; }
+  .dbx-builder .section-title:first-of-type { margin-top: 0; }
 
-  /* Host cards — now the only card-level container (fieldsets are flat).
-     Real elevation so they read as distinct objects. */
-  .dbx-builder__card {
-    border: 1px solid var(--dbxb-border);
-    border-radius: var(--dbxb-radius-2);
-    padding: var(--dbxb-space-5);
-    margin-bottom: var(--dbxb-space-3);
-    background: var(--dbxb-bg);
-    box-shadow: var(--dbxb-shadow-1);
-    transition: border-color 150ms ease, box-shadow 150ms ease;
-    animation: dbxb-fade-in 200ms ease;
-  }
-  .dbx-builder__card:hover {
-    border-color: color-mix(in srgb, var(--dbxb-accent) 50%, var(--dbxb-border));
-    box-shadow: var(--dbxb-shadow-2);
-  }
-  .dbx-builder__card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: var(--dbxb-space-4);
-    padding-bottom: var(--dbxb-space-3);
-    border-bottom: 1px solid var(--dbxb-border);
-  }
-  .dbx-builder__card-title {
-    font-weight: 600;
-    font-size: 0.95rem;
-    color: var(--dbxb-fg);
-    display: flex;
-    align-items: center;
-    gap: var(--dbxb-space-2);
-  }
-  .dbx-builder__card-title::before {
-    content: "";
-    width: 0.4rem;
-    height: 0.4rem;
-    background: var(--dbxb-accent);
-    border-radius: 50%;
-  }
-
-  .dbx-builder__db-row {
+  /* A single database row: name + exclude-data + remove button */
+  .dbx-builder .db-row {
     display: grid;
-    gap: var(--dbxb-space-2);
+    gap: 12px;
     grid-template-columns: 1fr 2fr auto;
     align-items: end;
-    margin-bottom: var(--dbxb-space-2);
-    padding: var(--dbxb-space-2);
-    border-radius: var(--dbxb-radius-1);
-    transition: background-color 100ms ease;
   }
-  .dbx-builder__db-row:hover {
-    background: var(--dbxb-bg-soft);
-  }
-  .dbx-builder__db-row label { margin-bottom: var(--dbxb-space-1); font-size: 0.75rem; }
-  .dbx-builder__db-row .dbx-builder__btn { align-self: end; height: 2.5rem; }
+  .dbx-builder .db-row .btn { align-self: end; }
 
-  .dbx-builder__hint {
-    font-size: 0.78rem;
-    color: var(--dbxb-fg-muted);
-    margin-top: var(--dbxb-space-1);
-  }
-  .dbx-builder__hint code {
-    background: var(--dbxb-bg-soft);
-    padding: 0.05em 0.35em;
-    border-radius: var(--dbxb-radius-1);
-    font-size: 0.85em;
-    border: 1px solid var(--dbxb-border);
-  }
-  .dbx-builder__inline-error {
-    color: var(--dbxb-danger);
-    font-size: 0.78rem;
-    font-weight: 500;
-    margin-top: var(--dbxb-space-1);
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-  }
-  .dbx-builder__inline-error::before { content: "⚠"; font-size: 0.85em; }
+  /* full-width form-grid override: forms inside cards shouldn't clamp to 560px */
+  .dbx-builder .form-grid { max-width: none; }
 
-  .dbx-builder__toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--dbxb-space-2);
-    cursor: pointer;
-    font-size: 0.9rem;
-    padding: var(--dbxb-space-2) 0;
-    user-select: none;
-  }
-  .dbx-builder__toggle input {
-    width: 1.05rem;
-    height: 1.05rem;
-    margin: 0;
-    accent-color: var(--dbxb-accent);
-    cursor: pointer;
-  }
+  /* card header row: title + type/safety badges + remove */
+  .dbx-builder .host-head { margin-bottom: 14px; }
+  .dbx-builder .host-name { font-weight: 700; font-size: 16px; letter-spacing: -.01em; }
 
-  /* Buttons -------------------------------------------------------------- */
-  .dbx-builder__btn {
-    cursor: pointer;
-    height: 2.5rem;
-    padding: 0 var(--dbxb-space-4);
-    border: 1px solid var(--dbxb-border);
-    border-radius: var(--dbxb-radius-1);
-    background: var(--dbxb-bg);
-    color: var(--dbxb-fg);
-    font: inherit;
-    font-size: 0.875rem;
-    font-weight: 500;
-    transition: all 120ms ease;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.35rem;
-  }
-  .dbx-builder__btn:hover {
-    border-color: color-mix(in srgb, var(--dbxb-fg) 35%, var(--dbxb-border));
-    background: var(--dbxb-bg-soft);
-  }
-  .dbx-builder__btn:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 3px var(--dbxb-accent-soft);
-    border-color: var(--dbxb-accent);
-  }
-  .dbx-builder__btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .dbx-builder__btn--primary {
-    background: var(--dbxb-accent);
-    color: var(--dbxb-bg);
-    border-color: var(--dbxb-accent);
-    font-weight: 600;
-    box-shadow: 0 1px 2px color-mix(in srgb, var(--dbxb-accent) 30%, transparent);
-  }
-  .dbx-builder__btn--primary:hover {
-    background: color-mix(in srgb, var(--dbxb-accent) 90%, black);
-    border-color: color-mix(in srgb, var(--dbxb-accent) 90%, black);
-    color: var(--dbxb-bg);
-    box-shadow: 0 2px 6px color-mix(in srgb, var(--dbxb-accent) 35%, transparent);
-    transform: translateY(-1px);
-  }
-  .dbx-builder__btn--primary:disabled {
-    background: var(--dbxb-fg-faint);
-    border-color: var(--dbxb-fg-faint);
-    box-shadow: none;
-    transform: none;
-  }
-  .dbx-builder__btn--danger {
-    color: var(--dbxb-danger);
-  }
-  .dbx-builder__btn--danger:hover {
-    border-color: var(--dbxb-danger);
-    background: color-mix(in srgb, var(--dbxb-danger) 8%, transparent);
-  }
-  .dbx-builder__btn--small {
-    height: 2rem;
-    padding: 0 var(--dbxb-space-3);
-    font-size: 0.8rem;
-  }
+  /* status / saved message */
+  .dbx-builder .saved-msg { margin-top: 16px; }
 
-  .dbx-builder__actions {
-    display: flex;
-    gap: var(--dbxb-space-2);
-    flex-wrap: wrap;
-    margin-top: var(--dbxb-space-5);
-    padding-top: var(--dbxb-space-4);
-    border-top: 1px solid var(--dbxb-border);
-  }
-
-  /* Saved / status message ---------------------------------------------- */
-  .dbx-builder__saved {
-    padding: var(--dbxb-space-3) var(--dbxb-space-4);
-    border-radius: var(--dbxb-radius-2);
-    background: color-mix(in srgb, var(--dbxb-success) 10%, var(--dbxb-bg));
-    border: 1px solid color-mix(in srgb, var(--dbxb-success) 40%, transparent);
-    color: var(--dbxb-fg);
-    margin-top: var(--dbxb-space-4);
-    font-size: 0.88rem;
-    display: flex;
-    gap: var(--dbxb-space-2);
-    align-items: flex-start;
-    animation: dbxb-slide-up 250ms ease;
-  }
-  .dbx-builder__saved::before {
-    content: "✓";
-    color: var(--dbxb-success);
-    font-weight: 700;
-    font-size: 1.1em;
-    line-height: 1;
-  }
-  .dbx-builder__saved code {
-    background: var(--dbxb-bg);
-    padding: 0.05em 0.4em;
-    border-radius: var(--dbxb-radius-1);
-    font-size: 0.9em;
-    border: 1px solid var(--dbxb-border);
-  }
-  .dbx-builder__saved-err {
-    background: color-mix(in srgb, var(--dbxb-danger) 10%, var(--dbxb-bg));
-    border-color: color-mix(in srgb, var(--dbxb-danger) 40%, transparent);
-  }
-  .dbx-builder__saved-err::before { content: "✕"; color: var(--dbxb-danger); }
-
-  /* Live preview pane --------------------------------------------------- */
-  .dbx-builder__preview {
+  /* Live preview pane */
+  .dbx-builder .preview {
     position: sticky;
-    top: var(--dbxb-space-4);
+    top: 16px;
     align-self: start;
-    border-radius: var(--dbxb-radius-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     overflow: hidden;
-    background: var(--dbxb-bg);
-    box-shadow: var(--dbxb-shadow-2);
+    background: var(--surface);
+    box-shadow: var(--shadow-lg);
   }
-  .dbx-builder__preview-head {
-    padding: var(--dbxb-space-3) var(--dbxb-space-4);
-    background: var(--dbxb-bg-soft);
-    border-bottom: 1px solid var(--dbxb-border);
+  .dbx-builder .preview__head {
+    padding: 11px 16px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: var(--dbxb-space-2);
+    gap: 8px;
   }
-  .dbx-builder__preview-head::before {
-    /* macOS-style traffic-light circles for "this is a file/window" affordance */
-    content: "";
-    width: 2.25rem;
-    height: 0.625rem;
-    background:
-      radial-gradient(circle at 0.3125rem 0.3125rem, #ef4444 0.3125rem, transparent 0.32rem),
-      radial-gradient(circle at 1.125rem 0.3125rem, #eab308 0.3125rem, transparent 0.32rem),
-      radial-gradient(circle at 1.9375rem 0.3125rem, #22c55e 0.3125rem, transparent 0.32rem);
-    flex-shrink: 0;
+  .dbx-builder .preview__title {
+    font-size: 12.5px;
+    font-family: var(--mono);
+    color: var(--text-2);
   }
-  .dbx-builder__preview-title {
-    flex: 1;
-    font-size: 0.82rem;
-    font-family: var(--md-code-font-family, ui-monospace, "SF Mono", Menlo, monospace);
-    color: var(--dbxb-fg-muted);
-    text-align: center;
-  }
-  .dbx-builder__preview-status {
-    font-size: 0.75rem;
-    color: var(--dbxb-danger);
-    font-weight: 500;
+  .dbx-builder .preview__status {
+    font-size: 12px;
+    color: var(--red);
+    font-weight: 600;
     white-space: nowrap;
   }
-  .dbx-builder__preview pre {
+  .dbx-builder .preview pre {
     margin: 0;
-    padding: var(--dbxb-space-4);
+    padding: 16px;
     max-height: 36rem;
     overflow: auto;
-    font-size: 0.78rem;
+    font-size: 12.5px;
     line-height: 1.55;
-    background: var(--dbxb-bg);
-    color: var(--dbxb-fg);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--mono);
   }
-  .dbx-builder__preview pre code {
-    background: transparent;
-    border: 0;
-    padding: 0;
-    font-family: var(--md-code-font-family, ui-monospace, "SF Mono", Menlo, monospace);
-  }
+  .dbx-builder .preview pre code { background: transparent; border: 0; padding: 0; font-family: var(--mono); }
 
-  /* Animations ----------------------------------------------------------- */
-  @keyframes dbxb-fade-in {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-  @keyframes dbxb-slide-up {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
   @media (prefers-reduced-motion: reduce) {
     .dbx-builder *, .dbx-builder *::before, .dbx-builder *::after {
       animation: none !important;
@@ -483,35 +129,55 @@
 <div class="dbx-builder" x-data="dbxBuilder()" x-init="init()">
   <!-- Form column -->
   <div>
-    <div class="dbx-builder__trust">
-      <div class="dbx-builder__trust-text">
-        <strong>Runs entirely in your browser.</strong>
-        <span x-show="mode === 'static'">No fields are sent to any server.</span>
-        <span x-show="mode === 'cli'">The "Save &amp; exit" button POSTs once to the local <code>dbx wizard</code> process on <code>127.0.0.1</code> and nothing else.</span>
-        Passwords are never collected — the generated config references
-        <code>dbx vault set &lt;alias&gt;</code> commands you run separately.
+    <div class="page-head">
+      <div>
+        <p class="page-title">Configure</p>
+        <h1 class="page-h1">Hosts &amp; databases</h1>
+        <p class="page-sub">The database servers dbx connects to, plus storage, defaults, and notifications.</p>
+      </div>
+      <div class="head-actions">
+        <template x-if="mode === 'cli'">
+          <button type="button" class="btn btn--primary"
+                  @click="saveCli({ exit: true })" :disabled="!isValid() || saving"
+                  title="Save config.json and exit the wizard (terminal will unblock)">
+            <span x-text="saving === 'exit' ? 'Saving…' : 'Save & exit'"></span>
+          </button>
+        </template>
       </div>
     </div>
 
-    <!-- Hosts -->
-    <fieldset>
-      <legend>Hosts</legend>
-      <template x-for="(host, hi) in hosts" :key="hi">
-        <div class="dbx-builder__card">
-          <div class="dbx-builder__card-header">
-            <div class="dbx-builder__card-title" x-text="host.alias || `Host #${hi + 1}`"></div>
-            <button type="button" class="dbx-builder__btn dbx-builder__btn--small dbx-builder__btn--danger"
-                    x-show="hosts.length > 1" @click="hosts.splice(hi, 1)">Remove</button>
-          </div>
+    <div class="note note--info" style="margin-bottom:14px;">
+      <strong>Runs entirely in your browser.</strong>
+      <span x-show="mode === 'static'">No fields are sent to any server.</span>
+      <span x-show="mode === 'cli'">The "Save &amp; exit" button POSTs once to the local <code>dbx wizard</code> process on <code>127.0.0.1</code> and nothing else.</span>
+      Passwords are never collected — the generated config references
+      <code>dbx vault set &lt;alias&gt;</code> commands you run separately.
+    </div>
 
-          <div class="dbx-builder__row cols-2">
-            <div>
+    <!-- Hosts -->
+    <p class="section-title">Hosts</p>
+    <template x-for="(host, hi) in hosts" :key="hi">
+      <div class="card">
+        <div class="row host-head">
+          <span class="host-name" x-text="host.alias || `Host #${hi + 1}`"></span>
+          <span class="badge" :class="host.type === 'mysql' ? 'badge--mut' : 'badge--info'"
+                x-text="host.type === 'mysql' ? 'mysql' : 'postgres'"></span>
+          <template x-if="host.safety === 'prod'"><span class="chip chip--prod">PROD</span></template>
+          <template x-if="host.safety === 'stage'"><span class="chip chip--stage">STAGING</span></template>
+          <span class="spacer"></span>
+          <button type="button" class="btn btn--ghost btn--sm"
+                  x-show="hosts.length > 1" @click="hosts.splice(hi, 1)">Remove</button>
+        </div>
+
+        <div class="stack-sm">
+          <div class="cols-2">
+            <div class="field">
               <label>Alias <span class="req">*</span></label>
               <input type="text" x-model="host.alias" placeholder="production"
                      :class="aliasError(hi) ? 'invalid' : ''"/>
-              <div class="dbx-builder__inline-error" x-show="aliasError(hi)" x-text="aliasError(hi)"></div>
+              <div class="field-error" x-show="aliasError(hi)" x-text="aliasError(hi)"></div>
             </div>
-            <div>
+            <div class="field">
               <label>Database type <span class="req">*</span></label>
               <select x-model="host.type">
                 <option value="postgres">PostgreSQL</option>
@@ -520,23 +186,21 @@
             </div>
           </div>
 
-          <div class="dbx-builder__row" style="margin-top: 0.75rem;">
-            <div>
-              <label>Connection</label>
-              <select x-model="host.connection">
-                <option value="direct">Direct (host + port)</option>
-                <option value="ssh_tunnel">SSH tunnel</option>
-              </select>
-            </div>
+          <div class="field">
+            <label>Connection</label>
+            <select x-model="host.connection">
+              <option value="direct">Direct (host + port)</option>
+              <option value="ssh_tunnel">SSH tunnel</option>
+            </select>
           </div>
 
           <template x-if="host.connection === 'direct'">
-            <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
-              <div>
+            <div class="cols-2">
+              <div class="field">
                 <label>Host</label>
                 <input type="text" x-model="host.host" placeholder="db.internal"/>
               </div>
-              <div>
+              <div class="field">
                 <label>Port</label>
                 <input type="number" x-model.number="host.port"
                        :placeholder="host.type === 'mysql' ? '3306' : '5432'"/>
@@ -545,20 +209,18 @@
           </template>
 
           <template x-if="host.connection === 'ssh_tunnel'">
-            <div style="margin-top: 0.75rem;">
-              <div class="dbx-builder__row">
-                <div>
-                  <label>Jump host (SSH alias) <span class="req">*</span></label>
-                  <input type="text" x-model="host.jump_host" placeholder="bastion"/>
-                  <div class="dbx-builder__hint">Resolves via your <code>~/.ssh/config</code>. Use the alias, e.g. <code>bastion</code>, not <code>user@host</code>.</div>
-                </div>
+            <div class="stack-sm">
+              <div class="field">
+                <label>Jump host (SSH alias) <span class="req">*</span></label>
+                <input type="text" x-model="host.jump_host" placeholder="bastion"/>
+                <div class="hint">Resolves via your <code>~/.ssh/config</code>. Use the alias, e.g. <code>bastion</code>, not <code>user@host</code>.</div>
               </div>
-              <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
-                <div>
+              <div class="cols-2">
+                <div class="field">
                   <label>Target host (DB as seen from bastion)</label>
                   <input type="text" x-model="host.target_host" placeholder="db.internal"/>
                 </div>
-                <div>
+                <div class="field">
                   <label>Target port</label>
                   <input type="number" x-model.number="host.target_port"
                          :placeholder="host.type === 'mysql' ? '3306' : '5432'"/>
@@ -567,14 +229,14 @@
             </div>
           </template>
 
-          <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
-            <div>
+          <div class="cols-2">
+            <div class="field">
               <label>User <span class="req">*</span></label>
               <input type="text" x-model="host.user" :placeholder="host.type === 'mysql' ? 'root' : 'postgres'"/>
-              <div class="dbx-builder__hint">Set the password later: <code x-text="'dbx vault set ' + (host.alias || '&lt;alias&gt;')"></code></div>
+              <div class="hint">Set the password later: <code x-text="'dbx vault set ' + (host.alias || '&lt;alias&gt;')"></code></div>
             </div>
             <template x-if="host.type === 'mysql'">
-              <div>
+              <div class="field">
                 <label>DEFINER handling</label>
                 <select x-model="host.definer_handling">
                   <option value="strip">strip (default — removes DEFINER clauses)</option>
@@ -585,151 +247,155 @@
             </template>
           </div>
 
-          <div class="dbx-builder__row" style="margin-top: 0.75rem;">
-            <div>
-              <label>Safety</label>
-              <select x-model="host.safety">
-                <option value="local">Local (writes allowed)</option>
-                <option value="stage">Stage (writes allowed)</option>
-                <option value="prod">Production (read-only — refuses writes, restore --into, hooks)</option>
-              </select>
-              <div class="dbx-builder__hint">
-                Production hosts are treated as read sources only. <code>dbx backup</code>, <code>dbx list</code>, and <code>dbx scrub init/check</code> still work. <code>dbx query</code> opens read-only; <code>dbx restore --into</code> against a prod-source backup is refused.
-              </div>
+          <div class="field">
+            <label>Safety</label>
+            <select x-model="host.safety">
+              <option value="local">Local (writes allowed)</option>
+              <option value="stage">Stage (writes allowed)</option>
+              <option value="prod">Production (read-only — refuses writes, restore --into, hooks)</option>
+            </select>
+            <div class="hint">
+              Production hosts are treated as read sources only. <code>dbx backup</code>, <code>dbx list</code>, and <code>dbx scrub init/check</code> still work. <code>dbx query</code> opens read-only; <code>dbx restore --into</code> against a prod-source backup is refused.
             </div>
           </div>
 
           <!-- Databases -->
-          <div style="margin-top: 1rem;">
-            <label style="font-size: 0.9rem;">Databases</label>
-            <template x-for="(db, di) in host.databases" :key="di">
-              <div class="dbx-builder__db-row">
-                <div>
-                  <label>Name</label>
-                  <input type="text" x-model="db.name" placeholder="myapp"/>
+          <div class="field">
+            <label>Databases</label>
+            <div class="stack-sm">
+              <template x-for="(db, di) in host.databases" :key="di">
+                <div class="db-row">
+                  <div class="field">
+                    <label>Name</label>
+                    <input type="text" x-model="db.name" placeholder="myapp"/>
+                  </div>
+                  <div class="field">
+                    <label>Exclude data (table names, comma-separated; schema kept)</label>
+                    <input type="text" x-model="db.exclude_data" placeholder="sessions, cache, logs"/>
+                  </div>
+                  <button type="button" class="btn btn--ghost btn--sm"
+                          x-show="host.databases.length > 1" @click="host.databases.splice(di, 1)">−</button>
                 </div>
-                <div>
-                  <label>Exclude data (table names, comma-separated; schema kept)</label>
-                  <input type="text" x-model="db.exclude_data" placeholder="sessions, cache, logs"/>
-                </div>
-                <button type="button" class="dbx-builder__btn dbx-builder__btn--small dbx-builder__btn--danger"
-                        x-show="host.databases.length > 1" @click="host.databases.splice(di, 1)">−</button>
+              </template>
+              <div>
+                <button type="button" class="btn btn--ghost btn--sm" @click="addDb(hi)">+ database</button>
               </div>
-            </template>
-            <button type="button" class="dbx-builder__btn dbx-builder__btn--small" @click="addDb(hi)">+ database</button>
+            </div>
           </div>
 
           <!-- Post-restore hooks (raw JSON textarea for v1) -->
-          <div style="margin-top: 1rem;">
+          <div class="field">
             <label>Post-restore hooks (optional — JSON array; <a href="../post-restore-hooks/" target="_blank">docs</a>)</label>
             <textarea x-model="host.post_restore_raw" rows="3"
                       :placeholder='`[{&quot;file&quot;: &quot;hooks/scrub-pii.sql&quot;}]`'></textarea>
-            <div class="dbx-builder__inline-error" x-show="hookError(hi)" x-text="hookError(hi)"></div>
+            <div class="field-error" x-show="hookError(hi)" x-text="hookError(hi)"></div>
           </div>
         </div>
-      </template>
-      <button type="button" class="dbx-builder__btn" @click="addHost()">+ host</button>
-    </fieldset>
+      </div>
+    </template>
+    <div style="margin-top:14px;">
+      <button type="button" class="btn btn--ghost" @click="addHost()">+ host</button>
+    </div>
 
     <!-- Storage -->
-    <fieldset style="margin-top: 1.25rem;">
-      <legend>Cloud storage (optional)</legend>
-      <label class="dbx-builder__toggle">
+    <p class="section-title">Cloud storage (optional)</p>
+    <div class="card">
+      <label class="check">
         <input type="checkbox" x-model="storage.enabled"/>
         <span>Configure S3 / MinIO / R2 / B2</span>
       </label>
-      <div x-show="storage.enabled" style="margin-top: 0.75rem;">
-        <div class="dbx-builder__row cols-2">
-          <div>
+      <div x-show="storage.enabled" class="stack-sm" style="margin-top:14px;">
+        <div class="cols-2">
+          <div class="field">
             <label>Bucket <span class="req">*</span></label>
             <input type="text" x-model="storage.bucket" placeholder="dbx-backups"/>
           </div>
-          <div>
+          <div class="field">
             <label>Endpoint (blank for AWS)</label>
             <input type="text" x-model="storage.endpoint" placeholder="https://minio.example.com"/>
           </div>
         </div>
-        <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
-          <div>
+        <div class="cols-2">
+          <div class="field">
             <label>Prefix / path</label>
             <input type="text" x-model="storage.prefix" placeholder="dbx/"/>
           </div>
-          <div>
+          <div class="field">
             <label>Access key</label>
             <input type="text" x-model="storage.access_key" placeholder="AKIA..."/>
           </div>
         </div>
-        <div class="dbx-builder__hint" style="margin-top: 0.5rem;">
+        <div class="hint">
           The secret key goes in the vault, not here:
           <code>dbx vault set s3-secret-key</code>.
           Config references it via <code>secret_key_cmd</code>.
         </div>
       </div>
-    </fieldset>
+    </div>
 
     <!-- Defaults -->
-    <fieldset style="margin-top: 1.25rem;">
-      <legend>Defaults</legend>
-      <div class="dbx-builder__row cols-3">
-        <div>
-          <label>Encryption</label>
-          <select x-model="defaults.encryption_type">
-            <option value="none">none</option>
-            <option value="age">age (recommended)</option>
-            <option value="gpg">gpg</option>
-          </select>
+    <p class="section-title">Defaults</p>
+    <div class="card">
+      <div class="stack-sm">
+        <div class="cols-2">
+          <div class="field">
+            <label>Encryption</label>
+            <select x-model="defaults.encryption_type">
+              <option value="none">none</option>
+              <option value="age">age (recommended)</option>
+              <option value="gpg">gpg</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Keep N backups</label>
+            <input type="number" x-model.number="defaults.keep_backups" min="1"/>
+          </div>
         </div>
-        <div>
-          <label>Keep N backups</label>
-          <input type="number" x-model.number="defaults.keep_backups" min="1"/>
-        </div>
-        <div>
+        <div class="field" style="max-width:50%;">
           <label>Compression level (1–22)</label>
           <input type="number" x-model.number="defaults.compression_level" min="1" max="22"/>
         </div>
+        <label class="check">
+          <input type="checkbox" x-model="defaults.auto_upload"/>
+          <span>Auto-upload every backup to cloud storage</span>
+        </label>
       </div>
-      <label class="dbx-builder__toggle" style="margin-top: 0.75rem;">
-        <input type="checkbox" x-model="defaults.auto_upload"/>
-        <span>Auto-upload every backup to cloud storage</span>
-      </label>
-    </fieldset>
+    </div>
 
     <!-- Notifications -->
-    <fieldset style="margin-top: 1.25rem;">
-      <legend>Notifications (optional)</legend>
-      <label class="dbx-builder__toggle">
+    <p class="section-title">Notifications (optional)</p>
+    <div class="card">
+      <label class="check">
         <input type="checkbox" x-model="notifications.enabled"/>
         <span>Send a message on backup / restore events</span>
       </label>
 
-      <div x-show="notifications.enabled" style="margin-top: 1rem;">
-        <div class="dbx-builder__row cols-2">
-          <div>
-            <label>Notify on</label>
-            <select x-model="notifications.on">
-              <option value="failure">Failures only (recommended)</option>
-              <option value="success">Successes only</option>
-              <option value="all">All events</option>
-            </select>
-          </div>
+      <div x-show="notifications.enabled" class="stack-sm" style="margin-top:14px;">
+        <div class="field" style="max-width:50%;">
+          <label>Notify on</label>
+          <select x-model="notifications.on">
+            <option value="failure">Failures only (recommended)</option>
+            <option value="success">Successes only</option>
+            <option value="all">All events</option>
+          </select>
         </div>
 
-        <div style="margin-top: 1rem;">
+        <div class="field">
           <label>Backends</label>
-          <div style="display: flex; gap: 1.25rem; flex-wrap: wrap; margin-top: 0.5rem;">
-            <label class="dbx-builder__toggle">
+          <div class="field-row" style="gap:1.25rem;">
+            <label class="check">
               <input type="checkbox" x-model="notifications.backends.slack"/>
               <span>Slack</span>
             </label>
-            <label class="dbx-builder__toggle">
+            <label class="check">
               <input type="checkbox" x-model="notifications.backends.desktop"/>
               <span>Desktop (macOS / Linux)</span>
             </label>
-            <label class="dbx-builder__toggle">
+            <label class="check">
               <input type="checkbox" x-model="notifications.backends.email"/>
               <span>Email (SMTP)</span>
             </label>
-            <label class="dbx-builder__toggle">
+            <label class="check">
               <input type="checkbox" x-model="notifications.backends.command"/>
               <span>Custom command</span>
             </label>
@@ -737,24 +403,24 @@
         </div>
 
         <!-- Slack -->
-        <div x-show="notifications.backends.slack" class="dbx-builder__card" style="margin-top: 1rem;">
-          <div class="dbx-builder__card-title" style="margin-bottom: 0.75rem;">Slack</div>
-          <label class="dbx-builder__toggle" style="margin-bottom: 0.75rem;">
+        <div x-show="notifications.backends.slack" class="card" style="background:var(--surface-2);">
+          <div class="card__title" style="margin-bottom:12px;">Slack</div>
+          <label class="check" style="margin-bottom:12px;">
             <input type="checkbox" x-model="notifications.slack.use_vault"/>
             <span>Use the vault for the webhook URL (recommended)</span>
           </label>
           <template x-if="notifications.slack.use_vault">
-            <div class="dbx-builder__hint">
+            <div class="hint">
               Config will reference <code>dbx vault get slack-webhook</code>. Set it after:
               <code>dbx vault set slack-webhook</code> (paste the webhook URL when prompted).
             </div>
           </template>
           <template x-if="!notifications.slack.use_vault">
-            <div>
+            <div class="field">
               <label>Webhook URL</label>
               <input type="text" x-model="notifications.slack.webhook_url"
                      placeholder="https://hooks.slack.com/services/T.../B.../..."/>
-              <div class="dbx-builder__hint">
+              <div class="hint">
                 ⚠ This URL grants posting access to your Slack channel. It will be saved in plaintext in <code>config.json</code>. Consider the vault option above instead.
               </div>
             </div>
@@ -762,87 +428,92 @@
         </div>
 
         <!-- Email -->
-        <div x-show="notifications.backends.email" class="dbx-builder__card" style="margin-top: 1rem;">
-          <div class="dbx-builder__card-title" style="margin-bottom: 0.75rem;">Email (SMTP)</div>
-          <div class="dbx-builder__row cols-2">
-            <div>
-              <label>To</label>
-              <input type="text" x-model="notifications.email.to" placeholder="admin@example.com"/>
+        <div x-show="notifications.backends.email" class="card" style="background:var(--surface-2);">
+          <div class="card__title" style="margin-bottom:12px;">Email (SMTP)</div>
+          <div class="stack-sm">
+            <div class="cols-2">
+              <div class="field">
+                <label>To</label>
+                <input type="text" x-model="notifications.email.to" placeholder="admin@example.com"/>
+              </div>
+              <div class="field">
+                <label>From</label>
+                <input type="text" x-model="notifications.email.from" placeholder="dbx@example.com"/>
+              </div>
             </div>
-            <div>
-              <label>From</label>
-              <input type="text" x-model="notifications.email.from" placeholder="dbx@example.com"/>
+            <div class="cols-2">
+              <div class="field">
+                <label>SMTP host</label>
+                <input type="text" x-model="notifications.email.smtp_host" placeholder="smtp.example.com"/>
+              </div>
+              <div class="field">
+                <label>SMTP port</label>
+                <input type="number" x-model.number="notifications.email.smtp_port" placeholder="587"/>
+              </div>
             </div>
-          </div>
-          <div class="dbx-builder__row cols-2" style="margin-top: 0.75rem;">
-            <div>
-              <label>SMTP host</label>
-              <input type="text" x-model="notifications.email.smtp_host" placeholder="smtp.example.com"/>
+            <div class="hint">
+              Uses <code>sendmail</code> if available, else <code>msmtp</code>. SMTP auth credentials, if any, go in your local mailer config (e.g. <code>~/.msmtprc</code>), not here.
             </div>
-            <div>
-              <label>SMTP port</label>
-              <input type="number" x-model.number="notifications.email.smtp_port" placeholder="587"/>
-            </div>
-          </div>
-          <div class="dbx-builder__hint" style="margin-top: 0.5rem;">
-            Uses <code>sendmail</code> if available, else <code>msmtp</code>. SMTP auth credentials, if any, go in your local mailer config (e.g. <code>~/.msmtprc</code>), not here.
           </div>
         </div>
 
         <!-- Command -->
-        <div x-show="notifications.backends.command" class="dbx-builder__card" style="margin-top: 1rem;">
-          <div class="dbx-builder__card-title" style="margin-bottom: 0.75rem;">Custom command</div>
-          <div>
-            <label>On failure (recommended)</label>
-            <input type="text" x-model="notifications.command.on_failure"
-                   placeholder="terminal-notifier -title DBX -message 'Backup failed'"/>
-          </div>
-          <div style="margin-top: 0.75rem;">
-            <label>On success (optional)</label>
-            <input type="text" x-model="notifications.command.on_success"
-                   placeholder="(blank = don't fire on success)"/>
-          </div>
-          <div class="dbx-builder__hint" style="margin-top: 0.5rem;">
-            Shell template; runs with <code>DBX_NOTIFY_TITLE</code> / <code>DBX_NOTIFY_MESSAGE</code> in env.
+        <div x-show="notifications.backends.command" class="card" style="background:var(--surface-2);">
+          <div class="card__title" style="margin-bottom:12px;">Custom command</div>
+          <div class="stack-sm">
+            <div class="field">
+              <label>On failure (recommended)</label>
+              <input type="text" x-model="notifications.command.on_failure"
+                     placeholder="terminal-notifier -title DBX -message 'Backup failed'"/>
+            </div>
+            <div class="field">
+              <label>On success (optional)</label>
+              <input type="text" x-model="notifications.command.on_success"
+                     placeholder="(blank = don't fire on success)"/>
+            </div>
+            <div class="hint">
+              Shell template; runs with <code>DBX_NOTIFY_TITLE</code> / <code>DBX_NOTIFY_MESSAGE</code> in env.
+            </div>
           </div>
         </div>
 
         <!-- Desktop has no config -->
-        <div x-show="notifications.backends.desktop" class="dbx-builder__hint" style="margin-top: 1rem; padding-left: 0.25rem;">
+        <div x-show="notifications.backends.desktop" class="hint">
           Desktop notifications use <code>osascript</code> on macOS and <code>notify-send</code> on Linux. No config needed.
         </div>
       </div>
-    </fieldset>
+    </div>
 
     <!-- Actions -->
-    <div class="dbx-builder__actions">
+    <div class="field-row" style="margin-top:22px; padding-top:16px; border-top:1px solid var(--border);">
       <template x-if="mode === 'cli'">
-        <button type="button" class="dbx-builder__btn dbx-builder__btn--primary"
+        <button type="button" class="btn btn--primary"
                 @click="saveCli({ exit: false })" :disabled="!isValid() || saving"
                 title="Save config.json and stay in the wizard">
           <span x-text="saving === 'save' ? 'Saving…' : 'Save'"></span>
         </button>
       </template>
       <template x-if="mode === 'cli'">
-        <button type="button" class="dbx-builder__btn"
+        <button type="button" class="btn btn--ghost"
                 @click="saveCli({ exit: true })" :disabled="!isValid() || saving"
                 title="Save config.json and exit the wizard (terminal will unblock)">
           <span x-text="saving === 'exit' ? 'Saving…' : 'Save & exit'"></span>
         </button>
       </template>
-      <button type="button" class="dbx-builder__btn" @click="copyJson()" :disabled="!isValid()">Copy JSON</button>
-      <button type="button" class="dbx-builder__btn" @click="downloadJson()" :disabled="!isValid()">Download config.json</button>
-      <button type="button" class="dbx-builder__btn" @click="reset()" style="margin-left: auto;">Reset</button>
+      <button type="button" class="btn btn--ghost" @click="copyJson()" :disabled="!isValid()">Copy JSON</button>
+      <button type="button" class="btn btn--ghost" @click="downloadJson()" :disabled="!isValid()">Download config.json</button>
+      <button type="button" class="btn btn--ghost" @click="reset()" style="margin-left:auto;">Reset</button>
     </div>
 
-    <div class="dbx-builder__saved" x-show="savedMsg" x-text="savedMsg" :class="savedErr ? 'dbx-builder__saved-err' : ''"></div>
+    <div class="note saved-msg" x-show="savedMsg" x-text="savedMsg"
+         :class="savedErr ? 'note--danger' : 'note--info'"></div>
   </div>
 
   <!-- Live JSON preview -->
-  <div class="dbx-builder__preview">
-    <div class="dbx-builder__preview-head">
-      <span class="dbx-builder__preview-title">config.json</span>
-      <span class="dbx-builder__preview-status" x-show="!isValid()">fix errors to save</span>
+  <div class="preview">
+    <div class="preview__head">
+      <span class="preview__title">config.json</span>
+      <span class="preview__status" x-show="!isValid()">fix errors to save</span>
     </div>
     <pre><code x-text="previewJson()"></code></pre>
   </div>

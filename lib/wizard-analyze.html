@@ -1,235 +1,141 @@
 <!--
   Analyze view fragment. Loaded by `dbx wizard` only.
 
-  Wraps `dbx analyze <host>/<db> --json` (added in this PR) so the user
-  can see what's actually in their database from the wizard — per-table
-  row count + total size, totals, and a dictionary-based PII pre-scan.
-  Same data the CLI's interactive view shows, just in a stable browser
-  table instead of an fzf picker.
+  Wraps `dbx analyze <host>/<db> --json` so the user can see what's
+  actually in their database from the wizard — per-table row count +
+  total size, totals, and a dictionary-based PII pre-scan. Same data
+  the CLI's interactive view shows, in a stable browser table.
 
   Hosts + databases come from the existing /api/config endpoint so the
-  picker reflects whatever the user has in their config.json. Empty-host
-  / empty-database states fall back to a "configure a host first" hint.
+  picker reflects whatever the user has in their config.json.
 -->
 <style>
-  .dbx-analyze__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
-  .dbx-analyze__select, .dbx-analyze__input {
-    padding: 0.375rem 0.5rem;
-    border: 1px solid var(--md-default-fg-color--lighter);
-    border-radius: 6px;
-    background: var(--md-default-bg-color); color: var(--md-default-fg-color);
-    font-size: 0.875rem;
-    min-width: 180px;
-  }
-
-  .dbx-analyze__totals {
-    display: flex; gap: 1.5rem; flex-wrap: wrap;
-    background: var(--md-code-bg-color);
-    border: 1px solid var(--md-default-fg-color--lightest);
-    border-radius: 8px;
-    padding: 0.75rem 1rem;
-    margin-bottom: 1rem;
-  }
-  .dbx-analyze__stat strong { display: block; font-size: 1.25rem; letter-spacing: -0.01em; }
-  .dbx-analyze__stat small { color: var(--md-default-fg-color--light); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
-
-  .dbx-analyze__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-  .dbx-analyze__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; cursor: pointer; user-select: none; }
-  .dbx-analyze__table th.dbx-analyze__sort-active { color: var(--md-accent-fg-color); }
-  .dbx-analyze__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-  .dbx-analyze__table tbody tr:hover { background: var(--md-code-bg-color); }
-  .dbx-analyze__table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  /* Compact bar showing size relative to the largest table. */
-  .dbx-analyze__bar-cell { width: 120px; }
-  .dbx-analyze__bar {
-    display: block; height: 6px;
-    background: var(--md-accent-fg-color--transparent);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .dbx-analyze__bar i { display: block; height: 100%; background: var(--md-accent-fg-color); border-radius: 3px; }
-
-  .dbx-analyze__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
-  .dbx-analyze__chip--pii      { background: rgba(196, 61, 61, 0.30); color: #8a1f1f; }
-  @media (prefers-color-scheme: dark) {
-    .dbx-analyze__chip--pii      { color: #ff8a8a; }
-  }
-
-  .dbx-analyze__pii-panel {
-    background: var(--md-code-bg-color);
-    border: 1px solid var(--md-default-fg-color--lightest);
-    border-radius: 8px;
-    padding: 0.75rem 1rem;
-    margin-bottom: 1rem;
-  }
-  .dbx-analyze__pii-panel h3 { margin: 0 0 0.5rem; font-size: 1rem; }
-  /* Diagnostics panel for CLI stderr: log_step / log_warn lines that the
-     server captures while running `dbx analyze --json`. Yellow-tinted so
-     it's visually distinct from the red error panel — these are usually
-     informational ("Scanning for PII...") rather than fatal. */
-  .dbx-analyze__diag {
-    background: rgba(218, 135, 33, 0.10);
-    border: 1px solid rgba(218, 135, 33, 0.45);
-    border-radius: 6px;
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 1rem;
-    font-family: var(--md-code-font-family);
-    font-size: 0.8125rem;
+  .analyze-piinum { color: var(--amber); }
+  .analyze-diag {
+    margin-top: 12px;
+    font-family: var(--mono);
+    font-size: 12.5px;
     white-space: pre-wrap;
-    color: var(--md-default-fg-color);
     max-height: 200px;
     overflow-y: auto;
   }
-  .dbx-analyze__diag-label {
-    display: block;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    color: #8a4c10;
-    margin-bottom: 0.25rem;
-  }
-  @media (prefers-color-scheme: dark) {
-    .dbx-analyze__diag-label { color: #ffbf6b; }
-  }
-  .dbx-analyze__pii-list { margin: 0; padding-left: 1.25rem; font-size: 0.875rem; }
-  .dbx-analyze__pii-list code { font-size: 0.8125rem; }
-  .dbx-analyze__pii-list li + li { margin-top: 0.125rem; }
-
-  .dbx-analyze__error {
-    color: #8a1f1f;
-    background: rgba(196, 61, 61, 0.10);
-    padding: 0.5rem 0.75rem;
-    border-radius: 4px;
-    margin: 0.5rem 0;
-    font-size: 0.875rem;
-    white-space: pre-wrap;
-    font-family: var(--md-code-font-family);
-  }
-  .dbx-analyze__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
-  .dbx-analyze__note { color: var(--md-default-fg-color--light); font-size: 0.8125rem; margin: 0.25rem 0 0.75rem; }
+  .analyze-piicell { display: flex; flex-wrap: wrap; gap: 6px; }
 </style>
 
 <div x-data="dbxAnalyze()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Analyze</h2>
-    <p class="dbx-view__subtitle">
-      Per-table row count and on-disk size for any configured database,
-      plus a PII pre-scan that flags columns matching the built-in
-      dictionary. Same data as <code>dbx analyze &lt;host&gt; &lt;db&gt;</code>
-      on the CLI, just structured. Use it to decide what to put in
-      <code>exclude_data</code> and which columns need a scrub strategy.
-    </p>
-  </header>
-
-  <div class="dbx-analyze__toolbar">
-    <select class="dbx-analyze__select" x-model="host" @change="onHostChange()">
-      <option value="">(pick a host)</option>
-      <template x-for="h in hosts" :key="h.alias">
-        <option :value="h.alias" x-text="h.alias"></option>
-      </template>
-    </select>
-
-    <template x-if="host && databases.length > 0">
-      <select class="dbx-analyze__select" x-model="database">
-        <option value="">(pick a database)</option>
-        <template x-for="db in databases" :key="db">
-          <option :value="db" x-text="db"></option>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Insights</p>
+      <h1 class="page-h1">Analyze</h1>
+      <p class="page-sub">Per-table row count and size, plus a pre-scan for personal data.</p>
+    </div>
+    <div class="head-actions">
+      <select aria-label="Host and database" style="width:auto;"
+              x-model="hostdb" @change="onHostDbChange()">
+        <option value="">(pick a host / database)</option>
+        <template x-for="h in hosts" :key="h.alias">
+          <template x-if="(h.databases || []).length > 0">
+            <optgroup :label="h.alias">
+              <template x-for="db in h.databases" :key="h.alias + '/' + db">
+                <option :value="h.alias + '/' + db"
+                        x-text="h.alias + ' / ' + db"></option>
+              </template>
+            </optgroup>
+          </template>
         </template>
       </select>
-    </template>
-    <template x-if="host && databases.length === 0">
-      <input type="text" class="dbx-analyze__input" x-model="database"
-             placeholder="database name">
-    </template>
-
-    <label style="font-size: 0.8125rem; color: var(--md-default-fg-color--light);">
-      <input type="checkbox" x-model="skipPii">
-      Skip PII scan (faster)
-    </label>
-
-    <button class="dbx-backups__btn" @click="runAnalyze()"
-            :disabled="!host || !database || running">
-      <span x-show="!running">Run analyze</span>
-      <span x-show="running">Analyzing…</span>
-    </button>
+      <label class="check">
+        <input type="checkbox" x-model="skipPii">
+        Skip PII
+      </label>
+      <button class="btn btn--ghost" @click="runAnalyze()"
+              :disabled="!host || !database || running">
+        <span x-show="!running">Re-scan</span>
+        <span x-show="running">Scanning…</span>
+      </button>
+    </div>
   </div>
 
   <template x-if="error">
-    <p class="dbx-analyze__error" x-text="error"></p>
+    <div class="note note--danger" x-text="error"></div>
   </template>
 
   <template x-if="!result && !running && !error">
-    <p class="dbx-analyze__empty">
-      Pick a host + database, then click <strong>Run analyze</strong>.
+    <div class="empty">
+      <div class="empty__title">No scan yet</div>
+      Pick a host + database, then click <strong>Re-scan</strong>.
       Requires docker — the CLI queries the source host's
       <code>information_schema</code> (or <code>pg_stat_user_tables</code>)
       to get the per-table stats.
-    </p>
+    </div>
   </template>
 
   <template x-if="result">
     <div>
-      <div class="dbx-analyze__totals">
-        <div class="dbx-analyze__stat">
-          <strong x-text="formatInt(result.totals.tables)"></strong>
-          <small>tables</small>
+      <!-- STAT TILES -->
+      <div class="tiles" style="margin-bottom:18px;">
+        <div class="tile">
+          <div class="tile__label">Tables</div>
+          <div class="tile__value" x-text="formatInt(result.totals.tables)"></div>
+          <div class="tile__meta" x-text="hostdb || (host + ' / ' + database)"></div>
         </div>
-        <div class="dbx-analyze__stat">
-          <strong x-text="formatInt(result.totals.rows)"></strong>
-          <small>rows</small>
+        <div class="tile">
+          <div class="tile__label">Rows</div>
+          <div class="tile__value" x-text="formatInt(result.totals.rows)"></div>
+          <div class="tile__meta">across all tables</div>
         </div>
-        <div class="dbx-analyze__stat">
-          <strong x-text="formatBytes(result.totals.size_bytes)"></strong>
-          <small>total size</small>
+        <div class="tile">
+          <div class="tile__label">Size</div>
+          <div class="tile__value" x-text="formatBytes(result.totals.size_bytes)"></div>
+          <div class="tile__meta">on disk, uncompressed</div>
         </div>
-        <div class="dbx-analyze__stat">
-          <strong x-text="result.engine || '—'"></strong>
-          <small>engine</small>
-        </div>
-        <div class="dbx-analyze__stat">
-          <strong x-text="(result.pii || []).length"></strong>
-          <small>tables with PII candidates</small>
+        <div class="tile">
+          <div class="tile__label">PII columns</div>
+          <div class="tile__value">
+            <span class="analyze-piinum" x-text="piiColumnCount()"></span>
+          </div>
+          <div class="tile__meta"
+               x-text="`in ${(result.pii || []).length} table${(result.pii || []).length === 1 ? '' : 's'}`"></div>
         </div>
       </div>
 
-      <template x-if="result.stderr">
-        <div class="dbx-analyze__diag">
-          <span class="dbx-analyze__diag-label">CLI diagnostics</span><span x-text="result.stderr"></span>
-        </div>
-      </template>
-
+      <!-- PII SUMMARY -->
       <template x-if="(result.pii || []).length > 0">
-        <div class="dbx-analyze__pii-panel">
-          <h3>PII candidates</h3>
-          <p class="dbx-analyze__note">
-            Columns whose names match the built-in dictionary. The
-            <a @click="$store.dbx.view = 'scrub'" style="cursor: pointer; color: var(--md-accent-fg-color);">Scrub view</a>
-            turns these into a manifest. The pre-scan respects
-            <code>dictionary.extend</code> / <code>dictionary.exclude</code>
-            from the host's existing manifest (if any).
-          </p>
-          <ul class="dbx-analyze__pii-list">
-            <template x-for="row in (result.pii || [])" :key="row.table">
-              <li>
-                <code x-text="row.table"></code> —
-                <span x-text="(row.columns || []).join(', ')"></span>
-              </li>
-            </template>
-          </ul>
+        <div class="card">
+          <div class="card__head">
+            <div>
+              <div class="card__title">Personal data found</div>
+              <div class="card__hint">heuristic pre-scan</div>
+            </div>
+          </div>
+          <div class="note note--info">
+            We flagged
+            <strong x-text="`${piiColumnCount()} column${piiColumnCount() === 1 ? '' : 's'}`"></strong>
+            across
+            <strong x-text="`${(result.pii || []).length} table${(result.pii || []).length === 1 ? '' : 's'}`"></strong>
+            that look like personal data. Flagged columns can be added to your
+            Scrub rules so they're masked on restore.
+            <a @click="$store.dbx.view = 'scrub'" style="cursor:pointer;">Add to scrub rules →</a>
+          </div>
+          <template x-if="result.stderr">
+            <div class="note note--warn analyze-diag"><span x-text="result.stderr"></span></div>
+          </template>
         </div>
       </template>
 
-      <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
-        <input type="search" class="dbx-analyze__input" style="flex: 1; min-width: 240px;"
-               x-model="filter" placeholder="Filter by table name…">
-        <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;"
-              x-text="filteredCountLabel()"></span>
-        <span style="font-size: 0.8125rem;"
-              :style="excludeDirty ? 'color: var(--md-accent-fg-color);' : 'color: var(--md-default-fg-color--light);'"
+      <!-- TABLES -->
+      <div class="section-title">Tables</div>
+
+      <div class="toolbar">
+        <div class="search">
+          <input type="search" x-model="filter" placeholder="Filter by table name…">
+        </div>
+        <span class="muted" x-text="filteredCountLabel()"></span>
+        <span class="spacer"></span>
+        <span style="font-size:12.5px;"
+              :class="excludeDirty ? 'pill pill--accent' : 'muted'"
               x-text="saveMsg || excludeStatusLabel()"></span>
-        <button class="dbx-backups__btn" @click="saveExclusions()"
+        <button class="btn btn--primary btn--sm" @click="saveExclusions()"
                 :disabled="saving || !excludeDirty"
                 title="Write the checked tables to this database's exclude_data (schema kept, row data skipped on backup)">
           <span x-show="!saving">Save exclusions</span>
@@ -237,51 +143,51 @@
         </button>
       </div>
 
-      <table class="dbx-analyze__table">
-        <thead>
-          <tr>
-            <th style="width: 1%; text-align: center; white-space: nowrap;"
-                title="Check to dump schema only (no row data) for this table">Skip&nbsp;data</th>
-            <th @click="setSort('name')"
-                :class="{ 'dbx-analyze__sort-active': sortKey === 'name' }">
-              Table <span x-show="sortKey === 'name'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
-            </th>
-            <th @click="setSort('rows')" class="num"
-                :class="{ 'dbx-analyze__sort-active': sortKey === 'rows' }">
-              Rows <span x-show="sortKey === 'rows'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
-            </th>
-            <th @click="setSort('size_bytes')" class="num"
-                :class="{ 'dbx-analyze__sort-active': sortKey === 'size_bytes' }">
-              Size <span x-show="sortKey === 'size_bytes'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
-            </th>
-            <th class="dbx-analyze__bar-cell">% of total</th>
-            <th>Flags</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template x-for="t in sortedRows()" :key="t.name">
+      <div class="card card--flush">
+        <table class="tbl">
+          <thead>
             <tr>
-              <td style="text-align: center;">
-                <input type="checkbox" x-model="t._exclude" @change="saveMsg = ''"
-                       :title="`Skip row data for ${t.name} on backup (schema kept)`">
-              </td>
-              <td><code x-text="t.name"></code></td>
-              <td class="num" x-text="formatInt(t.rows)"></td>
-              <td class="num" x-text="formatBytes(t.size_bytes)"></td>
-              <td class="dbx-analyze__bar-cell">
-                <span class="dbx-analyze__bar">
-                  <i :style="`width: ${pctOfLargest(t.size_bytes)}%`"></i>
-                </span>
-              </td>
-              <td>
-                <template x-if="piiTablesSet.has(t.name)">
-                  <span class="dbx-analyze__chip dbx-analyze__chip--pii">PII</span>
-                </template>
-              </td>
+              <th style="width:1%; white-space:nowrap;"
+                  title="Check to dump schema only (no row data) for this table">Skip&nbsp;data</th>
+              <th @click="setSort('name')" style="cursor:pointer;">
+                Table <span x-show="sortKey === 'name'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
+              </th>
+              <th @click="setSort('rows')" class="num" style="cursor:pointer;">
+                Rows <span x-show="sortKey === 'rows'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
+              </th>
+              <th @click="setSort('size_bytes')" class="num" style="cursor:pointer;">
+                Size <span x-show="sortKey === 'size_bytes'" x-text="sortDir === 'asc' ? '▲' : '▼'"></span>
+              </th>
+              <th>Possible PII</th>
             </tr>
-          </template>
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            <template x-for="t in sortedRows()" :key="t.name">
+              <tr>
+                <td style="text-align:center;">
+                  <input type="checkbox" x-model="t._exclude" @change="saveMsg = ''"
+                         :title="`Skip row data for ${t.name} on backup (schema kept)`">
+                </td>
+                <td class="mono" x-text="t.name"></td>
+                <td class="num" x-text="formatInt(t.rows)"></td>
+                <td class="num" x-text="formatBytes(t.size_bytes)"></td>
+                <td>
+                  <template x-if="piiColumnsFor(t.name).length > 0">
+                    <span class="analyze-piicell">
+                      <template x-for="col in piiColumnsFor(t.name)" :key="col">
+                        <span class="chip chip--aging" x-text="col"></span>
+                      </template>
+                    </span>
+                  </template>
+                  <template x-if="piiColumnsFor(t.name).length === 0">
+                    <span class="muted">—</span>
+                  </template>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
     </div>
   </template>
 </div>
@@ -292,6 +198,7 @@
       hosts: [],         // [{alias, databases: [...]}]
       host: '',
       database: '',
+      hostdb: '',        // combined "alias/db" bound to the head selector
       skipPii: false,
       result: null,
       running: false,
@@ -308,6 +215,18 @@
       // the per-row chip. Rebuilt every time result changes.
       get piiTablesSet() {
         return new Set((this.result?.pii || []).map(p => p.table));
+      },
+
+      // PII columns flagged for a given table name (empty array if none).
+      piiColumnsFor(name) {
+        const row = (this.result?.pii || []).find(p => p.table === name);
+        return (row && row.columns) || [];
+      },
+
+      // Total count of flagged PII columns across all tables.
+      piiColumnCount() {
+        return (this.result?.pii || [])
+          .reduce((n, p) => n + ((p.columns || []).length), 0);
       },
 
       get databases() {
@@ -346,6 +265,17 @@
           this.hosts = [];
           this.error = `Failed to load config: ${e.message || e}`;
         }
+      },
+
+      // The head selector binds a single "alias/db" string; split it back
+      // into host + database so the existing analyze/save logic is unchanged.
+      onHostDbChange() {
+        const v = this.hostdb || '';
+        const i = v.indexOf('/');
+        if (i === -1) { this.host = ''; this.database = ''; }
+        else { this.host = v.slice(0, i); this.database = v.slice(i + 1); }
+        this.result = null;
+        this.error = '';
       },
 
       onHostChange() {
@@ -389,7 +319,7 @@
           this.result = body;
           this.saveMsg = '';
         } catch (e) {
-          this.error = `Analyze failed: ${e.message || e}`;
+          this.error = `dbx analyze failed: ${e.message || e}`;
         } finally {
           this.running = false;
         }

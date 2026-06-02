@@ -18,182 +18,198 @@
   value anywhere except a local Alpine field, and we clear it on view-leave.
 -->
 <style>
-  .dbx-vault__layout { display: grid; gap: 1.5rem; }
-  .dbx-vault__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
-  .dbx-vault__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
-
-  .dbx-vault__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-  .dbx-vault__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
-  .dbx-vault__table td { padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-  .dbx-vault__table tbody tr:hover { background: var(--md-code-bg-color); }
-  .dbx-vault__key { font-family: var(--md-code-font-family); font-weight: 600; }
-  .dbx-vault__backend { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
-  .dbx-vault__ts { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--md-default-fg-color--light); }
-
-  .dbx-vault__card { border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-code-bg-color); padding: 1rem 1.25rem; }
-  .dbx-vault__card h3 { margin: 0 0 0.75rem; font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
-  .dbx-vault__form { display: grid; gap: 0.6rem; grid-template-columns: 1fr 1fr auto; align-items: end; }
-  .dbx-vault__form label { display: block; font-size: 0.8125rem; font-weight: 600; color: var(--md-default-fg-color--light); margin-bottom: 0.25rem; }
-  .dbx-vault__form input { width: 100%; padding: 0.4rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
-
-  .dbx-vault__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; font-weight: 500; }
-  .dbx-vault__btn:hover:not(:disabled) { opacity: 0.92; filter: brightness(1.08); }
-  .dbx-vault__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .dbx-vault__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
-  .dbx-vault__btn--secondary:hover:not(:disabled) { background: var(--md-code-bg-color); filter: none; }
-  .dbx-vault__btn--danger { background: #c43d3d; color: #fff; border: none; padding: 0.3rem 0.6rem; border-radius: 5px; cursor: pointer; font-size: 0.75rem; }
-  .dbx-vault__btn--danger:hover:not(:disabled) { filter: brightness(1.05); }
-  .dbx-vault__btn--small { padding: 0.25rem 0.55rem; font-size: 0.75rem; }
-
-  .dbx-vault__chip { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 4px; font-size: 0.8125rem; margin-top: 0.5rem; }
-  .dbx-vault__chip--ok  { background: rgba(74, 158, 76, 0.20);  color: #2f7d31; }
-  .dbx-vault__chip--err { background: rgba(196, 61, 61, 0.20); color: #a83232; }
-
-  .dbx-vault__reveal { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.5rem; background: var(--md-default-fg-color--lightest); border-radius: 4px; font-family: var(--md-code-font-family); font-size: 0.8125rem; }
-  .dbx-vault__reveal-countdown { color: var(--md-default-fg-color--light); font-size: 0.75rem; }
-
-  .dbx-vault__recipients { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.5rem; }
-  .dbx-vault__recipient-row { display: flex; align-items: center; gap: 0.5rem; }
-  .dbx-vault__recipient { font-family: var(--md-code-font-family); font-size: 0.8125rem; word-break: break-all; flex: 1; }
-  .dbx-vault__path { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
-
-  .dbx-vault__empty { padding: 1rem; text-align: center; color: var(--md-default-fg-color--light); font-style: italic; font-size: 0.875rem; }
+  .vault-form { display: grid; gap: 6px; grid-template-columns: 1fr 1fr auto; align-items: end; margin-top: 14px; }
+  .vault-form--add { grid-template-columns: 1fr auto; }
+  .vault-form .field { gap: 6px; }
+  .vault-reveal { display: inline-flex; align-items: center; gap: 8px; padding: 4px 9px; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: var(--radius-sm); }
+  .vault-reveal__secs { font-size: 11.5px; color: var(--text-3); }
+  .vault-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 </style>
 
 <div x-data="dbxVault()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Vault</h2>
-    <p class="dbx-view__subtitle">
-      Store database passwords and age recipients used by <code>dbx backup</code>.
-      Values are kept in the system keychain (or libsecret / pass / gpg-file
-      on Linux) — they never appear in <code>config.json</code>.
-    </p>
-  </header>
 
-  <div class="dbx-vault__layout">
-
-    <!-- ===== Credentials list ===== -->
+  <div class="page-head">
     <div>
-      <div class="dbx-vault__toolbar">
-        <button class="dbx-vault__btn dbx-vault__btn--secondary" @click="load()" :disabled="loading">Refresh</button>
-        <span class="dbx-vault__count" x-text="loading ? 'Loading…' : (rows.length + ' credential' + (rows.length === 1 ? '' : 's'))"></span>
-      </div>
+      <p class="page-title">Configure</p>
+      <h1 class="page-h1">Vault</h1>
+      <p class="page-sub">
+        Database passwords and age recipients used by <code class="mono">dbx backup</code>.
+        Secrets live in the system keychain — never in <code class="mono">config.json</code>.
+      </p>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn--ghost" @click="load()" :disabled="loading"
+              x-text="loading ? 'Refreshing…' : 'Refresh'"></button>
+    </div>
+  </div>
 
-      <template x-if="!loading && rows.length === 0">
-        <p class="dbx-vault__empty">No credentials stored yet. Add one below.</p>
+  <!-- ===== STATUS ===== -->
+  <div class="card">
+    <div class="row">
+      <template x-if="!loadingRecipients && recipients.length > 0">
+        <span class="badge badge--ok">● Encrypted</span>
       </template>
+      <template x-if="!loadingRecipients && recipients.length === 0">
+        <span class="badge badge--mut">● No recipients</span>
+      </template>
+      <span x-show="recipients.length > 0">Backups are encrypted with age before they touch disk.</span>
+      <span x-show="!loadingRecipients && recipients.length === 0" class="muted">Add an age recipient below to enable encryption.</span>
+    </div>
+    <hr class="divider">
+    <dl class="kv">
+      <dt>Recipients file</dt>
+      <dd><span class="mono" x-text="recipientsPath || '(loading…)'"></span></dd>
+      <dt>Recipients</dt>
+      <dd x-text="loadingRecipients ? '…' : recipients.length"></dd>
+      <dt>Stored credentials</dt>
+      <dd x-text="loading ? '…' : rows.length"></dd>
+      <dt>Algorithm</dt>
+      <dd>age (X25519 + ChaCha20)</dd>
+    </dl>
+  </div>
 
-      <template x-if="!loading && rows.length > 0">
-        <table class="dbx-vault__table">
-          <thead>
+  <!-- ===== RECIPIENTS ===== -->
+  <p class="section-title">age recipients</p>
+  <div class="card">
+    <p class="card__hint" style="margin:0 0 12px;">
+      Public keys that <code class="mono">age</code> uses to encrypt backups when
+      <code class="mono">defaults.encryption_type = "age"</code>. Comment lines are
+      preserved on disk but not shown here.
+    </p>
+
+    <template x-if="!loadingRecipients && recipients.length === 0">
+      <div class="empty">
+        <div class="empty__title">No recipients yet</div>
+        Paste a key starting with <code class="mono">age1…</code> and click Add.
+      </div>
+    </template>
+
+    <template x-if="recipients.length > 0">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Public key</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="(rcp, i) in recipients" :key="i">
             <tr>
-              <th>Key</th>
-              <th>Backend</th>
-              <th>Last set</th>
-              <th style="text-align:right">Actions</th>
+              <td><span class="mono" x-text="rcp"></span></td>
+              <td>
+                <div class="tbl__actions">
+                  <button class="btn btn--ghost btn--sm"
+                          @click="removeRecipient(rcp)" :disabled="recipientSaving">Remove</button>
+                </div>
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            <template x-for="row in rows" :key="row.key">
-              <tr>
-                <td><span class="dbx-vault__key" x-text="row.key"></span></td>
-                <td><span class="dbx-vault__backend" x-text="row.backend || '—'"></span></td>
-                <td><span class="dbx-vault__ts" x-text="formatTimestamp(row.last_set)"></span></td>
-                <td style="text-align:right">
+          </template>
+        </tbody>
+      </table>
+    </template>
+
+    <form class="vault-form vault-form--add" @submit.prevent="addRecipient()">
+      <div class="field">
+        <label>Add recipient</label>
+        <input type="text" x-model.trim="recipientInput" placeholder="age1…" :disabled="recipientSaving"
+               autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <button type="submit" class="btn btn--primary" :disabled="recipientSaving || !recipientInput">
+          <span x-show="!recipientSaving">+ Add</span>
+          <span x-show="recipientSaving">Adding…</span>
+        </button>
+      </div>
+    </form>
+    <template x-if="recipientStatus.text">
+      <span class="badge" :class="recipientStatus.kind === 'ok' ? 'badge--ok' : 'badge--fail'"
+            style="margin-top:10px;" x-text="recipientStatus.text"></span>
+    </template>
+  </div>
+
+  <!-- ===== CREDENTIALS ===== -->
+  <p class="section-title">Stored credentials</p>
+  <div class="card">
+    <template x-if="loading">
+      <p class="muted" style="margin:0;">Loading…</p>
+    </template>
+
+    <template x-if="!loading && rows.length === 0">
+      <div class="empty">
+        <div class="empty__title">No credentials stored yet</div>
+        Add one below.
+      </div>
+    </template>
+
+    <template x-if="!loading && rows.length > 0">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Backend</th>
+            <th>Last set</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="row in rows" :key="row.key">
+            <tr>
+              <td><span class="mono" x-text="row.key"></span></td>
+              <td><span class="mono muted" x-text="row.backend || '—'"></span></td>
+              <td class="muted" x-text="formatTimestamp(row.last_set)"></td>
+              <td>
+                <div class="vault-actions">
                   <template x-if="revealed.key !== row.key">
-                    <button class="dbx-vault__btn dbx-vault__btn--small dbx-vault__btn--secondary"
+                    <button class="btn btn--ghost btn--sm"
                             @click="reveal(row.key)" :disabled="revealing">Show</button>
                   </template>
                   <template x-if="revealed.key === row.key">
-                    <span class="dbx-vault__reveal">
-                      <code x-text="revealed.value"></code>
-                      <span class="dbx-vault__reveal-countdown" x-text="'auto-hides in ' + revealed.secs + 's'"></span>
-                      <button class="dbx-vault__btn dbx-vault__btn--small dbx-vault__btn--secondary" @click="copyValue()">Copy</button>
-                      <button class="dbx-vault__btn dbx-vault__btn--small dbx-vault__btn--secondary" @click="hideValue()">Hide</button>
+                    <span class="vault-reveal">
+                      <code class="mono" x-text="revealed.value"></code>
+                      <span class="vault-reveal__secs" x-text="'auto-hides in ' + revealed.secs + 's'"></span>
+                      <button class="btn btn--ghost btn--sm" @click="copyValue()">Copy</button>
+                      <button class="btn btn--ghost btn--sm" @click="hideValue()">Hide</button>
                     </span>
                   </template>
-                  <button class="dbx-vault__btn dbx-vault__btn--danger" @click="confirmDelete(row.key)">Delete</button>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </template>
-    </div>
-
-    <!-- ===== Add/Update credential ===== -->
-    <div class="dbx-vault__card">
-      <h3>Add or update a credential</h3>
-      <form class="dbx-vault__form" @submit.prevent="save()">
-        <div>
-          <label>Key</label>
-          <input type="text" x-model.trim="form.key" placeholder="e.g. prod-mysql" :disabled="saving"
-                 autocomplete="off" spellcheck="false">
-        </div>
-        <div>
-          <label>Value</label>
-          <input type="password" x-model="form.value" placeholder="(secret)" :disabled="saving"
-                 autocomplete="new-password" spellcheck="false">
-        </div>
-        <div>
-          <button type="submit" class="dbx-vault__btn" :disabled="saving || !form.key || !form.value">
-            <span x-show="!saving">Save</span>
-            <span x-show="saving">Saving…</span>
-          </button>
-        </div>
-      </form>
-      <template x-if="saveStatus.text">
-        <span class="dbx-vault__chip" :class="saveStatus.kind === 'ok' ? 'dbx-vault__chip--ok' : 'dbx-vault__chip--err'"
-              x-text="saveStatus.text"></span>
-      </template>
-    </div>
-
-    <!-- ===== age recipients editor ===== -->
-    <div class="dbx-vault__card">
-      <h3>age recipients</h3>
-      <p style="margin: 0 0 0.5rem; font-size: 0.875rem; color: var(--md-default-fg-color--light);">
-        Public keys that <code>age</code> uses to encrypt backups when
-        <code>defaults.encryption_type = "age"</code>. Comment lines are
-        preserved on disk but not shown here.
-      </p>
-      <p class="dbx-vault__path">File: <code x-text="recipientsPath || '(loading…)'"></code></p>
-
-      <template x-if="!loadingRecipients && recipients.length === 0">
-        <p class="dbx-vault__empty">No recipients yet. Paste a key starting with <code>age1…</code> and click Add.</p>
-      </template>
-
-      <template x-if="recipients.length > 0">
-        <div class="dbx-vault__recipients">
-          <template x-for="(rcp, i) in recipients" :key="i">
-            <div class="dbx-vault__recipient-row">
-              <span class="dbx-vault__recipient" x-text="rcp"></span>
-              <button class="dbx-vault__btn dbx-vault__btn--danger dbx-vault__btn--small"
-                      @click="removeRecipient(rcp)" :disabled="recipientSaving">Remove</button>
-            </div>
+                  <button class="btn btn--danger btn--sm" @click="confirmDelete(row.key)">Delete</button>
+                </div>
+              </td>
+            </tr>
           </template>
-        </div>
-      </template>
+        </tbody>
+      </table>
+    </template>
 
-      <form class="dbx-vault__form" style="grid-template-columns: 1fr auto; margin-top: 0.75rem;"
-            @submit.prevent="addRecipient()">
-        <div>
-          <label>Add recipient</label>
-          <input type="text" x-model.trim="recipientInput" placeholder="age1…" :disabled="recipientSaving"
-                 autocomplete="off" spellcheck="false">
-        </div>
-        <div>
-          <button type="submit" class="dbx-vault__btn" :disabled="recipientSaving || !recipientInput">
-            <span x-show="!recipientSaving">Add</span>
-            <span x-show="recipientSaving">Adding…</span>
-          </button>
-        </div>
-      </form>
-      <template x-if="recipientStatus.text">
-        <span class="dbx-vault__chip" :class="recipientStatus.kind === 'ok' ? 'dbx-vault__chip--ok' : 'dbx-vault__chip--err'"
-              x-text="recipientStatus.text"></span>
-      </template>
-    </div>
+    <form class="vault-form" @submit.prevent="save()">
+      <div class="field">
+        <label>Key</label>
+        <input type="text" x-model.trim="form.key" placeholder="e.g. prod-mysql" :disabled="saving"
+               autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>Value</label>
+        <input type="password" x-model="form.value" placeholder="(secret)" :disabled="saving"
+               autocomplete="new-password" spellcheck="false">
+      </div>
+      <div class="field">
+        <button type="submit" class="btn btn--primary" :disabled="saving || !form.key || !form.value">
+          <span x-show="!saving">Save</span>
+          <span x-show="saving">Saving…</span>
+        </button>
+      </div>
+    </form>
+    <template x-if="saveStatus.text">
+      <span class="badge" :class="saveStatus.kind === 'ok' ? 'badge--ok' : 'badge--fail'"
+            style="margin-top:10px;" x-text="saveStatus.text"></span>
+    </template>
   </div>
+
+  <!-- ===== EXPLAINER ===== -->
+  <div class="note note--info" style="margin-top:14px;">
+    Anyone holding the private key for a listed recipient can decrypt these backups, so keep this list tight.
+    Losing every recipient's private key means the backups can never be read again.
+  </div>
+
 </div>
 
 <script>
