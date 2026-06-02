@@ -13,6 +13,7 @@
   .sched-cell-input { padding: 6px 9px; font-size: 13px; }
   .sched-cell-input:invalid { border-color: var(--red); }
   .sched-hostdb { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+  .sched-row--off td:not(:first-child) { opacity: .5; }
   .sched-statusbar { margin-bottom: 18px; }
   .sched-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
   .sched-when-cell { min-width: 150px; }
@@ -54,6 +55,7 @@
       <table class="tbl">
         <thead>
           <tr>
+            <th style="width:1%">On</th>
             <th>Host / DB</th>
             <th>Frequency</th>
             <th>Next run</th>
@@ -64,7 +66,13 @@
         </thead>
         <tbody>
           <template x-for="(row, i) in declarative" :key="i">
-            <tr>
+            <tr :class="row.enabled === false ? 'sched-row--off' : ''">
+              <td>
+                <label class="switch" title="Disabled schedules are orphaned (uninstalled) on the next sync">
+                  <input type="checkbox" :checked="row.enabled !== false" @change="row.enabled = $event.target.checked">
+                  <span class="switch__track"></span>
+                </label>
+              </td>
               <td>
                 <div class="sched-hostdb">
                   <select class="sched-cell-input" x-model="row.host" @change="onHostChange(row)">
@@ -96,7 +104,11 @@
                 </template>
                 <template x-if="!row.last_run"><span class="muted">—</span></template>
               </td>
-              <td class="muted" title="Retention isn't yet configurable per schedule">—</td>
+              <td>
+                <input type="number" class="sched-cell-input" style="width: 5.5rem;" min="1" max="100000"
+                       x-model.number="row.keep" placeholder="keep ∞"
+                       title="Backups to keep after each scheduled run (blank = no pruning)">
+              </td>
               <td>
                 <div class="tbl__actions">
                   <button class="btn btn--danger btn--sm" @click="removeRow(i)">Remove</button>
@@ -111,10 +123,11 @@
 
   <p class="muted" style="font-size: 12.5px; margin-top: 12px;">
     <code>when</code> accepts <code>hourly</code>, <code>daily</code>, <code>daily@H</code>,
-    <code>weekly</code>, <code>weekly@D:H</code>, or a raw cron expression. Next run is computed
-    from the schedule; last run reflects the newest backup for that host / database. Retention is
-    applied at backup / clean time and isn't yet configurable per schedule. Next/last run reflect
-    the last <em>saved</em> state — save to refresh after editing.
+    <code>weekly</code>, <code>weekly@D:H</code>, or a raw cron expression. Toggle <strong>On</strong>
+    to enable a schedule — disabled ones are orphaned (uninstalled) on the next
+    <code>dbx schedule sync</code>. <strong>Retention</strong> prunes that host/database to the newest
+    N backups after each scheduled run (blank = keep everything). Next/last run reflect the last
+    <em>saved</em> state — save to refresh after editing.
   </p>
 
   <div class="sched-actions">

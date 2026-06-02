@@ -188,3 +188,17 @@ setup() {
   echo "$result" | grep -qE $'^prod\tapp\tdaily@5$'
   echo "$result" | grep -qE $'^staging\tx\tweekly@1:3$'
 }
+
+@test "schedule_config_read excludes disabled schedules (enabled:false)" {
+  write_config '{"hosts":{},"schedules":[{"host":"prod","database":"app","when":"daily@5","enabled":false},{"host":"prod","database":"billing","when":"daily@6"}]}'
+  result=$(schedule_config_read)
+  echo "$result" | grep -qE $'^prod\tbilling\tdaily@6$'
+  ! echo "$result" | grep -q $'\tapp\t'
+}
+
+@test "schedule_keep_for returns keep for a pair, empty when unset/missing" {
+  write_config '{"hosts":{},"schedules":[{"host":"prod","database":"app","when":"daily@5","keep":7},{"host":"prod","database":"billing","when":"daily@6"}]}'
+  [ "$(schedule_keep_for prod app)" = "7" ]
+  [ -z "$(schedule_keep_for prod billing)" ]
+  [ -z "$(schedule_keep_for prod nonesuch)" ]
+}

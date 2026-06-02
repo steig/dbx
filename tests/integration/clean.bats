@@ -45,6 +45,20 @@ EOF
   [ "$remaining" = "3" ]
 }
 
+@test "clean <host> <db> scopes pruning to that pair only" {
+  make_fake_backups 5                       # local-pg/cleantest → 5 files
+  local other="$DBX_DATA_DIR/local-pg/otherdb"
+  mkdir -p "$other"
+  for i in 1 2 3 4; do : > "$other/otherdb_2026010${i}_000000.sql.zst"; done
+
+  dbx_run clean local-pg cleantest --keep 2
+  [ "$status" -eq 0 ]
+  # The named pair is pruned to 2…
+  [ "$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')" = "2" ]
+  # …and the other pair is left completely untouched.
+  [ "$(ls "$other"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')" = "4" ]
+}
+
 @test "clean --dry-run reports without deleting" {
   make_fake_backups 5
 
