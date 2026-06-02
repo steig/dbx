@@ -93,8 +93,10 @@ require_container() {
 
   # Doesn't exist - create it.
   # Bind to loopback by default so the auto-managed dev containers aren't
-  # reachable from the LAN with the default password. Override with
-  # DBX_BIND_ADDR (e.g. 0.0.0.0) if you have a reason to expose them.
+  # reachable from the LAN with the default password. Override the interface
+  # with DBX_BIND_ADDR (e.g. 0.0.0.0) if you have a reason to expose them, and
+  # the published host port with DBX_PG_HOST_PORT / DBX_MYSQL_HOST_PORT if the
+  # default 5432 / 3306 collides with a Postgres / MySQL already on the host.
   # --add-host=host.docker.internal:host-gateway makes the host reachable
   # from inside the container at the same well-known name on macOS, Linux,
   # rootless docker, and podman — so SSH-tunnel mode can use one address
@@ -108,7 +110,7 @@ require_container() {
         -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
         -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
         -e LANG=C.UTF-8 \
-        -p "${bind_addr}:5432:5432" \
+        -p "${bind_addr}:${DBX_PG_HOST_PORT:-5432}:5432" \
         "${DBX_FORCE_IMAGE:-postgres:17-alpine}" >/dev/null
       unset DBX_FORCE_IMAGE
       # Wait for postgres to be ready
@@ -124,7 +126,7 @@ require_container() {
       docker run -d --name mysql-dbx \
         --add-host=host.docker.internal:host-gateway \
         -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
-        -p "${bind_addr}:3306:3306" \
+        -p "${bind_addr}:${DBX_MYSQL_HOST_PORT:-3306}:3306" \
         "${DBX_FORCE_IMAGE:-mysql:8.0}" >/dev/null
       unset DBX_FORCE_IMAGE
       # Wait for mysql to be ready

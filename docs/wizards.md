@@ -50,10 +50,11 @@ The server binds to `127.0.0.1` only and requires the URL token on every request
 
 The browser wizard is a small operations console with a sidebar of views. Beyond **Config** (the builder above), the notable tabs:
 
+- **Dashboard** — the landing/overview view (`GET /api/dashboard`). Health at a glance for every host/db pair plus time-series **trends** (backups and bytes-backed-up per week). From here you can also run a live per-host connection test (see the comparison below).
 - **Analyze** — per-table row counts and on-disk size for a chosen database, plus a PII pre-scan. Each row has a **Skip data** checkbox: tick the big log/cache/append-only tables and click **Save exclusions** to write them straight into that database's [`exclude_data`](configuration.md) (schema kept, row data skipped on backup). The exact data you need to decide what to skip is right there in the table. Switch to the Config tab afterward and it reflects the saved exclusions.
 - **Backup** — run a backup and watch it stream. With **Verbose (`-v`)** the log auto-tails: it follows the newest lines as they arrive, pausing if you scroll up to read and resuming when you scroll back to the bottom.
-- **Backups / Runs / Restore** — browse existing backups, review run history, and restore (quick or guided).
-- **Vault / Scrub / Schedule / Storage** — manage credentials and age recipients, build PII scrub manifests, schedule backups, and configure S3 remote storage.
+- **Backups / Runs / Restore** — browse existing backups (each with a **Download** button that streams the file as an attachment), review run history, and restore (quick or guided).
+- **Vault / Scrub / Schedule / Storage** — manage credentials and age recipients, build PII scrub manifests (add/remove per-column rules), schedule backups, and configure S3 remote storage. The Schedule view shows a per-schedule **enabled** toggle, **next-run** and **last-run** times, and a per-schedule retention (**keep**) count.
 
 Saving from the Config tab uses **Save & exit** (writes `config.json`, the terminal continues with next-steps hints); the other views act on `config.json` and your backups directly while the server stays up.
 
@@ -65,5 +66,5 @@ Compare:
 | Dependencies | `gum` | `python3` + a GUI browser |
 | Best for | SSH sessions, headless servers, terminal lovers | Local interactive setup, screen-sharing, less-CLI-fluent teammates |
 | Output | `~/.config/dbx/config.json` | `~/.config/dbx/config.json` |
-| Validates against live DB? | Yes (live connection test) | No (form-only; run `dbx test <alias>` after) |
+| Validates against live DB? | Yes (live connection test) | Yes (Dashboard runs `dbx test <alias>` — staged ssh / container / creds / query check — live) |
 | Adds vault entries? | Yes (interactive password prompt) | No (output references `dbx vault set` commands you run after) |

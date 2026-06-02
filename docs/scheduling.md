@@ -14,6 +14,8 @@ dbx schedule run production myapp                # one-shot manually
 dbx schedule remove production myapp
 ```
 
+Actions: `add`, `remove` (aliases `rm` / `delete`), `list` (alias `ls`), `run`, and `sync`. (`run-job` is internal — invoked by the installed unit, not run by hand.)
+
 Logs at `~/.local/share/dbx/logs/`.
 
 ## Schedule syntax
@@ -30,7 +32,9 @@ Logs at `~/.local/share/dbx/logs/`.
 
 ## What gets scheduled
 
-`dbx schedule add` writes a launchd `.plist` (macOS) or systemd `.timer` + `.service` (Linux user-mode) that runs `dbx backup <host> <database>` at the configured cadence. The scheduled run inherits your shell `PATH` via `dbx`'s installed location.
+`dbx schedule add` writes a launchd `.plist` (macOS) or systemd `.timer` + `.service` (Linux user-mode) that runs `dbx schedule run-job <host> <database>` at the configured cadence. The scheduled run inherits your shell `PATH` via `dbx`'s installed location.
+
+`run-job` is internal — it's the action the installed unit invokes, not a command you run by hand. It performs the backup and then, if that schedule carries a `keep` value, applies retention for that pair (`dbx clean <host> <database> --keep <keep>`). With no `keep`, a scheduled run behaves exactly like a plain backup (no pruning).
 
 Notifications fire from inside the scheduled run, so failures show up in Slack/desktop/email even when you're not watching.
 
@@ -42,12 +46,22 @@ Schedules can also be declared in `config.json` and reconciled with `dbx schedul
 {
   "hosts": { ... },
   "schedules": [
-    { "host": "production", "database": "myapp",   "when": "daily@5" },
+    { "host": "production", "database": "myapp",   "when": "daily@5",        "keep": 30 },
     { "host": "production", "database": "billing", "when": "weekly@1:3" },
-    { "host": "staging",    "database": "myapp",   "when": "*/15 4 * * 1-5" }
+    { "host": "staging",    "database": "myapp",   "when": "*/15 4 * * 1-5", "enabled": false }
   ]
 }
 ```
+
+Each `schedules[]` entry takes:
+
+| Field | Required | Default | Means |
+|-------|----------|---------|-------|
+| `host` | yes | — | host key from `config.hosts` |
+| `database` | yes | — | database to back up |
+| `when` | yes | — | schedule expression (see [Schedule syntax](#schedule-syntax)) |
+| `enabled` | no | `true` | set `false` to disable without deleting the entry (see below) |
+| `keep` | no | none | retention count applied after each scheduled backup |
 
 `dbx schedule sync` diffs the installed units against `config.schedules[]` and prints a plan:
 
@@ -60,10 +74,14 @@ Schedule sync plan
   ! orphan   staging/x @ daily@7 (installed but not in config)
   = same     production/audit @ daily
 
-  (read-only preview — the write path lands in a follow-up PR)
+  (preview only — re-run with --apply to install / update / orphan units)
 ```
 
-Today this is a **read-only preview**: it tells you what `sync` *would* do, but doesn't yet make the changes. The write path (with `--force` for orphan deletion) ships in a follow-up release. In the meantime, `dbx schedule add` / `remove` continue to be the way to actually change installed state.
+By default `sync` is a **read-only preview** of the drift (`install` / `update` / `orphan` / `nochange`) — it tells you what `sync` *would* do. `--dry-run` forces this preview mode explicitly. It exits non-zero whenever there's actionable drift, so it works as a CI / pre-commit check.
+
+`dbx schedule sync --apply` (alias `--force`) executes the plan: it installs new units, updates changed ones, and removes orphaned units (launchd on macOS, systemd on Linux). `dbx schedule add` / `remove` remain the imperative way to change a single installed unit.
+
+**Disabling a schedule.** Set `"enabled": false` on a `schedules[]` entry to exclude it from the desired state without deleting the entry. Its installed unit then shows up as an `orphan` under `sync`, and `sync --apply` removes it. (There is no `schedule enable`/`disable` subcommand — the `enabled` key surfaced through `sync` is the mechanism.)
 
 `dbx config validate` also reports drift between `config.schedules[]` and the installed units, so a config-vs-state mismatch can be caught in CI.
 

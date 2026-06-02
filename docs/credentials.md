@@ -19,10 +19,13 @@ Override in config:
 
 ```bash
 dbx vault info               # show active backend
-dbx vault list               # all stored credentials
+dbx vault list               # all stored credentials (alias: ls)
 dbx vault get <host>         # retrieve one (prints to stdout)
 dbx vault set <host>         # store / replace (prompts for password)
-dbx vault delete <host>      # remove
+dbx vault delete <host>      # remove (alias: rm)
+dbx vault set-encryption-key      # store the backup encryption passphrase (prompts)
+dbx vault delete-encryption-key   # remove the stored encryption passphrase
+dbx vault init-age                # generate the age recipient/identity (alias: init-encryption)
 ```
 
 ## Notes

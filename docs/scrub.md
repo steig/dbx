@@ -8,7 +8,7 @@ This is dbx's recommended path for masking PII at restore time. Hand-written [po
 
 A `scrub-pii.sql` file you hand-edited six months ago is a snapshot of the schema as it was six months ago. The day someone ships `users.recovery_email` or `accounts.tax_id_v2`, that file silently stops being correct. The next restore into staging quietly leaks the new column. There is no error. There is no warning. There is just unmasked PII in an environment that was supposed to be safe.
 
-The manifest fixes this by declaring every PII-bearing column up front and then *checking* — every night in CI, and again immediately before each restore into a gated destination — that the live schema still matches what the manifest knows about. New column nobody declared? Drift. Restore aborts. CI turns red. Somebody updates the manifest.
+The manifest fixes this by declaring every PII-bearing column up front and then *checking* — every night in CI, and again immediately before each gated restore — that the live schema still matches what the manifest knows about. New column nobody declared? Drift. Restore aborts. CI turns red. Somebody updates the manifest.
 
 The manifest is also the thing reviewers can read. "Show me every place we touch user data" is a `cat dbx.scrub.json` away.
 
@@ -16,23 +16,23 @@ The manifest is also the thing reviewers can read. "Show me every place we touch
 
 ```bash
 # 1. Walk the live schema and emit a draft manifest with suggested strategies.
-dbx scrub init production > dbx.scrub.json
+dbx scrub init production/myapp > dbx.scrub.json
 
 # 2. Read it. Override suggestions that look wrong. Add reasons to passthroughs.
 $EDITOR dbx.scrub.json
 
 # 3. Wire it into dbx.json.
 #    "hosts": { "production": { "scrub": { "manifest": "dbx.scrub.json",
-#                                          "required_for": ["staging", "local-dev"] } } }
+#                                          "required": true } } }
 
 # 4. Commit both files. The manifest is reviewable artifact, not a build output.
 git add dbx.json dbx.scrub.json
 git commit -m "Add PII scrub manifest for production"
 
-# 5. Wire `dbx scrub check production` into your nightly CI.
+# 5. Wire `dbx scrub check production/myapp` into your nightly CI.
 ```
 
-From here on, every restore from `production` into a destination listed in `required_for` runs the drift check first, scrubs declaratively from the manifest, and verifies the scrub before handing you the clone.
+From here on, with `scrub.required: true`, every restore from `production` runs the drift check first, scrubs declaratively from the manifest, and verifies the scrub before handing you the clone.
 
 ## Config
 
@@ -45,14 +45,17 @@ The manifest is referenced from `dbx.json`, per host:
       "type": "postgres",
       "scrub": {
         "manifest": "dbx.scrub.json",
-        "required_for": ["staging", "local-dev", "contractor-clone"]
+        "required": true
       }
     }
   }
 }
 ```
 
-`manifest` is a path, resolved relative to the directory containing `dbx.json` (same rule as post-restore hook `file` entries). `required_for` is the list of destination host aliases that *must* go through the scrub when restoring from this source. A restore from `production` to `staging` runs the gate; a restore from `production` to `production-replica` doesn't unless you list it.
+`manifest` is a path, resolved relative to the directory containing `dbx.json` (same rule as post-restore hook `file` entries). `required` is a boolean: when `true`, **every** restore from this source host runs the scrub gate (pre-restore drift check → declarative scrub → verify), regardless of destination. Use `--no-scrub` on a single restore to bypass it (audited).
+
+!!! warning "Per-destination gating (`required_for`) is not currently enforced"
+    A `required_for` array (a list of destination aliases) is accepted and parsed, but the restore gate does **not** consult it today — gating is host-wide via `required`. If you set only `required_for` and not `required: true`, **no gate runs**. Until per-destination gating is wired, use `required: true` to protect a host's restores.
 
 ## Manifest schema
 
@@ -203,14 +206,13 @@ The drift check. Query the live schema, diff it against the manifest, exit with 
 | `1` | Error (config invalid, can't connect, manifest malformed, etc.). |
 
 ```bash
-dbx scrub check production
-dbx scrub check production/myapp   # one DB instead of the whole host
+dbx scrub check production/myapp   # target is always <host>/<database>
 ```
 
 Example drift output:
 
 ```
-$ dbx scrub check production
+$ dbx scrub check production/myapp
 [INFO] Reading manifest: dbx.scrub.json
 [INFO] Querying live schema for production (1 db: myapp)
 [WARN] Schema drift detected.
@@ -226,11 +228,11 @@ $ dbx scrub check production
   Tables with no declaration (1):
     feature_audit                         no_pii or columns required
 
-Run `dbx scrub update production` to accept the suggestions above,
-then commit dbx.scrub.json. Exit 2.
+Re-run `dbx scrub init production/myapp` to regenerate a draft with the new
+columns, reconcile it against your overrides, then commit dbx.scrub.json. Exit 2.
 ```
 
-Exit 2 is the contract CI cares about. The standard wiring is a nightly job that runs `dbx scrub check production` against the real prod schema (read-only — `check` never writes); a failure pages whoever owns the manifest, who runs `dbx scrub update production`, reviews the diff, and merges the change.
+Exit 2 is the contract CI cares about. The standard wiring is a nightly job that runs `dbx scrub check production/myapp` against the real prod schema (read-only — `check` never writes); a failure pages whoever owns the manifest, who re-runs `dbx scrub init production/myapp`, reconciles the diff against the existing overrides, and merges the change. (There is no `dbx scrub update`; `init` regenerates a draft and you merge it by hand — the manifest is a reviewed artifact, not a generated one.)
 
 ```yaml
 # .github/workflows/scrub-drift.yml — nightly drift check
@@ -241,14 +243,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: dbx scrub check production
+      - run: dbx scrub check production/myapp
         env:
           DBX_SCRUB_SEED: ${{ secrets.DBX_SCRUB_SEED }}
 ```
 
 ## Restore-time gate
 
-When `<source>` has a scrub manifest and the restore destination is listed in `scrub.required_for`, dbx runs a four-step gate. The ordering matters:
+When `<source>` has a scrub manifest and `scrub.required: true`, dbx runs a four-step gate on every restore from that source. The ordering matters:
 
 1. **Pre-restore drift check.** Read the schema snapshot captured in the backup's `.meta.json` (added at backup time) and diff against the manifest. Drift here aborts the restore *before any data hits the local container* with exit 2. Legacy backups without the captured schema fall through to a post-restore check (same logic, applied after the engine restore — the target DB gets DROPPED on drift instead of never being created). New backups (taken on this version of dbx or later) always go the pre-restore path.
 
@@ -260,7 +262,7 @@ When `<source>` has a scrub manifest and the restore destination is listed in `s
 
 If sniff verification fails, **the restored DB is dropped**. This inverts the policy of the [post-restore hooks](post-restore-hooks.md#behavior) feature, which leaves the partial DB in place for inspection. The reasoning is different: a hook that fails halfway is a debugging artifact, but a clone where scrub *thought* it succeeded and *didn't* is actively dangerous — leaving it on disk for someone to "just grab quickly" is exactly the leak the manifest exists to prevent. Drop it. Re-run after fixing.
 
-To preview without committing, restore to a non-gated destination first; nothing is dropped because nothing was gated.
+To preview without the gate dropping your clone, pass `--no-scrub` on the restore (the bypass is logged and audited), or restore from a source host that isn't gated.
 
 ### `--into` bypasses the gate
 
@@ -299,13 +301,13 @@ Written next to the restore artifact after a gated restore. Format:
 }
 ```
 
-Keep these as the audit trail for compliance reviews: every restore into a gated destination has one, every one says which seed was used (by name, never value), and `overall: pass` means the sniff queries all returned zero.
+Keep these as the audit trail for compliance reviews: every gated restore has one, every one says which seed was used (by name, never value), and `overall: pass` means the sniff queries all returned zero.
 
 ## Bootstrap with `dbx scrub init`
 
 ```bash
-dbx scrub init production > dbx.scrub.json
-dbx scrub init production --include-empty > dbx.scrub.json
+dbx scrub init production/myapp > dbx.scrub.json
+dbx scrub init production/myapp --include-empty > dbx.scrub.json
 
 # Or, iterate against a restored snapshot living in postgres-dbx / mysql-dbx
 # (no host config required):
@@ -330,7 +332,7 @@ The output is a *draft*. The expectation is that you read every line, override e
 
 ## Iterating on the manifest
 
-The [`--hooks-only` loop documented for post-restore hooks](post-restore-hooks.md#iterating-on-hook-scripts) works the same way for declarative scrub. Restore once into a non-gated destination to get a clone; tweak the manifest; re-run with `--hooks-only --name <existing-db>` against the same clone.
+The [`--hooks-only` loop documented for post-restore hooks](post-restore-hooks.md#iterating-on-hook-scripts) works the same way for declarative scrub. Restore once to get a clone (pass `--no-scrub` if the source is gated, so the gate doesn't drop it); tweak the manifest; re-run with `--hooks-only --name <existing-db>` against the same clone.
 
 ```bash
 dbx restore production/myapp/latest --name myapp_scratch
