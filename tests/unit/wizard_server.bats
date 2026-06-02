@@ -922,6 +922,20 @@ JSONL
   [[ "$output" == *"\"databases\": 0"* ]]
 }
 
+@test "GET /api/dashboard includes an 8-week trends series" {
+  local body
+  body="$(curl -s "$(api /api/dashboard)")"
+  run python3 -c '
+import sys, json
+t = json.loads(sys.argv[1])["trends"]
+assert isinstance(t, list) and len(t) == 8, len(t)
+assert all("backups" in w and "bytes" in w and "label" in w for w in t)
+print("ok")
+' "$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ok"* ]]
+}
+
 @test "GET /api/dashboard returns one card per host/db pair on disk" {
   # The default fixture has prod/myapp with one file.
   run curl -s "$(api /api/dashboard)"

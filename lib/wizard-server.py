@@ -1323,6 +1323,32 @@ def _read_schedules_block(config_path):
     return schedules
 
 
+def _compute_trends(audit_entries, now, weeks=8):
+    """Backups-per-week and bytes-backed-up-per-week for the last `weeks` weeks
+    (oldest first), from successful backup events in the audit log. On-disk
+    storage history isn't tracked, so these reflect backup *activity* over time,
+    not current disk usage (which the summary already reports)."""
+    counts = [0] * weeks
+    sizes = [0] * weeks
+    for entry in audit_entries:
+        if entry.get("action") != "backup" or entry.get("outcome") != "success":
+            continue
+        ts = _parse_iso8601_utc(entry.get("timestamp"))
+        if ts is None:
+            continue
+        weeks_ago = int((now - ts).total_seconds() // (7 * 86400))
+        if weeks_ago < 0 or weeks_ago >= weeks:
+            continue
+        idx = (weeks - 1) - weeks_ago
+        counts[idx] += 1
+        sizes[idx] += _coerce_int(entry.get("size")) or 0
+    out = []
+    for i in range(weeks):
+        label = (now - datetime.timedelta(weeks=(weeks - 1) - i)).strftime("%b %d")
+        out.append({"label": label, "backups": counts[i], "bytes": sizes[i]})
+    return out
+
+
 def compute_dashboard(data_dir, audit_dir, config_path, now=None):
     """Compose the dashboard payload from DATA_DIR + audit.log + schedules[].
 
@@ -1515,6 +1541,7 @@ def compute_dashboard(data_dir, audit_dir, config_path, now=None):
             "stale": stale,
         },
         "cards": cards,
+        "trends": _compute_trends(audit_entries, now),
     }
 
 
