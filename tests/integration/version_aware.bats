@@ -120,8 +120,11 @@ EOF
 
 @test "unknown extension during restore fails with override hint" {
   # Take a normal backup against a regular postgres source, then inject an
-  # unsupported extension into the meta to simulate a backup from a source
-  # that uses (e.g.) pg_partman.
+  # extension dbx has no image for AND can't build (not in the built-in
+  # registry, no PGDG package mapping) to simulate restoring a backup from a
+  # source with a genuinely unsupported extension. NOTE: pg_partman et al. are
+  # now in the buildable registry and resolve to a dbx-pg<major> image, so use
+  # a made-up name (matches the pick_postgres_image unit test's pg_nonesuch).
   ensure_postgres_container
 
   local pg_dbx_ip
@@ -148,14 +151,14 @@ EOF
   dbx_run backup local-pg "$TEST_DB"
   [ "$status" -eq 0 ]
 
-  # Inject an unsupported extension into the meta
+  # Inject a genuinely unsupported extension into the meta
   local meta
   meta=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst.meta.json | head -1)
-  jq '.source_extensions = ["pg_partman"]' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta"
+  jq '.source_extensions = ["pg_nonesuch"]' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta"
 
   dbx_run restore "local-pg/$TEST_DB/latest" --name "$RESTORE_DB"
   [ "$status" -ne 0 ]
-  echo "$output" | grep -q "pg_partman"
+  echo "$output" | grep -q "pg_nonesuch"
   echo "$output" | grep -q "DBX_POSTGRES_IMAGE"
 
   # Source DB cleanup happens via teardown (drops TEST_DB on dbx-pg13-source,
