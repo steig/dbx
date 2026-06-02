@@ -511,6 +511,22 @@ JSON
   [[ "$output" == *"\"action\": \"install\""* ]]
 }
 
+@test "GET /api/schedules enriches declarative rows with next_at + last_run" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{
+  "hosts": { "prod": { "type": "postgres" } },
+  "schedules": [ { "host": "prod", "database": "myapp", "when": "daily@5" } ]
+}
+JSON
+  run curl -s "$(api /api/schedules)"
+  [ "$status" -eq 0 ]
+  # next_at is computed from the `when` expression (daily@5 → a real timestamp).
+  [[ "$output" == *"\"next_at\":"* ]]
+  [[ "$output" != *"\"next_at\": null"* ]]
+  # last_run key present (null here — no backup events in this isolated env).
+  [[ "$output" == *"\"last_run\":"* ]]
+}
+
 @test "POST /api/schedules updates config.json schedules[] and preserves other keys" {
   cat > "$WIZ_SCRATCH/config.json" <<'JSON'
 { "hosts": { "prod": { "type": "postgres" } }, "schedules": [] }
