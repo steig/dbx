@@ -14,108 +14,110 @@
   configured options keeps the surface tighter and the UX nicer.)
 -->
 <style>
-  .dbx-backup__layout { display: grid; gap: 1.25rem; }
-  .dbx-backup__form { display: grid; gap: 0.75rem; grid-template-columns: 1fr 1fr; padding: 1rem 1.25rem; border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-code-bg-color); }
-  .dbx-backup__form label { display: block; font-size: 0.8125rem; font-weight: 600; color: var(--md-default-fg-color--light); margin-bottom: 0.25rem; }
-  .dbx-backup__form select,
-  .dbx-backup__form input[type=text] { width: 100%; padding: 0.4rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
-  .dbx-backup__form select:disabled { opacity: 0.6; cursor: not-allowed; }
-  .dbx-backup__row { display: flex; flex-direction: column; }
-  .dbx-backup__row--full { grid-column: 1 / -1; }
-  .dbx-backup__checks { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; font-size: 0.875rem; }
-  .dbx-backup__checks label { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 400; color: var(--md-default-fg-color); margin: 0; }
-  .dbx-backup__hint { font-size: 0.8125rem; color: var(--md-default-fg-color--light); margin: 0; }
-  .dbx-backup__actions { display: flex; gap: 0.6rem; align-items: center; }
-  .dbx-backup__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.45rem 0.95rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
-  .dbx-backup__btn:hover:not(:disabled) { opacity: 0.92; filter: brightness(1.08); }
-  .dbx-backup__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .dbx-backup__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
-  .dbx-backup__btn--secondary:hover:not(:disabled) { background: var(--md-code-bg-color); filter: none; }
-  .dbx-backup__btn--danger { background: #c43d3d; }
-  .dbx-backup__status { padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.875rem; margin: 0; }
-  .dbx-backup__status--running { background: rgba(0, 102, 255, 0.16); color: var(--md-accent-fg-color); }
-  .dbx-backup__status--ok      { background: rgba(74, 158, 76, 0.20); color: #2f7d31; }
-  .dbx-backup__status--err     { background: rgba(196, 61, 61, 0.20); color: #a83232; }
-  .dbx-backup__elapsed { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 4px; background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color); font-family: var(--md-code-font-family); font-size: 0.8125rem; }
-  .dbx-backup__log { background: #0d1117; color: #e6edf3; font-family: var(--md-code-font-family); font-size: 0.8125rem; padding: 0.75rem 1rem; border-radius: 6px; max-height: 32rem; overflow: auto; white-space: pre-wrap; }
-  .dbx-backup__empty { padding: 1rem 0; color: var(--md-default-fg-color--light); font-style: italic; font-size: 0.875rem; }
+  /* View-unique: backup has no numeric percent, so the progress bar runs
+     as an indeterminate sweep while a job is live. Uses shared tokens only. */
+  .progress--indet .progress__bar {
+    width: 35%;
+    border-radius: 999px;
+    animation: dbx-indet 1.1s ease-in-out infinite;
+  }
+  @keyframes dbx-indet {
+    0%   { margin-left: -35%; }
+    100% { margin-left: 100%; }
+  }
 </style>
 
 <div x-data="dbxBackup()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">
-      Backup
-      <span x-show="startedAt" class="dbx-backup__elapsed">Elapsed: <span x-text="formatElapsed(elapsed)"></span></span>
-    </h2>
-    <p class="dbx-view__subtitle">
-      Run <code>dbx backup &lt;host&gt; &lt;database&gt;</code> against a configured host.
-      Host + Database come from <code>config.json</code>.
-    </p>
-  </header>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Operate</p>
+      <h1 class="page-h1">Backup</h1>
+      <p class="page-sub">Create an on-demand backup of a database.</p>
+    </div>
+  </div>
 
-  <div class="dbx-backup__layout">
-    <template x-if="hosts.length === 0 && !loadingHosts">
-      <p class="dbx-backup__empty">
-        No hosts configured yet. Add one in the <a @click="$store.dbx.view='config'" style="cursor: pointer; color: var(--md-accent-fg-color); text-decoration: underline;">Config</a> tab first.
-      </p>
-    </template>
+  <template x-if="hosts.length === 0 && !loadingHosts">
+    <div class="empty">
+      <div class="empty__title">No hosts configured yet</div>
+      <div>Add one in the
+        <a @click="$store.dbx.view='config'" style="cursor: pointer;">Config</a> tab first.
+      </div>
+    </div>
+  </template>
 
-    <template x-if="hosts.length > 0">
-      <div class="dbx-backup__form">
-        <div class="dbx-backup__row">
-          <label>Host</label>
-          <select x-model="form.host" @change="onHostChange()" :disabled="running">
-            <template x-for="h in hosts" :key="h.alias">
-              <option :value="h.alias" x-text="h.alias + (h.flavor ? ' (' + h.flavor + ')' : '')"></option>
-            </template>
-          </select>
-        </div>
+  <template x-if="hosts.length > 0">
+    <div class="card">
+      <div class="card__head">
+        <div class="card__title">Backup options</div>
+        <div class="card__hint">Host + Database come from <span class="mono">config.json</span></div>
+      </div>
 
-        <div class="dbx-backup__row">
-          <label>Database</label>
-          <template x-if="databasesForSelected().length > 0">
-            <select x-model="form.database" :disabled="running">
-              <option value="">(all databases)</option>
-              <template x-for="db in databasesForSelected()" :key="db">
-                <option :value="db" x-text="db"></option>
+      <div class="form-grid">
+        <div class="field-row">
+          <div class="field" style="flex:1; min-width:200px;">
+            <label>Host</label>
+            <select x-model="form.host" @change="onHostChange()" :disabled="running">
+              <template x-for="h in hosts" :key="h.alias">
+                <option :value="h.alias" x-text="h.alias + (h.flavor ? ' (' + h.flavor + ')' : '')"></option>
               </template>
             </select>
-          </template>
-          <template x-if="databasesForSelected().length === 0">
-            <input type="text" x-model.trim="form.database" placeholder="(host has no databases[] in config; type one or leave blank for all)" :disabled="running">
-          </template>
-        </div>
+          </div>
 
-        <div class="dbx-backup__row dbx-backup__row--full">
-          <div class="dbx-backup__checks">
-            <label><input type="checkbox" x-model="form.verbose" :disabled="running"> Verbose (<code>-v</code>)</label>
-            <label><input type="checkbox" x-model="form.upload" :disabled="running"> Upload to cloud storage (<code>--upload</code>)</label>
+          <div class="field" style="flex:1; min-width:200px;">
+            <label>Database</label>
+            <template x-if="databasesForSelected().length > 0">
+              <select x-model="form.database" :disabled="running">
+                <option value="">(all databases)</option>
+                <template x-for="db in databasesForSelected()" :key="db">
+                  <option :value="db" x-text="db"></option>
+                </template>
+              </select>
+            </template>
+            <template x-if="databasesForSelected().length === 0">
+              <input type="text" x-model.trim="form.database" placeholder="(host has no databases[] in config; type one or leave blank for all)" :disabled="running">
+            </template>
           </div>
         </div>
 
-        <div class="dbx-backup__row dbx-backup__row--full">
-          <p class="dbx-backup__hint" x-show="form.database === ''">Empty database = back up every DB on the host (<code>dbx backup &lt;host&gt;</code>).</p>
+        <div class="field">
+          <label>Flags</label>
+          <div class="field-row">
+            <label class="check"><input type="checkbox" x-model="form.verbose" :disabled="running"> Verbose <span class="mono muted">(-v)</span></label>
+            <label class="check"><input type="checkbox" x-model="form.upload" :disabled="running"> Upload to cloud storage <span class="mono muted">(--upload)</span></label>
+          </div>
+          <div class="hint" x-show="form.database === ''">Empty database = back up every DB on the host (<span class="mono">dbx backup &lt;host&gt;</span>).</div>
         </div>
       </div>
-    </template>
 
-    <div class="dbx-backup__actions" x-show="hosts.length > 0">
-      <button class="dbx-backup__btn" @click="start()" :disabled="running || !form.host">
-        <span x-show="!running">Start backup</span>
-        <span x-show="running">Running…</span>
-      </button>
-      <button class="dbx-backup__btn dbx-backup__btn--danger" @click="cancel()" :disabled="!running">Cancel</button>
-      <button class="dbx-backup__btn dbx-backup__btn--secondary" @click="clearLog()" :disabled="running || log.length === 0">Clear log</button>
+      <hr class="divider">
+
+      <div class="row">
+        <button class="btn btn--primary" @click="start()" :disabled="running || !form.host">
+          <span x-show="!running">Start backup</span>
+          <span x-show="running">Running…</span>
+        </button>
+        <button class="btn btn--danger" @click="cancel()" :disabled="!running">Cancel</button>
+        <button class="btn btn--ghost" @click="clearLog()" :disabled="running || log.length === 0">Clear log</button>
+      </div>
     </div>
+  </template>
 
-    <template x-if="status">
-      <p class="dbx-backup__status" :class="statusClass()" x-text="status"></p>
-    </template>
+  <template x-if="status && !running">
+    <div class="note" :class="exitCode === 0 ? 'note--info' : (exitCode != null ? 'note--danger' : '')" style="margin-top:14px;" x-text="status"></div>
+  </template>
 
-    <template x-if="log.length > 0">
-      <pre x-ref="logEl" @scroll="onLogScroll()" class="dbx-backup__log"><template x-for="(line, i) in log" :key="i"><span x-text="line + '\n'"></span></template></pre>
-    </template>
+  <div class="section-title" x-show="running || log.length > 0">Live</div>
+
+  <div class="jobbar" x-show="running">
+    <span class="sdot sdot--run"></span>
+    <span class="jobbar__status" x-text="status || ('Backing up ' + form.host + (form.database ? ' / ' + form.database : ''))"></span>
+    <div class="progress progress--indet"><div class="progress__bar"></div></div>
+    <span class="elapsed" x-text="formatElapsed(elapsed)"></span>
   </div>
+
+  <template x-if="log.length > 0">
+    <div x-ref="logEl" @scroll="onLogScroll()" class="console"><template x-for="(line, i) in log" :key="i"><span x-text="line + '\n'"></span></template><span class="console__cursor" x-show="running"></span></div>
+  </template>
 </div>
 
 <script>
@@ -338,13 +340,6 @@
         this.startedAt = null;
         this.elapsed = 0;
         this.stopTicker();
-      },
-
-      statusClass() {
-        if (this.running) return 'dbx-backup__status--running';
-        if (this.exitCode === 0) return 'dbx-backup__status--ok';
-        if (this.exitCode != null) return 'dbx-backup__status--err';
-        return '';
       },
     };
   }

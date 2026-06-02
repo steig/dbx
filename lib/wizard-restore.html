@@ -3,95 +3,75 @@
   Wraps `dbx restore` with a form + EventSource log stream + cancel.
 -->
 <style>
-  /* Restore-view styles, scoped via the wrapper class. */
-  .dbx-restore__source { padding: 0.75rem 1rem; background: var(--md-code-bg-color); border-radius: 6px; margin-bottom: 1rem; font-family: var(--md-code-font-family); font-size: 0.875rem; }
-  .dbx-restore__source--empty { color: var(--md-default-fg-color--light); font-style: italic; font-family: inherit; }
-  .dbx-restore__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem 1.25rem; margin-bottom: 1rem; }
-  .dbx-restore__field { display: flex; flex-direction: column; gap: 0.25rem; }
-  .dbx-restore__field label { font-size: 0.8125rem; font-weight: 500; color: var(--md-default-fg-color); }
-  .dbx-restore__field input, .dbx-restore__field select { padding: 0.4rem 0.6rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
-  .dbx-restore__field small { font-size: 0.75rem; color: var(--md-default-fg-color--light); }
-  .dbx-restore__checks { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1.25rem; margin-bottom: 1rem; }
-  .dbx-restore__checks label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
-  .dbx-restore__actions { display: flex; gap: 0.75rem; margin-bottom: 1rem; }
-  .dbx-restore__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
-  .dbx-restore__btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .dbx-restore__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
-  .dbx-restore__btn--danger { background: #c43d3d; }
-  .dbx-restore__log { background: #1a1d22; color: #d4d7dd; font-family: var(--md-code-font-family); font-size: 0.8125rem; padding: 1rem; border-radius: 6px; min-height: 200px; max-height: 480px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
-  .dbx-restore__log--empty { color: #666; font-style: italic; }
-  .dbx-restore__status { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 0.75rem; font-size: 0.875rem; }
-  .dbx-restore__status--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
-  .dbx-restore__status--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
-  .dbx-restore__status--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
-  .dbx-restore__elapsed { display: inline-block; padding: 0.2rem 0.55rem; margin-left: 0.5rem; border-radius: 999px; background: var(--md-code-bg-color); color: var(--md-default-fg-color); font-family: var(--md-code-font-family); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
-  .dbx-restore__elapsed--running { color: var(--md-accent-fg-color); }
-  /* Inline backup picker (PR-K): rendered when no backup is staged, gives the
-     user a same-view shortcut so they don't have to bounce to the Backups
-     tab and back. Reuses .dbx-backups__table / __chip / __btn from the
-     global wizard.html stylesheet — these only add picker-specific chrome. */
-  .dbx-restore__picker { margin-bottom: 1rem; }
-  .dbx-restore__picker-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }
-  .dbx-restore__picker-hint { color: var(--md-default-fg-color--light); font-size: 0.875rem; margin: 0; }
-  .dbx-restore__picker-search { flex: 1; max-width: 320px; padding: 0.4rem 0.6rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
-  .dbx-restore__picker-empty { padding: 1rem; text-align: center; color: var(--md-default-fg-color--light); font-size: 0.875rem; background: var(--md-code-bg-color); border-radius: 6px; }
-  /* Failure UX (PR-M): root-cause line highlighted above the log so the user
-     doesn't have to scrub through hundreds of lines to find the error. */
-  .dbx-restore__root-cause { margin-bottom: 0.75rem; padding: 0.75rem 1rem; background: rgba(196, 61, 61, 0.08); border-left: 3px solid #c43d3d; border-radius: 4px; font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color); white-space: pre-wrap; word-break: break-word; }
-  .dbx-restore__root-cause-label { display: block; font-family: inherit; font-size: 0.75rem; font-weight: 600; color: #a83232; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.25rem; }
-  .dbx-restore__audit-hint { margin-top: 0.5rem; color: var(--md-default-fg-color--light); font-size: 0.75rem; }
-  .dbx-restore__audit-hint code { font-size: 0.75rem; }
-  /* Guided-mode chrome (PR-Y6): mode toggle pill, step indicator, prod-
-     acknowledgement banner, monospace diff block. Scoped under the same
-     .dbx-restore__ namespace as the rest of the view. */
-  .dbx-restore__mode { display: inline-flex; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 999px; padding: 0.15rem; background: var(--md-default-bg-color); }
-  .dbx-restore__mode button { background: transparent; border: none; padding: 0.3rem 0.85rem; font-size: 0.8125rem; color: var(--md-default-fg-color); cursor: pointer; border-radius: 999px; font-weight: 500; }
-  .dbx-restore__mode button.active { background: var(--md-accent-fg-color); color: #fff; }
-  .dbx-restore__steps { display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0 1.25rem; }
-  .dbx-restore__step { display: flex; align-items: center; gap: 0.5rem; color: var(--md-default-fg-color--light); font-size: 0.8125rem; }
-  .dbx-restore__step-num { display: inline-flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; border-radius: 999px; background: var(--md-default-fg-color--lighter); color: var(--md-default-bg-color); font-weight: 600; font-size: 0.75rem; }
-  .dbx-restore__step.active .dbx-restore__step-num,
-  .dbx-restore__step.done .dbx-restore__step-num { background: var(--md-accent-fg-color); color: #fff; }
-  .dbx-restore__step.active,
-  .dbx-restore__step.done { color: var(--md-default-fg-color); font-weight: 500; }
-  .dbx-restore__step-sep { flex: 0 0 1.5rem; height: 1px; background: var(--md-default-fg-color--lighter); }
-  .dbx-restore__step.done + .dbx-restore__step-sep { background: var(--md-accent-fg-color); }
-  .dbx-restore__prod-banner { padding: 0.75rem 1rem; margin: 0 0 1rem; border-radius: 6px; background: rgba(196, 61, 61, 0.10); border-left: 3px solid #c43d3d; font-size: 0.875rem; color: var(--md-default-fg-color); }
-  .dbx-restore__prod-banner strong { color: #a83232; }
-  .dbx-restore__diff { background: var(--md-code-bg-color); border-radius: 6px; padding: 0.75rem 1rem; font-family: var(--md-code-font-family); font-size: 0.8125rem; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
-  .dbx-restore__diff-line--add { color: #2f7d31; }
-  .dbx-restore__diff-line--rm  { color: #a83232; }
-  .dbx-restore__diff-summary { padding: 0.75rem 1rem; margin: 0 0 0.75rem; background: rgba(11, 107, 203, 0.08); border-left: 3px solid var(--md-accent-fg-color); border-radius: 4px; font-size: 0.875rem; }
-  .dbx-restore__view-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+
+  /* Source summary line: a compact monospace strip showing the staged backup. */
+  .rstr-source { padding: 10px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
+  .rstr-source strong { color: var(--text); }
+
+  /* Elapsed badge in the page header. */
+  .rstr-elapsed { display: inline-block; padding: 2px 9px; margin-left: 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border-2); color: var(--text-2); font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .rstr-elapsed--running { color: var(--accent); border-color: var(--accent); }
+
+  /* Inline backup picker hint. */
+  .rstr-picker-hint { color: var(--text-3); font-size: 13px; margin: 0; }
+  .rstr-picker-empty { padding: 16px; text-align: center; color: var(--text-3); font-size: 13px; }
+
+  /* Failure root-cause line, pinned above the log. */
+  .rstr-root-cause { margin-bottom: 12px; padding: 12px 14px; background: var(--red-weak); border-left: 3px solid var(--red); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+  .rstr-root-cause-label { display: block; font-family: var(--font); font-size: 11px; font-weight: 700; color: var(--red); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+  .rstr-audit-hint { margin-top: 6px; color: var(--text-3); font-size: 12px; }
+
+  /* Status banner reuses .note tones; just the spacing wrapper here. */
+  .rstr-status { margin-bottom: 12px; }
+
+  /* Guided step indicator: 1 — 2 — 3 with active / done highlight. */
+  .rstr-steps { display: flex; align-items: center; gap: 10px; margin: 4px 0 22px; }
+  .rstr-step { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 13px; }
+  .rstr-step-num { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border-2); color: var(--text-3); font-weight: 700; font-size: 12px; }
+  .rstr-step.active .rstr-step-num,
+  .rstr-step.done .rstr-step-num { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .rstr-step.active, .rstr-step.done { color: var(--text); font-weight: 600; }
+  .rstr-step-sep { flex: 0 0 24px; height: 1px; background: var(--border-2); }
+  .rstr-step.done + .rstr-step-sep { background: var(--accent); }
+
+  /* Guided diff preview block. */
+  .rstr-diff { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: var(--mono); font-size: 12.5px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .rstr-diff-line--rm { color: var(--red); }
+
+  /* Checkbox grid for the quick-mode toggles. */
+  .rstr-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; }
 </style>
 
 <div x-data="dbxRestore()" x-init="init()">
-  <header class="dbx-view__header dbx-restore__view-header">
+  <div class="page-head">
     <div>
-      <h2 class="dbx-view__title">Restore
+      <p class="page-title">Operate</p>
+      <h1 class="page-h1">Restore
         <template x-if="startedAt">
-          <span class="dbx-restore__elapsed"
-                :class="{ 'dbx-restore__elapsed--running': running }"
+          <span class="rstr-elapsed"
+                :class="{ 'rstr-elapsed--running': running }"
                 x-text="'Elapsed: ' + formatElapsed(elapsed)"></span>
         </template>
-      </h2>
-      <p class="dbx-view__subtitle">
-        Wraps <code>dbx restore</code> against a local backup. Output streams live;
+      </h1>
+      <p class="page-sub">
+        Wraps <code class="mono">dbx restore</code> against a local backup. Output streams live;
         the restore keeps running if you close the browser.
       </p>
     </div>
     <!--
-      PR-Y6: mode toggle. "Quick" is the original single-form flow; "Guided"
+      Mode toggle. "Quick" is the original single-form flow; "Guided"
       walks the user through source → target → confirm. Disabled while a
       restore is mid-run so the user can't switch modes and lose their log.
     -->
-    <div class="dbx-restore__mode" role="tablist" aria-label="Restore mode">
-      <button type="button" :class="{ active: mode() === 'quick' }"
-              @click="setMode('quick')" :disabled="running">Quick restore</button>
-      <button type="button" :class="{ active: mode() === 'guided' }"
-              @click="setMode('guided')" :disabled="running">Guided restore</button>
+    <div class="head-actions">
+      <div class="seg" role="tablist" aria-label="Restore mode">
+        <button type="button" :class="{ active: mode() === 'quick' }"
+                @click="setMode('quick')" :disabled="running">Quick restore</button>
+        <button type="button" :class="{ active: mode() === 'guided' }"
+                @click="setMode('guided')" :disabled="running">Guided restore</button>
+      </div>
     </div>
-  </header>
+  </div>
 
   <!--
     Quick-restore mode (default). Single form: pick a backup, fill checkboxes,
@@ -101,52 +81,56 @@
   <template x-if="mode() === 'quick'">
   <div>
   <template x-if="source">
-    <div class="dbx-restore__source">
+    <div class="rstr-source" style="margin-bottom:14px;">
       <span>
         <strong x-text="source.host"></strong> /
         <strong x-text="source.database"></strong> &nbsp;·&nbsp;
         <code x-text="source.filename"></code> &nbsp;·&nbsp;
-        <span x-text="source.encryption" class="dbx-backups__chip"
-              :class="{ 'dbx-backups__chip--age': source.encryption === 'age',
-                        'dbx-backups__chip--gpg': source.encryption === 'gpg' }"></span>
+        <span x-text="source.encryption" class="chip"
+              :class="{ 'chip--enc': source.encryption === 'age' || source.encryption === 'gpg' }"></span>
         <template x-if="source.safety === 'prod'">
-          <span class="dbx-backups__chip dbx-backups__chip--prod" style="margin-left: 0.5rem;">PROD</span>
+          <span class="chip chip--prod" style="margin-left: 8px;">PROD</span>
         </template>
         <template x-if="source.safety === 'stage'">
-          <span class="dbx-backups__chip dbx-backups__chip--stage" style="margin-left: 0.5rem;">STAGE</span>
+          <span class="chip chip--stage" style="margin-left: 8px;">STAGE</span>
         </template>
       </span>
     </div>
   </template>
 
   <!--
-    PR-K: inline backup picker. Renders when no backup is staged so the user
+    Inline backup picker. Renders when no backup is staged so the user
     can pick one without bouncing to the Backups tab and back. Mirrors the
     Backups view table shape (host / safety / database / when / size /
-    encryption / status) and reuses its global CSS. Hidden the moment a row
-    is picked (selectedBackup is set on the shared store, refresh() then
-    populates this.source and Alpine collapses the picker block).
+    encryption / status). Hidden the moment a row is picked (selectedBackup
+    is set on the shared store, refresh() then populates this.source and
+    Alpine collapses the picker block).
   -->
   <template x-if="!source">
-    <div class="dbx-restore__picker">
-      <div class="dbx-restore__picker-header">
-        <p class="dbx-restore__picker-hint">
-          Pick a backup below to begin — or visit the <strong>Backups</strong> tab for the full view.
-        </p>
-        <input type="search" class="dbx-restore__picker-search" x-model="pickerFilter"
-               placeholder="Filter by host or database…">
+    <div class="card">
+      <div class="card__head">
+        <div>
+          <div class="card__title">Pick a backup</div>
+          <p class="rstr-picker-hint" style="margin-top:4px;">
+            Pick a backup below to begin — or visit the <strong>Backups</strong> tab for the full view.
+          </p>
+        </div>
+        <div class="search" style="max-width:320px;">
+          <input type="search" x-model="pickerFilter"
+                 placeholder="Filter by host or database…">
+        </div>
       </div>
 
       <template x-if="pickerLoading">
-        <p class="dbx-restore__picker-empty">Loading backups…</p>
+        <p class="rstr-picker-empty">Loading backups…</p>
       </template>
 
       <template x-if="!pickerLoading && pickerRows.length === 0">
-        <p class="dbx-restore__picker-empty">No backups found. Run <code>dbx backup &lt;host&gt; &lt;db&gt;</code> first.</p>
+        <p class="rstr-picker-empty">No backups found. Run <code class="mono">dbx backup &lt;host&gt; &lt;db&gt;</code> first.</p>
       </template>
 
       <template x-if="!pickerLoading && pickerRows.length > 0">
-        <table class="dbx-backups__table">
+        <table class="tbl">
           <thead>
             <tr>
               <th>Host</th>
@@ -162,41 +146,40 @@
           </thead>
           <tbody>
             <template x-for="b in pickerFiltered()" :key="b.path">
-              <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
+              <tr :class="{ 'is-incomplete': !b.complete }">
                 <td x-text="b.host"></td>
                 <td>
                   <template x-if="b.safety === 'prod'">
-                    <span class="dbx-backups__chip dbx-backups__chip--prod">PROD</span>
+                    <span class="chip chip--prod">PROD</span>
                   </template>
                   <template x-if="b.safety === 'stage'">
-                    <span class="dbx-backups__chip dbx-backups__chip--stage">STAGE</span>
+                    <span class="chip chip--stage">STAGE</span>
                   </template>
                   <template x-if="!b.safety || b.safety === 'local'">
-                    <span style="color: var(--md-default-fg-color--light); font-size: 0.75rem;">local</span>
+                    <span class="muted" style="font-size:12px;">local</span>
                   </template>
                 </td>
                 <td x-text="b.database"></td>
-                <td><code x-text="b.filename"></code></td>
+                <td><code class="mono" x-text="b.filename"></code></td>
                 <td x-text="formatSize(b.size)"></td>
                 <td>
-                  <span class="dbx-backups__chip"
-                        :class="{ 'dbx-backups__chip--age': b.encryption === 'age',
-                                  'dbx-backups__chip--gpg': b.encryption === 'gpg' }"
+                  <span class="chip"
+                        :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
                         x-text="b.encryption"></span>
                 </td>
                 <td x-text="formatWhen(b)"></td>
                 <td>
                   <template x-if="b.complete">
-                    <span class="dbx-backups__chip dbx-backups__chip--complete"
+                    <span class="chip chip--complete"
                           title="Backup has a .meta.json sidecar — finished successfully">✓ complete</span>
                   </template>
                   <template x-if="!b.complete">
-                    <span class="dbx-backups__chip dbx-backups__chip--incomplete"
+                    <span class="chip chip--incomplete"
                           title="No .meta.json sidecar — likely partial; can't restore.">⚠ incomplete</span>
                   </template>
                 </td>
-                <td style="white-space: nowrap;">
-                  <button class="dbx-backups__btn" @click="pick(b)"
+                <td style="white-space: nowrap; text-align: right;">
+                  <button class="btn btn--ghost btn--sm" @click="pick(b)"
                           :disabled="!b.complete"
                           :title="b.complete ? 'Pick this backup' : 'Cannot restore an incomplete backup'">Pick</button>
                 </td>
@@ -208,108 +191,128 @@
     </div>
   </template>
 
+  <!--
+    Prominent danger note: prod-source backups can't be restored with
+    --into. Wired to the existing source.safety flag from config.
+  -->
   <template x-if="source && source.safety === 'prod'">
-    <div class="dbx-restore__status dbx-restore__status--err" style="margin-bottom: 1rem;">
+    <div class="note note--danger rstr-status" style="margin-bottom:14px;">
       <strong>This backup is from a host marked safety=prod.</strong>
       Plain restore into the managed dev container is allowed (the source backup is read-only at this point).
-      However, <code>--into &lt;container&gt;</code> is refused for prod-source backups — clear the
+      However, <code class="mono">--into &lt;container&gt;</code> is refused for prod-source backups — clear the
       container picker before starting, or remove the safety flag in config.json if this is intentional.
     </div>
   </template>
 
   <template x-if="source">
     <div>
-      <div class="dbx-restore__grid">
-        <div class="dbx-restore__field">
-          <label for="dbx-r-name">Target database name</label>
-          <input id="dbx-r-name" type="text" x-model="form.name"
-                 placeholder="(auto: e.g. myapp_v1_20260524)"
-                 pattern="[A-Za-z0-9][A-Za-z0-9_-]*">
-          <small>Letters, numbers, <code>_</code> and <code>-</code>. Leave blank to let dbx auto-generate.</small>
+      <!-- DESTINATION -->
+      <div class="card">
+        <div class="card__head">
+          <div class="card__title">Destination</div>
+          <div class="card__hint">where the data goes</div>
         </div>
-        <div class="dbx-restore__field">
-          <label for="dbx-r-into">Restore into container</label>
-          <select id="dbx-r-into" x-model="form.into"
-                  :disabled="!containers.length || isMysql()">
-            <option value="">(default: managed postgres-dbx / mysql-dbx)</option>
-            <template x-for="name in containers" :key="name">
-              <option :value="name" x-text="name"></option>
-            </template>
-          </select>
-          <small x-show="!isMysql()">Optional. Postgres only.</small>
-          <small x-show="isMysql()" style="color: var(--md-default-fg-color--light);">
-            <code>--into</code> is postgres-only — the CLI rejects it for MySQL backups.
-          </small>
+        <div class="form-grid" style="max-width:none;">
+          <div class="field-row">
+            <div class="field" style="flex:1; min-width:200px;">
+              <label for="dbx-r-name">Target database name</label>
+              <input id="dbx-r-name" type="text" x-model="form.name"
+                     placeholder="(auto: e.g. myapp_v1_20260524)"
+                     pattern="[A-Za-z0-9][A-Za-z0-9_-]*">
+              <span class="hint">Letters, numbers, <code class="mono">_</code> and <code class="mono">-</code>. Leave blank to let dbx auto-generate.</span>
+            </div>
+            <div class="field" style="flex:1; min-width:200px;">
+              <label for="dbx-r-into">Restore into container</label>
+              <select id="dbx-r-into" x-model="form.into"
+                      :disabled="!containers.length || isMysql()">
+                <option value="">(default: managed postgres-dbx / mysql-dbx)</option>
+                <template x-for="name in containers" :key="name">
+                  <option :value="name" x-text="name"></option>
+                </template>
+              </select>
+              <span class="hint" x-show="!isMysql()">Optional. Postgres only.</span>
+              <span class="hint" x-show="isMysql()">
+                <code class="mono">--into</code> is postgres-only — the CLI rejects it for MySQL backups.
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="dbx-restore__checks">
-        <label><input type="checkbox" x-model="form.no_post_restore"> Skip post-restore hooks</label>
-        <label><input type="checkbox" x-model="form.hooks_only">       Re-run hooks only (no engine restore)</label>
-        <label><input type="checkbox" x-model="form.no_scrub">          Skip PII scrub gate (break-glass)</label>
-        <label><input type="checkbox" x-model="form.keep_download">     Keep downloaded backup after restore</label>
-      </div>
-
-      <div class="dbx-restore__actions">
-        <button class="dbx-restore__btn" @click="start()"
-                :disabled="running || !source || prodIntoBlocked()"
-                :title="prodIntoBlocked() ? 'Prod-source restore --into is refused (clear the container picker)' : ''">
-          <span x-show="!running">Start restore</span>
-          <span x-show="running">Restoring…</span>
-        </button>
-        <button class="dbx-restore__btn dbx-restore__btn--danger" @click="cancel()" :disabled="!running">
-          Cancel
-        </button>
-        <!--
-          PR-M: Retry re-issues the SAME body the previous run used, so the
-          user doesn't have to re-toggle the checkboxes after a transient
-          failure (network blip, container OOM, etc.). Only enabled after a
-          failed run while not actively running.
-        -->
-        <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="retry()"
-                :disabled="running || exitCode == null || exitCode === 0"
-                title="Re-run with the same options">
-          Retry
-        </button>
-        <!--
-          PR-M: Copy the full captured log to the clipboard. Useful for
-          pasting into a bug report. Plain log lines (no ANSI), since the
-          SSE stream already strips them server-side.
-        -->
-        <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="copyLog()"
-                :disabled="!log.length"
-                :title="copyState || 'Copy the full log to clipboard'">
-          <span x-text="copyState || 'Copy log'"></span>
-        </button>
-        <button class="dbx-restore__btn dbx-restore__btn--secondary" @click="clearLog()" :disabled="running || !log.length">
-          Clear log
-        </button>
+      <!-- OPTIONS -->
+      <div class="card">
+        <div class="card__head">
+          <div class="card__title">Options</div>
+        </div>
+        <div class="rstr-checks">
+          <label class="check"><input type="checkbox" x-model="form.no_post_restore"> Skip post-restore hooks</label>
+          <label class="check"><input type="checkbox" x-model="form.hooks_only"> Re-run hooks only (no engine restore)</label>
+          <label class="check"><input type="checkbox" x-model="form.no_scrub"> Skip PII scrub gate (break-glass)</label>
+          <label class="check"><input type="checkbox" x-model="form.keep_download"> Keep downloaded backup after restore</label>
+        </div>
+        <hr class="divider">
+        <div class="row">
+          <button class="btn btn--danger" @click="start()"
+                  :disabled="running || !source || prodIntoBlocked()"
+                  :title="prodIntoBlocked() ? 'Prod-source restore --into is refused (clear the container picker)' : ''">
+            <span x-show="!running">Restore</span>
+            <span x-show="running">Restoring…</span>
+          </button>
+          <button class="btn btn--ghost" @click="cancel()" :disabled="!running">
+            Cancel
+          </button>
+          <!--
+            Retry re-issues the SAME body the previous run used, so the
+            user doesn't have to re-toggle the checkboxes after a transient
+            failure (network blip, container OOM, etc.). Only enabled after a
+            failed run while not actively running.
+          -->
+          <button class="btn btn--ghost" @click="retry()"
+                  :disabled="running || exitCode == null || exitCode === 0"
+                  title="Re-run with the same options">
+            Retry
+          </button>
+          <!--
+            Copy the full captured log to the clipboard. Useful for
+            pasting into a bug report. Plain log lines (no ANSI), since the
+            SSE stream already strips them server-side.
+          -->
+          <button class="btn btn--ghost" @click="copyLog()"
+                  :disabled="!log.length"
+                  :title="copyState || 'Copy the full log to clipboard'">
+            <span x-text="copyState || 'Copy log'"></span>
+          </button>
+          <button class="btn btn--ghost" @click="clearLog()" :disabled="running || !log.length">
+            Clear log
+          </button>
+        </div>
       </div>
 
       <template x-if="status">
-        <div class="dbx-restore__status"
-             :class="statusClass()" x-text="status"></div>
+        <div class="note rstr-status"
+             :class="statusNoteClass()" style="margin-top:14px;" x-text="status"></div>
       </template>
 
       <!--
-        PR-M: when a run fails, scan the captured log for the LAST line that
+        When a run fails, scan the captured log for the LAST line that
         looks like a dump-tool error (mysqldump:/pg_restore:/etc.) and pin
         it at the top of the log area. Saves the user scrolling through
         hundreds of progress lines to find the root cause.
       -->
       <template x-if="rootCause">
-        <div class="dbx-restore__root-cause">
-          <span class="dbx-restore__root-cause-label">Likely root cause</span>
+        <div class="rstr-root-cause" style="margin-top:14px;">
+          <span class="rstr-root-cause-label">Likely root cause</span>
           <span x-text="rootCause"></span>
-          <div class="dbx-restore__audit-hint">
-            Full restore record in <code>~/.local/share/dbx/audit.log</code>.
+          <div class="rstr-audit-hint">
+            Full restore record in <code class="mono">~/.local/share/dbx/audit.log</code>.
           </div>
         </div>
       </template>
 
-      <div class="dbx-restore__log" :class="{ 'dbx-restore__log--empty': !log.length }">
+      <div class="section-title">Live log</div>
+      <div class="console" :class="{ 'is-empty': !log.length }">
         <template x-if="!log.length">
-          <span>(no output yet — click "Start restore" to begin)</span>
+          <span class="console__line--dim">(no output yet — click "Restore" to begin)</span>
         </template>
         <template x-for="(line, i) in log" :key="i">
           <div x-text="line"></div>
@@ -328,24 +331,24 @@
   <template x-if="mode() === 'guided'">
     <div>
       <!-- Step indicator: 1 — 2 — 3 with active highlight + done state. -->
-      <div class="dbx-restore__steps">
-        <div class="dbx-restore__step"
+      <div class="rstr-steps">
+        <div class="rstr-step"
              :class="{ active: guidedStep === 1, done: guidedStep > 1 }">
-          <span class="dbx-restore__step-num">1</span>
+          <span class="rstr-step-num">1</span>
           <span>Source</span>
         </div>
-        <span class="dbx-restore__step-sep"
+        <span class="rstr-step-sep"
               :class="{ done: guidedStep > 1 }"></span>
-        <div class="dbx-restore__step"
+        <div class="rstr-step"
              :class="{ active: guidedStep === 2, done: guidedStep > 2 }">
-          <span class="dbx-restore__step-num">2</span>
+          <span class="rstr-step-num">2</span>
           <span>Target</span>
         </div>
-        <span class="dbx-restore__step-sep"
+        <span class="rstr-step-sep"
               :class="{ done: guidedStep > 2 }"></span>
-        <div class="dbx-restore__step"
+        <div class="rstr-step"
              :class="{ active: guidedStep === 3 }">
-          <span class="dbx-restore__step-num">3</span>
+          <span class="rstr-step-num">3</span>
           <span>Confirm</span>
         </div>
       </div>
@@ -353,26 +356,30 @@
       <!-- Step 1: pick a source backup. Reuses the same row shape as the
            Backups view and the quick-mode inline picker. -->
       <template x-if="guidedStep === 1">
-        <div>
-          <p class="dbx-restore__picker-hint">
-            Pick the backup you want to restore.
-          </p>
-          <div class="dbx-restore__picker-header" style="margin-top: 0.5rem;">
-            <input type="search" class="dbx-restore__picker-search"
-                   x-model="pickerFilter"
-                   placeholder="Filter by host or database…">
+        <div class="card">
+          <div class="card__head">
+            <div>
+              <div class="card__title">Source</div>
+              <p class="rstr-picker-hint" style="margin-top:4px;">
+                Pick the backup you want to restore.
+              </p>
+            </div>
+            <div class="search" style="max-width:320px;">
+              <input type="search" x-model="pickerFilter"
+                     placeholder="Filter by host or database…">
+            </div>
           </div>
 
           <template x-if="pickerLoading">
-            <p class="dbx-restore__picker-empty">Loading backups…</p>
+            <p class="rstr-picker-empty">Loading backups…</p>
           </template>
           <template x-if="!pickerLoading && pickerRows.length === 0">
-            <p class="dbx-restore__picker-empty">
-              No backups found. Run <code>dbx backup &lt;host&gt; &lt;db&gt;</code> first.
+            <p class="rstr-picker-empty">
+              No backups found. Run <code class="mono">dbx backup &lt;host&gt; &lt;db&gt;</code> first.
             </p>
           </template>
           <template x-if="!pickerLoading && pickerRows.length > 0">
-            <table class="dbx-backups__table">
+            <table class="tbl">
               <thead>
                 <tr>
                   <th>Host</th>
@@ -388,39 +395,38 @@
               </thead>
               <tbody>
                 <template x-for="b in pickerFiltered()" :key="b.path">
-                  <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
+                  <tr :class="{ 'is-incomplete': !b.complete }">
                     <td x-text="b.host"></td>
                     <td>
                       <template x-if="b.safety === 'prod'">
-                        <span class="dbx-backups__chip dbx-backups__chip--prod">PROD</span>
+                        <span class="chip chip--prod">PROD</span>
                       </template>
                       <template x-if="b.safety === 'stage'">
-                        <span class="dbx-backups__chip dbx-backups__chip--stage">STAGE</span>
+                        <span class="chip chip--stage">STAGE</span>
                       </template>
                       <template x-if="!b.safety || b.safety === 'local'">
-                        <span style="color: var(--md-default-fg-color--light); font-size: 0.75rem;">local</span>
+                        <span class="muted" style="font-size:12px;">local</span>
                       </template>
                     </td>
                     <td x-text="b.database"></td>
-                    <td><code x-text="b.filename"></code></td>
+                    <td><code class="mono" x-text="b.filename"></code></td>
                     <td x-text="formatSize(b.size)"></td>
                     <td>
-                      <span class="dbx-backups__chip"
-                            :class="{ 'dbx-backups__chip--age': b.encryption === 'age',
-                                      'dbx-backups__chip--gpg': b.encryption === 'gpg' }"
+                      <span class="chip"
+                            :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
                             x-text="b.encryption"></span>
                     </td>
                     <td x-text="formatWhen(b)"></td>
                     <td>
                       <template x-if="b.complete">
-                        <span class="dbx-backups__chip dbx-backups__chip--complete">✓ complete</span>
+                        <span class="chip chip--complete">✓ complete</span>
                       </template>
                       <template x-if="!b.complete">
-                        <span class="dbx-backups__chip dbx-backups__chip--incomplete">⚠ incomplete</span>
+                        <span class="chip chip--incomplete">⚠ incomplete</span>
                       </template>
                     </td>
-                    <td style="white-space: nowrap;">
-                      <button class="dbx-backups__btn"
+                    <td style="white-space: nowrap; text-align: right;">
+                      <button class="btn btn--ghost btn--sm"
                               @click="pickGuided(b)"
                               :disabled="!b.complete"
                               :title="b.complete ? 'Use this backup' : 'Cannot restore an incomplete backup'">
@@ -439,7 +445,7 @@
       <template x-if="guidedStep === 2">
         <div>
           <template x-if="source">
-            <div class="dbx-restore__source">
+            <div class="rstr-source" style="margin-bottom:14px;">
               <span>
                 <strong x-text="source.host"></strong> /
                 <strong x-text="source.database"></strong> &nbsp;·&nbsp;
@@ -447,19 +453,20 @@
                 <span x-text="formatSize(source.size)"></span> &nbsp;·&nbsp;
                 <span x-text="formatWhen(source)"></span>
                 <template x-if="source.safety === 'prod'">
-                  <span class="dbx-backups__chip dbx-backups__chip--prod"
-                        style="margin-left: 0.5rem;">PROD</span>
+                  <span class="chip chip--prod" style="margin-left: 8px;">PROD</span>
                 </template>
                 <template x-if="source.safety === 'stage'">
-                  <span class="dbx-backups__chip dbx-backups__chip--stage"
-                        style="margin-left: 0.5rem;">STAGE</span>
+                  <span class="chip chip--stage" style="margin-left: 8px;">STAGE</span>
                 </template>
               </span>
             </div>
           </template>
 
+          <!--
+            Prominent danger note for prod data, wired to source.safety.
+          -->
           <template x-if="source && source.safety === 'prod'">
-            <div class="dbx-restore__prod-banner">
+            <div class="note note--danger" style="margin-bottom:14px;">
               <strong>This backup is from a production host.</strong>
               Confirm you understand you are about to load prod data into a
               local dev container. The scrub step (default on) sanitizes PII
@@ -467,35 +474,38 @@
             </div>
           </template>
 
-          <div class="dbx-restore__grid">
-            <div class="dbx-restore__field">
-              <label for="dbx-g-name">Target database name</label>
-              <input id="dbx-g-name" type="text" x-model="guidedTarget"
-                     pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
-                     placeholder="(auto-generated)">
-              <small>Letters, numbers, <code>_</code> and <code>-</code>.</small>
+          <div class="card">
+            <div class="card__head">
+              <div class="card__title">Target</div>
+              <div class="card__hint">where the data goes</div>
             </div>
-          </div>
-
-          <div class="dbx-restore__checks">
-            <label>
-              <input type="checkbox" x-model="guidedScrub">
-              Run scrub (sanitize PII before any consumer sees the data)
-            </label>
-            <template x-if="source && source.safety === 'prod'">
-              <label>
-                <input type="checkbox" x-model="guidedAcknowledged">
-                <strong>I understand this is prod data.</strong>
+            <div class="form-grid">
+              <div class="field">
+                <label for="dbx-g-name">Target database name</label>
+                <input id="dbx-g-name" type="text" x-model="guidedTarget"
+                       pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
+                       placeholder="(auto-generated)">
+                <span class="hint">Letters, numbers, <code class="mono">_</code> and <code class="mono">-</code>.</span>
+              </div>
+              <label class="check">
+                <input type="checkbox" x-model="guidedScrub">
+                Run scrub (sanitize PII before any consumer sees the data)
               </label>
-            </template>
-          </div>
-
-          <div class="dbx-restore__actions">
-            <button class="dbx-restore__btn dbx-restore__btn--secondary"
-                    @click="guidedBack()">Back</button>
-            <button class="dbx-restore__btn"
-                    @click="guidedNext()"
-                    :disabled="!guidedCanAdvance()">Next</button>
+              <template x-if="source && source.safety === 'prod'">
+                <label class="check">
+                  <input type="checkbox" x-model="guidedAcknowledged">
+                  <strong>I understand this is prod data.</strong>
+                </label>
+              </template>
+            </div>
+            <hr class="divider">
+            <div class="row">
+              <button class="btn btn--ghost"
+                      @click="guidedBack()">Back</button>
+              <button class="btn btn--primary"
+                      @click="guidedNext()"
+                      :disabled="!guidedCanAdvance()">Next</button>
+            </div>
           </div>
         </div>
       </template>
@@ -504,7 +514,7 @@
       <template x-if="guidedStep === 3">
         <div>
           <template x-if="source">
-            <div class="dbx-restore__source">
+            <div class="rstr-source" style="margin-bottom:14px;">
               <span>
                 <strong x-text="source.host"></strong> /
                 <strong x-text="source.database"></strong> &nbsp;→&nbsp;
@@ -513,43 +523,50 @@
             </div>
           </template>
 
-          <template x-if="diffLoading">
-            <p class="dbx-restore__picker-empty">Inspecting target…</p>
-          </template>
-
-          <template x-if="!diffLoading && diffError">
-            <div class="dbx-restore__status dbx-restore__status--err"
-                 x-text="diffError"></div>
-          </template>
-
-          <template x-if="!diffLoading && !diffError && diff">
-            <div>
-              <p class="dbx-restore__diff-summary" x-text="diff.diff_summary"></p>
-              <template x-if="diff.target && diff.target.tables && diff.target.tables.length > 0">
-                <div class="dbx-restore__diff">
-                  <template x-for="t in diff.target.tables" :key="t">
-                    <div x-text="'- ' + t" class="dbx-restore__diff-line--rm"></div>
-                  </template>
-                  <template x-if="diff.target.table_count > diff.target.tables.length">
-                    <div x-text="'(… ' + (diff.target.table_count - diff.target.tables.length) + ' more)'"></div>
-                  </template>
-                </div>
-              </template>
+          <div class="card">
+            <div class="card__head">
+              <div class="card__title">Confirm</div>
+              <div class="card__hint">review before restoring</div>
             </div>
-          </template>
 
-          <div class="dbx-restore__actions">
-            <button class="dbx-restore__btn dbx-restore__btn--secondary"
-                    @click="guidedBack()"
-                    :disabled="running">Back</button>
-            <button class="dbx-restore__btn"
-                    @click="runGuided()"
-                    :disabled="running || !source || diffLoading">
-              <span x-show="!running">Run restore</span>
-              <span x-show="running">Restoring…</span>
-            </button>
-            <button class="dbx-restore__btn dbx-restore__btn--danger"
-                    @click="cancel()" :disabled="!running">Cancel</button>
+            <template x-if="diffLoading">
+              <p class="rstr-picker-empty">Inspecting target…</p>
+            </template>
+
+            <template x-if="!diffLoading && diffError">
+              <div class="note note--danger" x-text="diffError"></div>
+            </template>
+
+            <template x-if="!diffLoading && !diffError && diff">
+              <div>
+                <div class="note note--info" style="margin-bottom:12px;" x-text="diff.diff_summary"></div>
+                <template x-if="diff.target && diff.target.tables && diff.target.tables.length > 0">
+                  <div class="rstr-diff">
+                    <template x-for="t in diff.target.tables" :key="t">
+                      <div x-text="'- ' + t" class="rstr-diff-line--rm"></div>
+                    </template>
+                    <template x-if="diff.target.table_count > diff.target.tables.length">
+                      <div x-text="'(… ' + (diff.target.table_count - diff.target.tables.length) + ' more)'"></div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <hr class="divider">
+            <div class="row">
+              <button class="btn btn--ghost"
+                      @click="guidedBack()"
+                      :disabled="running">Back</button>
+              <button class="btn btn--danger"
+                      @click="runGuided()"
+                      :disabled="running || !source || diffLoading">
+                <span x-show="!running">Run restore</span>
+                <span x-show="running">Restoring…</span>
+              </button>
+              <button class="btn btn--ghost"
+                      @click="cancel()" :disabled="!running">Cancel</button>
+            </div>
           </div>
         </div>
       </template>
@@ -562,24 +579,24 @@
     quick form, since both modes funnel into start().
   -->
   <template x-if="mode() === 'guided' && (running || log.length || status)">
-    <div style="margin-top: 1rem;">
+    <div style="margin-top: 14px;">
       <template x-if="status">
-        <div class="dbx-restore__status"
-             :class="statusClass()" x-text="status"></div>
+        <div class="note rstr-status"
+             :class="statusNoteClass()" x-text="status"></div>
       </template>
       <template x-if="rootCause">
-        <div class="dbx-restore__root-cause">
-          <span class="dbx-restore__root-cause-label">Likely root cause</span>
+        <div class="rstr-root-cause">
+          <span class="rstr-root-cause-label">Likely root cause</span>
           <span x-text="rootCause"></span>
-          <div class="dbx-restore__audit-hint">
-            Full restore record in <code>~/.local/share/dbx/audit.log</code>.
+          <div class="rstr-audit-hint">
+            Full restore record in <code class="mono">~/.local/share/dbx/audit.log</code>.
           </div>
         </div>
       </template>
-      <div class="dbx-restore__log"
-           :class="{ 'dbx-restore__log--empty': !log.length }">
+      <div class="section-title">Live log</div>
+      <div class="console" :class="{ 'is-empty': !log.length }">
         <template x-if="!log.length">
-          <span>(no output yet — click "Run restore" to begin)</span>
+          <span class="console__line--dim">(no output yet — click "Run restore" to begin)</span>
         </template>
         <template x-for="(line, i) in log" :key="i">
           <div x-text="line"></div>
@@ -1058,10 +1075,11 @@
         this.stopTicker();
       },
 
-      statusClass() {
-        if (this.running) return 'dbx-restore__status--running';
-        if (this.exitCode === 0) return 'dbx-restore__status--ok';
-        if (this.exitCode != null) return 'dbx-restore__status--err';
+      // Map run state to a shared .note tone for the status banner.
+      statusNoteClass() {
+        if (this.running) return 'note--info';
+        if (this.exitCode === 0) return 'note--info';
+        if (this.exitCode != null) return 'note--danger';
         return '';
       },
 

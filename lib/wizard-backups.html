@@ -4,90 +4,111 @@
   button stages the row in $store.dbx.selectedBackup and switches view — the
   Restore view itself lands in a follow-up commit.
 -->
-<div x-data="dbxBackups()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Backups</h2>
-    <p class="dbx-view__subtitle" x-text="subtitle()"></p>
-  </header>
+<style>
+  .bk-loading { padding: 28px 12px; color: var(--text-3); }
+  .tbl tbody tr.is-incomplete { opacity: .55; }
+  .tbl tbody tr.is-incomplete:hover { opacity: .75; }
+</style>
 
-  <div class="dbx-backups__toolbar">
-    <input type="search" class="dbx-backups__search" x-model="filter"
-           placeholder="Filter by host or database…">
-    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
+<div x-data="dbxBackups()" x-init="init()">
+  <div class="page-head">
+    <div>
+      <p class="page-title">Operate</p>
+      <h1 class="page-h1">Backups</h1>
+      <p class="page-sub" x-text="subtitle()"></p>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn--ghost" @click="load()" :disabled="loading">Refresh</button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="search">
+      <input type="search" x-model="filter"
+             placeholder="Filter by host, database, or file…">
+    </div>
+    <div class="seg">
+      <button :class="{ active: freshFilter === 'all' }"   @click="setFresh('all')">All</button>
+      <button :class="{ active: freshFilter === 'fresh' }" @click="setFresh('fresh')">Fresh</button>
+      <button :class="{ active: freshFilter === 'aging' }" @click="setFresh('aging')">Aging</button>
+      <button :class="{ active: freshFilter === 'stale' }" @click="setFresh('stale')">Stale</button>
+    </div>
+    <span class="spacer"></span>
+    <span class="card__hint" x-text="countHint()"></span>
   </div>
 
   <template x-if="loading">
-    <p class="dbx-backups__empty">Loading…</p>
+    <div class="bk-loading">Loading…</div>
   </template>
 
   <template x-if="!loading && rows.length === 0">
-    <p class="dbx-backups__empty">No backups found under <code x-text="dataDir() || '~/.data/dbx'"></code>.</p>
+    <div class="empty">
+      <div class="empty__title">No backups yet</div>
+      <div>Nothing found under <span class="mono" x-text="dataDir() || '~/.data/dbx'"></span>.</div>
+    </div>
   </template>
 
   <template x-if="!loading && rows.length > 0">
-    <table class="dbx-backups__table">
-      <thead>
-        <tr>
-          <th>Host</th>
-          <th>Safety</th>
-          <th>Database</th>
-          <th>Backup</th>
-          <th>Size</th>
-          <th>Encryption</th>
-          <th>Source</th>
-          <th>When</th>
-          <th>Status</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        <template x-for="b in filtered()" :key="b.path">
-          <tr :class="{ 'dbx-backups__row--incomplete': !b.complete }">
-            <td x-text="b.host"></td>
-            <td>
-              <template x-if="b.safety === 'prod'">
-                <span class="dbx-backups__chip dbx-backups__chip--prod">PROD</span>
-              </template>
-              <template x-if="b.safety === 'stage'">
-                <span class="dbx-backups__chip dbx-backups__chip--stage">STAGE</span>
-              </template>
-              <template x-if="!b.safety || b.safety === 'local'">
-                <span style="color: var(--md-default-fg-color--light); font-size: 0.75rem;">local</span>
-              </template>
-            </td>
-            <td x-text="b.database"></td>
-            <td><code x-text="b.filename"></code></td>
-            <td x-text="formatSize(b.size)"></td>
-            <td>
-              <span class="dbx-backups__chip"
-                    :class="{ 'dbx-backups__chip--age': b.encryption === 'age',
-                              'dbx-backups__chip--gpg': b.encryption === 'gpg' }"
-                    x-text="b.encryption"></span>
-            </td>
-            <td x-text="sourceLabel(b)"></td>
-            <td x-text="formatWhen(b)"></td>
-            <td>
-              <template x-if="b.complete">
-                <span class="dbx-backups__chip dbx-backups__chip--complete"
-                      title="Backup has a .meta.json sidecar — finished successfully">✓ complete</span>
-              </template>
-              <template x-if="!b.complete">
-                <span class="dbx-backups__chip dbx-backups__chip--incomplete"
-                      title="No .meta.json sidecar — likely a partial backup from a crashed run. Safe to delete.">⚠ incomplete</span>
-              </template>
-            </td>
-            <td style="white-space: nowrap;">
-              <button class="dbx-backups__btn" @click="restore(b)"
-                      :disabled="!b.complete"
-                      :title="b.complete ? 'Restore this backup' : 'Cannot restore an incomplete backup'">Restore</button>
-              <button class="dbx-backups__btn dbx-backups__btn--danger"
-                      @click="deleteBackup(b)"
-                      title="Delete this backup and its .meta.json sidecar (no undo)">Delete</button>
-            </td>
+    <div class="card card--flush">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Host / DB</th>
+            <th>File</th>
+            <th class="num">Created</th>
+            <th class="num">Size</th>
+            <th>Tags</th>
+            <th></th>
           </tr>
-        </template>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          <template x-for="b in filtered()" :key="b.path">
+            <tr :class="{ 'is-incomplete': !b.complete }">
+              <td>
+                <span x-text="b.host"></span>
+                <span class="muted">/ <span x-text="b.database"></span></span>
+              </td>
+              <td class="mono" :class="{ muted: !b.complete }" x-text="b.filename"></td>
+              <td class="num" x-text="formatWhen(b)"></td>
+              <td class="num" x-text="formatSize(b.size)"></td>
+              <td>
+                <span class="chip"
+                      :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
+                      x-text="b.encryption"></span>
+                <template x-if="b.safety === 'prod'">
+                  <span class="chip chip--prod">prod</span>
+                </template>
+                <template x-if="b.safety === 'stage'">
+                  <span class="chip chip--stage">staging</span>
+                </template>
+                <template x-if="b.complete">
+                  <span class="chip chip--complete"
+                        title="Backup has a .meta.json sidecar — finished successfully">complete</span>
+                </template>
+                <template x-if="!b.complete">
+                  <span class="chip chip--incomplete"
+                        title="No .meta.json sidecar — likely a partial backup from a crashed run. Safe to delete.">incomplete</span>
+                </template>
+                <span class="chip"
+                      :class="{ 'chip--fresh': freshness(b) === 'fresh',
+                                'chip--aging': freshness(b) === 'aging',
+                                'chip--stale': freshness(b) === 'stale' }"
+                      x-text="freshness(b)"></span>
+              </td>
+              <td>
+                <div class="tbl__actions">
+                  <button class="btn btn--primary btn--sm" @click="restore(b)"
+                          :disabled="!b.complete"
+                          :title="b.complete ? 'Restore this backup' : 'Cannot restore an incomplete backup'">Restore</button>
+                  <button class="btn btn--danger btn--sm" @click="deleteBackup(b)"
+                          title="Delete this backup and its .meta.json sidecar (no undo)">Delete</button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </template>
 </div>
 
@@ -97,6 +118,7 @@
       rows: [],
       loading: true,
       filter: '',
+      freshFilter: 'all',
 
       init() {
         // The Dashboard view sets $store.dbx.backupFilter to "host/db" when
@@ -137,16 +159,46 @@
 
       filtered() {
         const f = this.filter.trim().toLowerCase();
-        if (!f) return this.rows;
-        // Dashboard hands us "host/db" — try the combined form first so a
-        // click from a card narrows to exactly that pair, then fall back
-        // to substring match on either field for free-typed filters.
-        return this.rows.filter(b => {
-          const hostDb = (b.host + '/' + b.database).toLowerCase();
-          return hostDb.includes(f)
-            || b.host.toLowerCase().includes(f)
-            || b.database.toLowerCase().includes(f);
-        });
+        let rows = this.rows;
+        if (f) {
+          // Dashboard hands us "host/db" — try the combined form first so a
+          // click from a card narrows to exactly that pair, then fall back
+          // to substring match on either field for free-typed filters.
+          rows = rows.filter(b => {
+            const hostDb = (b.host + '/' + b.database).toLowerCase();
+            return hostDb.includes(f)
+              || b.host.toLowerCase().includes(f)
+              || b.database.toLowerCase().includes(f);
+          });
+        }
+        if (this.freshFilter !== 'all') {
+          rows = rows.filter(b => this.freshness(b) === this.freshFilter);
+        }
+        return rows;
+      },
+
+      // Freshness bucket from the file's mtime, mirroring the server's
+      // dashboard thresholds (fresh <24h, aging <7d, else stale — see
+      // wizard-server.py:1441). Additive client-side derivation; the
+      // /api/backups payload always carries `mtime`.
+      freshness(b) {
+        if (b.mtime == null) return 'stale';
+        const ageDays = (Date.now() / 1000 - b.mtime) / 86400;
+        if (ageDays < 1) return 'fresh';
+        if (ageDays < 7) return 'aging';
+        return 'stale';
+      },
+
+      setFresh(which) {
+        this.freshFilter = which;
+      },
+
+      countHint() {
+        if (this.loading) return '';
+        const shown = this.filtered();
+        const totalBytes = shown.reduce((sum, b) => sum + (b.size || 0), 0);
+        const n = shown.length;
+        return `${n} backup${n === 1 ? '' : 's'} · ${this.formatSize(totalBytes)}`;
       },
 
       subtitle() {

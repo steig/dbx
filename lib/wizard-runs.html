@@ -12,131 +12,124 @@
   Reads /api/audit-log, refreshes on tab switch.
 -->
 <style>
-  .dbx-runs__toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; }
-  .dbx-runs__select { padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
-  .dbx-runs__search { flex: 1; min-width: 200px; padding: 0.5rem 0.75rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); }
-  .dbx-runs__date { padding: 0.5rem 0.5rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; }
-  .dbx-runs__count { color: var(--md-default-fg-color--light); font-size: 0.875rem; }
-  .dbx-runs__hint  { color: var(--md-default-fg-color--light); font-size: 0.8125rem; font-style: italic; }
-  .dbx-runs__hint--warn { color: #8a4c10; }
-
-  /* Preset filter chip — single-click "failed restores against prod" style.
-     Matches the visual weight of dbx-backups__chip but is interactive. */
-  .dbx-runs__chip--filter {
-    display: inline-flex; align-items: center; gap: 0.25rem;
-    padding: 0.25rem 0.625rem; border-radius: 999px; cursor: pointer;
-    background: rgba(196, 61, 61, 0.12); color: #8a1f1f;
-    border: 1px solid rgba(196, 61, 61, 0.35); font-size: 0.8125rem;
-    font-weight: 600; line-height: 1;
-  }
-  .dbx-runs__chip--filter:hover { background: rgba(196, 61, 61, 0.22); }
-
-  .dbx-runs__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-  .dbx-runs__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
-  .dbx-runs__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-  .dbx-runs__table tbody tr:hover { background: var(--md-code-bg-color); }
-  /* Soft red wash for failed runs so the user spots them at a glance. */
-  .dbx-runs__row--failure { background: rgba(196, 61, 61, 0.07); }
-  .dbx-runs__row--failure:hover { background: rgba(196, 61, 61, 0.12); }
-
-  .dbx-runs__file { font-family: var(--md-code-font-family); font-size: 0.8125rem; color: var(--md-default-fg-color--light); }
-  .dbx-runs__ts { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .dbx-runs__empty { padding: 2rem; text-align: center; color: var(--md-default-fg-color--light); }
-  .dbx-runs__empty code { font-size: 0.875rem; }
+  .runs-row--fail td { background: var(--red-weak); }
+  .runs-row--fail:hover td { background: var(--red-weak); }
+  .runs-result { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .runs-file { font-family: var(--mono); font-size: 12px; color: var(--text-3); }
+  .runs-empty { padding: 48px 20px; text-align: center; color: var(--text-3); }
+  .runs-empty code { font-family: var(--mono); font-size: 12.5px; }
 </style>
 
 <div x-data="dbxRuns()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Runs</h2>
-    <p class="dbx-view__subtitle">
-      Recent <code>dbx backup</code> / <code>dbx restore</code> runs as
-      recorded in <code>audit.log</code>. Useful for catching backups that
-      silently failed under cron when you weren't watching the terminal.
-    </p>
-  </header>
-
-  <div class="dbx-runs__toolbar">
-    <select class="dbx-runs__select" x-model="actionFilter" @change="load()">
-      <option value="">All actions</option>
-      <option value="backup">Backup</option>
-      <option value="restore">Restore</option>
-      <option value="__other__">Other (vault, scrub_bypass…)</option>
-    </select>
-    <select class="dbx-runs__select" x-model="outcomeFilter" @change="load()">
-      <option value="">All outcomes</option>
-      <option value="success">Success</option>
-      <option value="failure">Failure</option>
-    </select>
-    <input type="search" class="dbx-runs__search" x-model.debounce.300ms="filter"
-           @input="load()"
-           placeholder="Search (regex over message text, or plain text)…">
-    <input type="date" class="dbx-runs__date" x-model="fromDate" @change="load()" title="From date">
-    <input type="date" class="dbx-runs__date" x-model="toDate"   @change="load()" title="To date">
-    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
-    <button class="dbx-backups__btn" @click="reset()" title="Clear all filters">Reset</button>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Operate</p>
+      <h1 class="page-h1">Runs</h1>
+      <p class="page-sub">Audit log of every backup, restore, and maintenance action.</p>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn--ghost btn--sm" @click="load()" :disabled="loading">Refresh</button>
+      <button class="btn btn--ghost btn--sm" @click="reset()" title="Clear all filters">Reset</button>
+    </div>
   </div>
 
-  <div class="dbx-runs__toolbar" style="margin-bottom: 1rem;">
-    <!-- One-click "show me what's actually broken in production" preset.
-         Sets action=restore + outcome=failure + searches for prod-mysql. -->
-    <span class="dbx-runs__chip--filter" @click="applyPresetFailedProdRestores()"
-          title="Quick filter: failed restores against a prod-mysql host">
+  <div class="toolbar">
+    <div class="search">
+      <input type="search" x-model.debounce.300ms="filter" @input="load()"
+             placeholder="Search runs (regex over message text, or plain text)…">
+    </div>
+    <!-- Action-type filter. Wired to the existing actionFilter state; the
+         server allowlists backup|restore and we fold the rest into __other__. -->
+    <div class="seg">
+      <button :class="{ active: actionFilter === '' }" @click="actionFilter = ''; load()">All</button>
+      <button :class="{ active: actionFilter === 'backup' }" @click="actionFilter = 'backup'; load()">Backups</button>
+      <button :class="{ active: actionFilter === 'restore' }" @click="actionFilter = 'restore'; load()">Restores</button>
+      <button :class="{ active: actionFilter === '__other__' }" @click="actionFilter = '__other__'; load()">Maintenance</button>
+    </div>
+    <span class="spacer"></span>
+    <span class="card__hint" x-text="countLabel()"></span>
+  </div>
+
+  <div class="toolbar">
+    <label class="check">
+      Outcome
+      <select x-model="outcomeFilter" @change="load()" style="width:auto;">
+        <option value="">All</option>
+        <option value="success">Success</option>
+        <option value="failure">Failure</option>
+      </select>
+    </label>
+    <input type="date" x-model="fromDate" @change="load()" title="From date" style="width:auto;">
+    <input type="date" x-model="toDate" @change="load()" title="To date" style="width:auto;">
+    <button class="badge badge--fail" style="cursor:pointer;border:none;"
+            @click="applyPresetFailedProdRestores()"
+            title="Quick filter: failed restores against a prod-mysql host">
       Failed restores against prod-mysql
-    </span>
-    <span class="dbx-runs__count" x-text="countLabel()"></span>
+    </button>
     <template x-if="regexInvalid">
-      <span class="dbx-runs__hint dbx-runs__hint--warn">
+      <span class="card__hint" style="color: var(--amber);">
         (invalid regex — searching as text)
       </span>
     </template>
   </div>
 
   <template x-if="loading">
-    <p class="dbx-runs__empty">Loading…</p>
+    <div class="runs-empty">Loading…</div>
   </template>
 
   <template x-if="!loading && rows.length === 0">
-    <p class="dbx-runs__empty">
-      No runs found. The audit log lives at <code>~/.local/share/dbx/audit.log</code> —
-      it accumulates as you run <code>dbx backup</code> and <code>dbx restore</code>.
-    </p>
+    <div class="runs-empty">
+      <div class="empty__title">No runs found</div>
+      The audit log lives at <code>~/.local/share/dbx/audit.log</code> — it
+      accumulates as you run <code>dbx backup</code> and <code>dbx restore</code>.
+    </div>
   </template>
 
   <template x-if="!loading && rows.length > 0">
-    <table class="dbx-runs__table">
-      <thead>
-        <tr>
-          <th>When</th>
-          <th>Action</th>
-          <th>Host / DB</th>
-          <th>Outcome</th>
-          <th>Duration</th>
-          <th>File</th>
-        </tr>
-      </thead>
-      <tbody>
-        <template x-for="(r, i) in filtered()" :key="i">
-          <tr :class="{ 'dbx-runs__row--failure': r.outcome === 'failure' }">
-            <td class="dbx-runs__ts" x-text="formatTimestamp(r.timestamp)"></td>
-            <td x-text="r.action || '—'"></td>
-            <td x-text="hostDbLabel(r)"></td>
-            <td>
-              <template x-if="r.outcome === 'success'">
-                <span class="dbx-backups__chip dbx-backups__chip--complete">✓ success</span>
-              </template>
-              <template x-if="r.outcome === 'failure'">
-                <span class="dbx-backups__chip dbx-backups__chip--incomplete">✗ failure</span>
-              </template>
-              <template x-if="r.outcome !== 'success' && r.outcome !== 'failure'">
-                <span class="dbx-backups__chip" x-text="r.outcome || '—'"></span>
-              </template>
-            </td>
-            <td x-text="formatDuration(r.duration_sec)"></td>
-            <td class="dbx-runs__file" x-text="fileLabel(r)"></td>
+    <div class="card card--flush">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Action</th>
+            <th>Host / DB</th>
+            <th>When</th>
+            <th class="num">Duration</th>
+            <th>Result</th>
           </tr>
-        </template>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          <template x-for="(r, i) in filtered()" :key="i">
+            <tr :class="{ 'runs-row--fail': r.outcome === 'failure' }">
+              <td>
+                <span class="sdot"
+                      :class="r.outcome === 'failure' ? 'sdot--fail' : (r.outcome === 'success' ? 'sdot--ok' : 'sdot--warn')"></span>
+              </td>
+              <td x-text="r.action || '—'"></td>
+              <td x-text="hostDbLabel(r)"></td>
+              <td class="muted" x-text="formatTimestamp(r.timestamp)"></td>
+              <td class="num" x-text="formatDuration(r.duration_sec)"></td>
+              <td>
+                <div class="runs-result">
+                  <template x-if="r.outcome === 'success'">
+                    <span class="badge badge--ok">ok</span>
+                  </template>
+                  <template x-if="r.outcome === 'failure'">
+                    <span class="badge badge--fail">failed</span>
+                  </template>
+                  <template x-if="r.outcome !== 'success' && r.outcome !== 'failure'">
+                    <span class="badge badge--mut" x-text="r.outcome || '—'"></span>
+                  </template>
+                  <template x-if="fileLabel(r)">
+                    <span class="runs-file" x-text="fileLabel(r)"></span>
+                  </template>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </template>
 </div>
 

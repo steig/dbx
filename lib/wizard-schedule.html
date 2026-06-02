@@ -10,151 +10,167 @@
   sync` from the CLI — the write path is deliberately not in the UI yet.
 -->
 <style>
-  .dbx-sched__section { margin-bottom: 1.75rem; }
-  .dbx-sched__title { font-size: 0.95rem; font-weight: 600; margin: 0 0 0.5rem; }
-  .dbx-sched__hint  { font-size: 0.8125rem; color: var(--md-default-fg-color--light); margin: 0 0 0.5rem; }
-  .dbx-sched__table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-  .dbx-sched__table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; }
-  .dbx-sched__table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; }
-  .dbx-sched__table input,
-  .dbx-sched__table select { width: 100%; padding: 0.35rem 0.55rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 5px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; }
-  .dbx-sched__table input:invalid { border-color: #c43d3d; }
-  .dbx-sched__actions { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.75rem; }
-  .dbx-sched__btn { background: var(--md-accent-fg-color); color: #fff; border: none; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; }
-  .dbx-sched__btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .dbx-sched__btn--secondary { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); }
-  .dbx-sched__btn--danger { background: #c43d3d; padding: 0.25rem 0.5rem; font-size: 0.75rem; }
-  .dbx-sched__chip { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 500; }
-  .dbx-sched__chip--install  { background: rgba(74, 158, 76, 0.15); color: #2f7d31; }
-  .dbx-sched__chip--update   { background: rgba(11, 107, 203, 0.15); color: var(--md-accent-fg-color); }
-  .dbx-sched__chip--orphan   { background: rgba(196, 61, 61, 0.15); color: #a83232; }
-  .dbx-sched__chip--nochange { background: var(--md-default-fg-color--lightest); color: var(--md-default-fg-color--light); }
-  .dbx-sched__status { padding: 0.5rem 0.75rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.875rem; }
-  .dbx-sched__status--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
-  .dbx-sched__status--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
-  .dbx-sched__empty { padding: 1rem; color: var(--md-default-fg-color--light); font-style: italic; font-size: 0.875rem; }
+  .sched-cell-input { padding: 6px 9px; font-size: 13px; }
+  .sched-cell-input:invalid { border-color: var(--red); }
+  .sched-hostdb { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+  .sched-statusbar { margin-bottom: 18px; }
+  .sched-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+  .sched-when-cell { min-width: 150px; }
 </style>
 
 <div x-data="dbxSchedule()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Schedule</h2>
-    <p class="dbx-view__subtitle">
-      Declarative schedules live in <code>config.json</code>'s <code>schedules[]</code> block.
-      Save here, then run <code>dbx schedule sync</code> from the terminal to install /
-      update / orphan the launchd or systemd units.
-    </p>
-  </header>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Configure</p>
+      <h1 class="page-h1">Schedule</h1>
+      <p class="page-sub">
+        Declarative schedules live in <code>config.json</code>'s <code>schedules[]</code> block.
+        Save here, then run <code>dbx schedule sync</code> from the terminal to install,
+        update, or orphan the launchd / systemd units.
+      </p>
+    </div>
+    <div class="head-actions">
+      <button class="btn btn--primary" @click="addRow()">+ Add schedule</button>
+    </div>
+  </div>
 
   <template x-if="status">
-    <div class="dbx-sched__status" :class="statusClass" x-text="status"></div>
+    <div class="sched-statusbar">
+      <div class="note" :class="status && statusClass === 'dbx-sched__status--err' ? 'note--danger' : 'note--info'" x-text="status"></div>
+    </div>
   </template>
 
-  <section class="dbx-sched__section">
-    <h3 class="dbx-sched__title">Declarative (<code>config.json</code>)</h3>
-    <p class="dbx-sched__hint">Add / edit / remove rows then click <strong>Save</strong>. <code>when</code> accepts <code>hourly</code>, <code>daily</code>, <code>daily@H</code>, <code>weekly</code>, <code>weekly@D:H</code>, or a raw cron expression.</p>
-    <template x-if="declarative.length === 0">
-      <p class="dbx-sched__empty">No declarative schedules yet. Click "Add row" to start.</p>
-    </template>
-    <template x-if="declarative.length > 0">
-      <table class="dbx-sched__table">
+  <p class="section-title">Declarative (config.json)</p>
+
+  <template x-if="declarative.length === 0">
+    <div class="empty">
+      <div class="empty__title">No declarative schedules yet</div>
+      <div>Click <strong>+ Add schedule</strong> to create one.</div>
+    </div>
+  </template>
+
+  <template x-if="declarative.length > 0">
+    <div class="card card--flush">
+      <table class="tbl">
         <thead>
           <tr>
-            <th style="width: 28%">Host</th>
-            <th style="width: 28%">Database</th>
-            <th style="width: 36%">When</th>
-            <th style="width: 8%"></th>
+            <th>Host / DB</th>
+            <th>Frequency</th>
+            <th>Next run</th>
+            <th>Last run</th>
+            <th>Retention</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
           <template x-for="(row, i) in declarative" :key="i">
             <tr>
               <td>
-                <select x-model="row.host" @change="onHostChange(row)">
-                  <option value="">(pick a host)</option>
-                  <template x-for="h in hostOptions(row)" :key="h.alias">
-                    <option :value="h.alias" x-text="h.alias + (h.unknown ? '  (not in config)' : '')"></option>
-                  </template>
-                </select>
+                <div class="sched-hostdb">
+                  <select class="sched-cell-input" x-model="row.host" @change="onHostChange(row)">
+                    <option value="">(pick a host)</option>
+                    <template x-for="h in hostOptions(row)" :key="h.alias">
+                      <option :value="h.alias" x-text="h.alias + (h.unknown ? '  (not in config)' : '')"></option>
+                    </template>
+                  </select>
+                  <select class="sched-cell-input" x-model="row.database">
+                    <option value="">(pick a database)</option>
+                    <template x-for="db in databaseOptions(row)" :key="db.value">
+                      <option :value="db.value" x-text="db.value + (db.unknown ? '  (not in config)' : '')"></option>
+                    </template>
+                  </select>
+                </div>
               </td>
+              <td class="sched-when-cell">
+                <input type="text" class="sched-cell-input" x-model.trim="row.when" placeholder="daily@2" maxlength="128">
+                <div class="muted" style="font-size: 12px; margin-top: 4px;" x-text="fmtFrequency(row.when)"></div>
+              </td>
+              <td class="muted">—</td>
+              <td class="muted">—</td>
+              <td class="muted">—</td>
               <td>
-                <select x-model="row.database">
-                  <option value="">(pick a database)</option>
-                  <template x-for="db in databaseOptions(row)" :key="db.value">
-                    <option :value="db.value" x-text="db.value + (db.unknown ? '  (not in config)' : '')"></option>
-                  </template>
-                </select>
+                <div class="tbl__actions">
+                  <button class="btn btn--danger btn--sm" @click="removeRow(i)">Remove</button>
+                </div>
               </td>
-              <td><input type="text" x-model.trim="row.when" placeholder="daily@2" maxlength="128"></td>
-              <td><button class="dbx-sched__btn dbx-sched__btn--danger" @click="removeRow(i)">Remove</button></td>
             </tr>
           </template>
         </tbody>
       </table>
-    </template>
-    <div class="dbx-sched__actions">
-      <button class="dbx-sched__btn dbx-sched__btn--secondary" @click="addRow()">Add row</button>
-      <button class="dbx-sched__btn" @click="save()" :disabled="saving || !dirty || !isValid()">
-        <span x-show="!saving">Save</span>
-        <span x-show="saving">Saving…</span>
-      </button>
-      <button class="dbx-sched__btn dbx-sched__btn--secondary" @click="reload()" :disabled="loading">Reload</button>
-      <span x-show="dirty && isValid()" style="color: var(--md-default-fg-color--light); font-size: 0.8125rem;">unsaved changes</span>
-      <span x-show="dirty && !isValid()" style="color: #c43d3d; font-size: 0.8125rem;">invalid rows (see fields)</span>
     </div>
-  </section>
+  </template>
 
-  <section class="dbx-sched__section">
-    <h3 class="dbx-sched__title">Installed units</h3>
-    <p class="dbx-sched__hint">launchd plists on macOS, systemd timers on Linux. Units installed before the <code>DbxScheduleExpression</code> marker show <code>?</code> for <code>when</code>.</p>
-    <template x-if="installed.length === 0">
-      <p class="dbx-sched__empty">No units installed.</p>
-    </template>
-    <template x-if="installed.length > 0">
-      <table class="dbx-sched__table">
+  <p class="muted" style="font-size: 12.5px; margin-top: 12px;">
+    <code>when</code> accepts <code>hourly</code>, <code>daily</code>, <code>daily@H</code>,
+    <code>weekly</code>, <code>weekly@D:H</code>, or a raw cron expression. Next run, last run,
+    and retention are managed at sync / backup time and aren't tracked per declarative row here.
+  </p>
+
+  <div class="sched-actions">
+    <button class="btn btn--primary" @click="save()" :disabled="saving || !dirty || !isValid()">
+      <span x-show="!saving">Save</span>
+      <span x-show="saving">Saving…</span>
+    </button>
+    <button class="btn btn--ghost" @click="reload()" :disabled="loading">Reload</button>
+    <span class="muted" x-show="dirty && isValid()" style="font-size: 12.5px;">unsaved changes</span>
+    <span x-show="dirty && !isValid()" style="color: var(--red); font-size: 12.5px;">invalid rows (see fields)</span>
+  </div>
+
+  <p class="section-title">Installed units</p>
+  <p class="muted" style="font-size: 12.5px; margin: -4px 0 10px;">
+    launchd plists on macOS, systemd timers on Linux. Units installed before the
+    <code>DbxScheduleExpression</code> marker show <code>?</code> for <code>when</code>.
+  </p>
+  <template x-if="installed.length === 0">
+    <div class="empty"><div class="empty__title">No units installed</div></div>
+  </template>
+  <template x-if="installed.length > 0">
+    <div class="card card--flush">
+      <table class="tbl">
         <thead>
           <tr><th>Host</th><th>Database</th><th>When</th></tr>
         </thead>
         <tbody>
           <template x-for="row in installed" :key="row.host + '/' + row.database">
             <tr>
-              <td x-text="row.host"></td>
+              <td style="font-weight: 550;" x-text="row.host"></td>
               <td x-text="row.database"></td>
               <td><code x-text="row.when"></code></td>
             </tr>
           </template>
         </tbody>
       </table>
-    </template>
-  </section>
+    </div>
+  </template>
 
-  <section class="dbx-sched__section">
-    <h3 class="dbx-sched__title">Sync plan</h3>
-    <p class="dbx-sched__hint">
-      What <code>dbx schedule sync</code> would do given the saved declarative + installed state.
-      Reflects the last <em>saved</em> declarative, not the unsaved edits above. Run
-      <code>dbx schedule sync --apply</code> from the CLI to act on it.
-    </p>
-    <template x-if="plan.length === 0">
-      <p class="dbx-sched__empty">Nothing to reconcile.</p>
-    </template>
-    <template x-if="plan.length > 0">
-      <table class="dbx-sched__table">
+  <p class="section-title">Sync plan</p>
+  <p class="muted" style="font-size: 12.5px; margin: -4px 0 10px;">
+    What <code>dbx schedule sync</code> would do given the saved declarative + installed state.
+    Reflects the last <em>saved</em> declarative, not the unsaved edits above. Run
+    <code>dbx schedule sync --apply</code> from the CLI to act on it.
+  </p>
+  <template x-if="plan.length === 0">
+    <div class="empty"><div class="empty__title">Nothing to reconcile</div></div>
+  </template>
+  <template x-if="plan.length > 0">
+    <div class="card card--flush">
+      <table class="tbl">
         <thead>
           <tr><th style="width: 14%">Action</th><th>Host</th><th>Database</th><th>When</th></tr>
         </thead>
         <tbody>
           <template x-for="row in plan" :key="row.action + '/' + row.host + '/' + row.database">
             <tr>
-              <td><span class="dbx-sched__chip" :class="`dbx-sched__chip--${row.action}`" x-text="row.action"></span></td>
-              <td x-text="row.host"></td>
+              <td><span class="badge" :class="planBadgeClass(row.action)" x-text="row.action"></span></td>
+              <td style="font-weight: 550;" x-text="row.host"></td>
               <td x-text="row.database"></td>
               <td><code x-text="row.when"></code></td>
             </tr>
           </template>
         </tbody>
       </table>
-    </template>
-  </section>
+    </div>
+  </template>
 </div>
 
 <script>
@@ -302,6 +318,34 @@
           typeof r.when === 'string' &&
           r.when.length >= 1 && r.when.length <= 128
         );
+      },
+
+      // Human-readable rendering of a `when` expression for the Frequency
+      // column. Mirrors the expressions the CLI accepts; falls back to the
+      // raw string (e.g. a cron expression) when it isn't a known keyword.
+      fmtFrequency(when) {
+        const w = (when || '').trim();
+        if (!w) return '';
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const pad = (n) => String(n).padStart(2, '0');
+        if (w === 'hourly') return 'Every hour';
+        if (w === 'daily')  return 'Daily';
+        if (w === 'weekly') return 'Weekly';
+        let m = w.match(/^daily@(\d{1,2})$/);
+        if (m) return `Daily · ${pad(m[1])}:00`;
+        m = w.match(/^weekly@(\d):(\d{1,2})$/);
+        if (m) {
+          const d = days[Number(m[1])] || `day ${m[1]}`;
+          return `Weekly · ${d} ${pad(m[2])}:00`;
+        }
+        return w;
+      },
+
+      planBadgeClass(action) {
+        if (action === 'install')  return 'badge--ok';
+        if (action === 'update')   return 'badge--info';
+        if (action === 'orphan')   return 'badge--fail';
+        return 'badge--mut';
       },
 
       async save() {

@@ -1,9 +1,9 @@
 <!--
   Storage view fragment. Loaded by `dbx wizard` only (NOT embedded in mkdocs).
   Three panels:
-    1. Disk-usage bar (total backup bytes / total file count / free space).
-    2. Per host/db table sortable by size descending.
-    3. Retention preview + Apply button that spawns `dbx clean`.
+    1. Stat tiles from real usage data (on disk / backups / reclaimable / after sweep).
+    2. Usage-by-database horizontal-bar list, x-for over per-pair usage.
+    3. Retention sweep preview + Run sweep button that spawns `dbx clean`.
 
   /api/storage/usage    — composed payload from DATA_DIR + statvfs.
   /api/storage/clean-preview?keep=N&older_than=D — preview the sweep.
@@ -13,226 +13,214 @@
   Restore + Backup views.
 -->
 <style>
-  .dbx-storage__layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 1.25rem; align-items: flex-start; }
-  @media (max-width: 880px) {
-    .dbx-storage__layout { grid-template-columns: 1fr; }
+  /* view-unique: horizontal usage-by-database bars. Track uses --surface-2,
+     fill uses --accent (per design system; no hex). */
+  .dbx-st-bars { display: flex; flex-direction: column; gap: 14px; }
+  .dbx-st-bar { display: grid; grid-template-columns: 220px 1fr 84px; align-items: center; gap: 16px; }
+  .dbx-st-bar__label { font-weight: 550; }
+  .dbx-st-bar__track { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+  .dbx-st-bar__fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width .2s ease; }
+  .dbx-st-bar__size { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 13px; }
+  @media (max-width: 640px) {
+    .dbx-st-bar { grid-template-columns: 1fr 64px; }
+    .dbx-st-bar__track { grid-column: 1 / -1; }
   }
-
-  .dbx-storage__usage-bar { background: var(--md-code-bg-color); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
-  .dbx-storage__usage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; font-size: 0.875rem; }
-  .dbx-storage__usage-head strong { font-variant-numeric: tabular-nums; }
-  .dbx-storage__usage-track { position: relative; height: 12px; background: var(--md-default-fg-color--lightest); border-radius: 6px; overflow: hidden; }
-  .dbx-storage__usage-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--md-accent-fg-color); border-radius: 6px; transition: width 0.2s ease; }
-  .dbx-storage__usage-fill--full { background: #c43d3d; }
-  .dbx-storage__usage-fill--high { background: #da8721; }
-  .dbx-storage__usage-meta { color: var(--md-default-fg-color--light); font-size: 0.8125rem; margin-top: 0.375rem; }
-
-  .dbx-storage__summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
-  .dbx-storage__stat { padding: 0.625rem 0.875rem; border: 1px solid var(--md-default-fg-color--lightest); border-radius: 8px; background: var(--md-default-bg-color); }
-  .dbx-storage__stat-label { font-size: 0.7rem; color: var(--md-default-fg-color--light); text-transform: uppercase; letter-spacing: 0.05em; }
-  .dbx-storage__stat-value { font-size: 1.25rem; font-weight: 700; margin-top: 0.125rem; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-
-  /* Retention preview panel — anchored on the right of the layout. */
-  .dbx-storage__preview { border: 1px solid var(--md-accent-fg-color); border-radius: 10px; padding: 1rem 1.125rem; background: rgba(0, 102, 255, 0.06); display: flex; flex-direction: column; gap: 0.75rem; position: sticky; top: 1rem; }
-  @media (prefers-color-scheme: dark) {
-    .dbx-storage__preview { background: rgba(78, 168, 222, 0.10); }
-  }
-  .dbx-storage__preview h3 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
-  .dbx-storage__field { display: flex; flex-direction: column; gap: 0.25rem; }
-  .dbx-storage__field label { font-size: 0.8125rem; font-weight: 500; }
-  .dbx-storage__field input { padding: 0.4rem 0.6rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 6px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font-size: 0.875rem; font-variant-numeric: tabular-nums; }
-  .dbx-storage__field small { font-size: 0.75rem; color: var(--md-default-fg-color--light); }
-  .dbx-storage__mode { display: flex; gap: 0.5rem; font-size: 0.8125rem; }
-  .dbx-storage__mode label { display: flex; align-items: center; gap: 0.25rem; cursor: pointer; }
-  .dbx-storage__preview-result { font-size: 0.875rem; line-height: 1.4; padding: 0.625rem 0.75rem; background: var(--md-default-bg-color); border-radius: 6px; border: 1px solid var(--md-default-fg-color--lightest); }
-  .dbx-storage__preview-result code { font-family: var(--md-code-font-family); font-size: 0.8125rem; }
-  .dbx-storage__preview-error { color: #a83232; font-size: 0.8125rem; }
-
-  .dbx-storage__apply { background: #c43d3d; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; }
-  .dbx-storage__apply:disabled { opacity: 0.5; cursor: not-allowed; }
-  .dbx-storage__dry { background: transparent; color: var(--md-default-fg-color); border: 1px solid var(--md-default-fg-color--lighter); padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8125rem; }
-  .dbx-storage__dry:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  /* Per-pair table — clickable rows drill into the Backups view filtered to
-     that host/db (same backupFilter mechanism the dashboard cards use). */
-  .dbx-storage__pair-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-  .dbx-storage__pair-table th { text-align: left; padding: 0.5rem 0.625rem; border-bottom: 2px solid var(--md-default-fg-color--lightest); font-weight: 600; font-size: 0.8125rem; }
-  .dbx-storage__pair-table td { padding: 0.5rem 0.625rem; border-bottom: 1px solid var(--md-default-fg-color--lightest); vertical-align: middle; font-variant-numeric: tabular-nums; }
-  .dbx-storage__pair-table tbody tr { cursor: pointer; }
-  .dbx-storage__pair-table tbody tr:hover { background: var(--md-code-bg-color); }
-  .dbx-storage__pair-table td.dbx-storage__pair-name { font-variant-numeric: normal; }
-  .dbx-storage__empty { padding: 1.5rem; text-align: center; color: var(--md-default-fg-color--light); border: 1px dashed var(--md-default-fg-color--lightest); border-radius: 8px; }
-
-  .dbx-storage__log { background: #1a1d22; color: #d4d7dd; font-family: var(--md-code-font-family); font-size: 0.8125rem; padding: 1rem; border-radius: 6px; min-height: 180px; max-height: 420px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin-top: 1rem; }
-  .dbx-storage__log--empty { color: #666; font-style: italic; }
-  .dbx-storage__status { padding: 0.6rem 0.875rem; border-radius: 6px; margin-top: 0.75rem; font-size: 0.875rem; }
-  .dbx-storage__status--ok { background: rgba(74, 158, 76, 0.12); color: #2f7d31; }
-  .dbx-storage__status--err { background: rgba(196, 61, 61, 0.12); color: #a83232; }
-  .dbx-storage__status--running { background: rgba(11, 107, 203, 0.12); color: var(--md-accent-fg-color); }
 </style>
 
 <div x-data="dbxStorage()" x-init="init()">
-  <header class="dbx-view__header">
-    <h2 class="dbx-view__title">Storage</h2>
-    <p class="dbx-view__subtitle">
-      Disk usage across all backups and a retention sweep that wraps
-      <code>dbx clean</code>. Use the preview on the right to see what
-      would be deleted before you click Apply.
-    </p>
-  </header>
-
-  <div class="dbx-storage__toolbar" style="display:flex; gap:0.75rem; align-items:center; margin-bottom:1rem;">
-    <button class="dbx-backups__btn" @click="load()" :disabled="loading">Refresh</button>
-    <span style="color: var(--md-default-fg-color--light); font-size: 0.875rem;"
-          x-text="loading ? 'Reading…' : ''"></span>
+  <div class="page-head">
+    <div>
+      <p class="page-title">Insights</p>
+      <h1 class="page-h1">Storage</h1>
+      <p class="page-sub">Disk used by backups — and what a retention sweep would reclaim.</p>
+    </div>
+    <div class="head-actions">
+      <span class="updated" x-show="loading">Reading…</span>
+      <button class="btn btn--ghost" @click="load()" :disabled="loading">Refresh</button>
+      <button class="btn btn--primary" @click="apply(false)"
+              :disabled="!canApply() || running"
+              :title="canApply() ? 'Spawn dbx clean for real' : 'Nothing to reclaim'">
+        <span x-show="!running">Run retention sweep</span>
+        <span x-show="running">Running…</span>
+      </button>
+    </div>
   </div>
 
   <template x-if="loading">
-    <p class="dbx-storage__empty">Loading…</p>
+    <div class="empty">
+      <div class="empty__title">Loading…</div>
+      Reading storage usage under DATA_DIR.
+    </div>
   </template>
 
   <template x-if="!loading">
     <div>
-      <!-- Disk usage bar (used / free on DATA_DIR's filesystem). -->
-      <div class="dbx-storage__usage-bar">
-        <div class="dbx-storage__usage-head">
-          <span x-text="usageBarLabel()"></span>
-          <strong x-text="usagePercentLabel()"></strong>
+      <!-- STAT TILES — derived from real usage + preview data. -->
+      <div class="tiles" style="margin-bottom:18px;">
+        <div class="tile">
+          <div class="tile__label">On disk</div>
+          <div class="tile__value" x-text="formatSize(usage.total_bytes)"></div>
+          <div class="tile__meta" x-text="'across ' + usage.total_files + ' backup' + (usage.total_files === 1 ? '' : 's')"></div>
         </div>
-        <div class="dbx-storage__usage-track">
-          <div class="dbx-storage__usage-fill"
-               :class="{
-                 'dbx-storage__usage-fill--high': usagePercent() >= 70 && usagePercent() < 90,
-                 'dbx-storage__usage-fill--full': usagePercent() >= 90,
-               }"
-               :style="'width:' + Math.min(100, usagePercent()) + '%'"></div>
+        <div class="tile">
+          <div class="tile__label">Backups</div>
+          <div class="tile__value" x-text="usage.total_files"></div>
+          <div class="tile__meta" x-text="usage.by_pair.length + ' host/db pair' + (usage.by_pair.length === 1 ? '' : 's')"></div>
         </div>
-        <div class="dbx-storage__usage-meta" x-text="usageMetaLabel()"></div>
-      </div>
-
-      <!-- Top-line totals. -->
-      <div class="dbx-storage__summary">
-        <div class="dbx-storage__stat">
-          <div class="dbx-storage__stat-label">Backup files</div>
-          <div class="dbx-storage__stat-value" x-text="usage.total_files"></div>
-        </div>
-        <div class="dbx-storage__stat">
-          <div class="dbx-storage__stat-label">Bytes on disk</div>
-          <div class="dbx-storage__stat-value" x-text="formatSize(usage.total_bytes)"></div>
-        </div>
-        <div class="dbx-storage__stat">
-          <div class="dbx-storage__stat-label">Host/db pairs</div>
-          <div class="dbx-storage__stat-value" x-text="usage.by_pair.length"></div>
-        </div>
-        <div class="dbx-storage__stat">
-          <div class="dbx-storage__stat-label">Disk free</div>
-          <div class="dbx-storage__stat-value" x-text="usage.free_bytes == null ? '—' : formatSize(usage.free_bytes)"></div>
-        </div>
-      </div>
-
-      <div class="dbx-storage__layout">
-        <!-- Per host/db table. Click a row to jump to filtered Backups view. -->
-        <div>
-          <template x-if="usage.by_pair.length === 0">
-            <p class="dbx-storage__empty">
-              No backups under <code x-text="usage.data_dir || 'DATA_DIR'"></code>.
-              Run <code>dbx backup &lt;host&gt;</code> to create some.
-            </p>
-          </template>
-
-          <template x-if="usage.by_pair.length > 0">
-            <table class="dbx-storage__pair-table">
-              <thead>
-                <tr>
-                  <th>Host</th>
-                  <th>Database</th>
-                  <th># Backups</th>
-                  <th>Total</th>
-                  <th>Largest</th>
-                  <th>Oldest</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="p in usage.by_pair" :key="p.host + '/' + p.database">
-                  <tr @click="drillInto(p)"
-                      role="button" tabindex="0"
-                      @keydown.enter.prevent="drillInto(p)"
-                      @keydown.space.prevent="drillInto(p)"
-                      :title="'View backups for ' + p.host + '/' + p.database">
-                    <td class="dbx-storage__pair-name" x-text="p.host"></td>
-                    <td class="dbx-storage__pair-name" x-text="p.database"></td>
-                    <td x-text="p.count"></td>
-                    <td x-text="formatSize(p.bytes)"></td>
-                    <td x-text="formatSize(p.largest_bytes)"></td>
-                    <td x-text="formatDate(p.oldest_iso)"></td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </template>
-        </div>
-
-        <!-- Retention preview panel. Updates live on input change. -->
-        <aside class="dbx-storage__preview">
-          <h3>Retention preview</h3>
-          <p style="margin:0; color: var(--md-default-fg-color--light); font-size: 0.8125rem;">
-            Pick one mode. Adjust the value to see what
-            <code>dbx clean</code> would remove.
-          </p>
-
-          <div class="dbx-storage__mode">
-            <label><input type="radio" name="dbx-storage-mode" value="keep" x-model="mode"> Keep N per pair</label>
-            <label><input type="radio" name="dbx-storage-mode" value="older" x-model="mode"> Older than N days</label>
+        <div class="tile">
+          <div class="tile__label">Reclaimable</div>
+          <div class="tile__value" x-text="preview.error ? '—' : formatSize(preview.reclaim_bytes)"></div>
+          <div class="tile__meta">
+            <template x-if="!preview.error && preview.reclaim_count > 0">
+              <span class="delta delta--down" x-text="'▼ ' + preview.reclaim_count + ' old backup' + (preview.reclaim_count === 1 ? '' : 's')"></span>
+            </template>
+            <template x-if="preview.error || preview.reclaim_count === 0">
+              <span x-text="preview.error ? 'preview unavailable' : 'nothing to sweep'"></span>
+            </template>
           </div>
+        </div>
+        <div class="tile">
+          <div class="tile__label">After sweep</div>
+          <div class="tile__value" x-text="preview.error ? '—' : formatSize(afterSweepBytes())"></div>
+          <div class="tile__meta">projected</div>
+        </div>
+      </div>
 
+      <!-- USAGE BY DATABASE — horizontal bars over real per-pair usage. -->
+      <div class="card">
+        <div class="card__head">
+          <div>
+            <div class="card__title">Usage by database</div>
+            <div class="card__hint" x-text="usage.total_files + ' backups · ' + formatSize(usage.total_bytes) + ' total'"></div>
+          </div>
+        </div>
+
+        <template x-if="usage.by_pair.length === 0">
+          <div class="empty">
+            <div class="empty__title">No backups yet</div>
+            Nothing under <span class="mono" x-text="usage.data_dir || 'DATA_DIR'"></span>.
+            Run <span class="mono">dbx backup &lt;host&gt;</span> to create some.
+          </div>
+        </template>
+
+        <template x-if="usage.by_pair.length > 0">
+          <div class="dbx-st-bars">
+            <template x-for="p in usage.by_pair" :key="p.host + '/' + p.database">
+              <div class="dbx-st-bar" @click="drillInto(p)"
+                   role="button" tabindex="0"
+                   @keydown.enter.prevent="drillInto(p)"
+                   @keydown.space.prevent="drillInto(p)"
+                   :title="'View backups for ' + p.host + '/' + p.database"
+                   style="cursor:pointer;">
+                <div class="dbx-st-bar__label">
+                  <span x-text="p.host"></span>
+                  <span class="muted" style="font-weight:400;" x-text="'/ ' + p.database"></span>
+                </div>
+                <div class="dbx-st-bar__track">
+                  <div class="dbx-st-bar__fill" :style="'width:' + barWidth(p) + '%'"></div>
+                </div>
+                <div class="dbx-st-bar__size" x-text="formatSize(p.bytes)"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <!-- RETENTION SWEEP — preview + danger sweep wired to dbx clean. -->
+      <div class="section-title">Retention sweep</div>
+      <div class="card">
+        <!-- Mode + value controls drive the live preview (existing watchers). -->
+        <div class="row" style="margin-bottom:14px; flex-wrap:wrap; gap:16px;">
+          <div class="seg">
+            <button :class="{ active: mode === 'keep' }" @click="mode = 'keep'">Keep N per pair</button>
+            <button :class="{ active: mode === 'older' }" @click="mode = 'older'">Older than N days</button>
+          </div>
           <template x-if="mode === 'keep'">
-            <div class="dbx-storage__field">
-              <label for="dbx-st-keep">Keep newest per host/db</label>
-              <input id="dbx-st-keep" type="number" min="1" max="1000" x-model.number="keepN">
-              <small>Range 1–1000. Equivalent to <code>dbx clean --keep N</code>.</small>
-            </div>
+            <label class="check">Keep newest
+              <input type="number" min="1" max="1000" x-model.number="keepN" style="width:90px;">
+              per host/db
+            </label>
           </template>
-
           <template x-if="mode === 'older'">
-            <div class="dbx-storage__field">
-              <label for="dbx-st-older">Older than (days)</label>
-              <input id="dbx-st-older" type="number" min="1" max="3650" x-model.number="olderDays">
-              <small>Range 1–3650. Equivalent to <code>dbx clean --older-than D</code>.</small>
-            </div>
+            <label class="check">Older than
+              <input type="number" min="1" max="3650" x-model.number="olderDays" style="width:90px;">
+              days
+            </label>
           </template>
+        </div>
 
-          <template x-if="preview.error">
-            <div class="dbx-storage__preview-error" x-text="preview.error"></div>
-          </template>
+        <template x-if="preview.error">
+          <div class="note note--danger" style="margin-bottom:14px;" x-text="preview.error"></div>
+        </template>
 
-          <template x-if="!preview.error">
-            <div class="dbx-storage__preview-result" x-text="previewSentence()"></div>
-          </template>
-
-          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-            <button class="dbx-storage__apply" @click="apply(false)"
-                    :disabled="!canApply() || running"
-                    :title="canApply() ? 'Spawn dbx clean for real' : 'Nothing to reclaim'">
-              <span x-show="!running" x-text="applyLabel()"></span>
-              <span x-show="running">Running…</span>
-            </button>
-            <button class="dbx-storage__dry" @click="apply(true)" :disabled="running"
-                    title="Run dbx clean --dry-run; nothing is deleted">
-              Dry run
-            </button>
+        <template x-if="!preview.error">
+          <div class="note note--warn" style="margin-bottom:14px;">
+            <template x-if="preview.reclaim_count > 0">
+              <span>
+                Sweeping now removes
+                <strong x-text="preview.reclaim_count + ' backup' + (preview.reclaim_count === 1 ? '' : 's')"></strong>
+                <span x-text="mode === 'keep' ? ('beyond the newest ' + keepN + ' per pair') : ('older than ' + olderDays + ' days')"></span>,
+                reclaiming <strong x-text="formatSize(preview.reclaim_bytes)"></strong>.
+              </span>
+            </template>
+            <template x-if="preview.reclaim_count === 0">
+              <span x-text="previewSentence()"></span>
+            </template>
           </div>
-        </aside>
+        </template>
+
+        <template x-if="!preview.error && preview.would_delete.length > 0">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Host / DB</th>
+                <th>Age</th>
+                <th class="num">Size</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="f in preview.would_delete" :key="f.path">
+                <tr>
+                  <td class="mono" x-text="fileName(f.path)"></td>
+                  <td x-text="f.host + ' / ' + f.database"></td>
+                  <td x-text="ageLabel(f.timestamp)"></td>
+                  <td class="num" x-text="formatSize(f.bytes)"></td>
+                  <td><span class="chip chip--stale">remove</span></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </template>
+
+        <div class="row" style="margin-top:16px; flex-wrap:wrap;">
+          <button class="btn btn--danger" @click="apply(false)"
+                  :disabled="!canApply() || running"
+                  :title="canApply() ? 'Spawn dbx clean for real' : 'Nothing to reclaim'">
+            <span x-show="!running" x-text="applyLabel()"></span>
+            <span x-show="running">Running…</span>
+          </button>
+          <button class="btn btn--ghost" @click="apply(true)" :disabled="running"
+                  title="Run dbx clean --dry-run; nothing is deleted">
+            Dry run
+          </button>
+          <button class="btn btn--ghost" @click="load()" :disabled="running">Cancel</button>
+          <span class="spacer muted"
+                x-show="!preview.error && preview.reclaim_count > 0"
+                x-text="'Reclaims ' + formatSize(preview.reclaim_bytes) + ' · ' + preview.reclaim_count + ' file' + (preview.reclaim_count === 1 ? '' : 's')"></span>
+        </div>
       </div>
 
-      <!-- Cleanup output panel (same pattern as Restore/Backup views). -->
+      <!-- Cleanup output panel (same SSE pattern as Restore/Backup views). -->
       <template x-if="status || log.length">
-        <div>
+        <div class="card" style="margin-top:14px;">
           <template x-if="status">
-            <div class="dbx-storage__status" :class="statusClass()" x-text="status"></div>
+            <div class="note" :class="statusNote()" style="margin-bottom:12px;" x-text="status"></div>
           </template>
-          <div class="dbx-storage__log" :class="{ 'dbx-storage__log--empty': !log.length }">
+          <div class="console">
             <template x-if="!log.length">
-              <span>(no output yet)</span>
+              <span class="console__line--dim">(no output yet)</span>
             </template>
             <template x-for="(line, i) in log" :key="i">
               <div x-text="line"></div>
@@ -349,7 +337,7 @@
 
       applyLabel() {
         if (!this.preview.reclaim_count) return 'Nothing to clean';
-        return `Apply (delete ${this.preview.reclaim_count})`;
+        return `Run sweep (delete ${this.preview.reclaim_count})`;
       },
 
       previewSentence() {
@@ -442,11 +430,58 @@
         return '';
       },
 
+      // Map run state to a shared-skin note variant for the output panel.
+      statusNote() {
+        if (this.running) return 'note--info';
+        if (this.exitCode === 0) return 'note--info';
+        if (this.exitCode != null) return 'note--danger';
+        return '';
+      },
+
       drillInto(p) {
         // Same backupFilter convention the dashboard cards use — the
         // Backups view consumes the shared store value on next render.
         Alpine.store('dbx').backupFilter = p.host + '/' + p.database;
         Alpine.store('dbx').view = 'backups';
+      },
+
+      // Largest per-pair bytes, used to scale the usage bars. Returns at
+      // least 1 so the width math never divides by zero on empty data.
+      maxPairBytes() {
+        let max = 0;
+        for (const p of this.usage.by_pair) {
+          if (p.bytes > max) max = p.bytes;
+        }
+        return max || 1;
+      },
+
+      // Bar width as a percent of the largest pair, floored so tiny pairs
+      // still render a visible sliver.
+      barWidth(p) {
+        const pct = Math.round((p.bytes / this.maxPairBytes()) * 100);
+        return Math.max(2, Math.min(100, pct));
+      },
+
+      // Projected on-disk bytes once the previewed sweep runs.
+      afterSweepBytes() {
+        const after = this.usage.total_bytes - this.preview.reclaim_bytes;
+        return after > 0 ? after : 0;
+      },
+
+      // Last path segment — the user-facing backup filename.
+      fileName(path) {
+        if (!path) return '—';
+        const parts = String(path).split('/');
+        return parts[parts.length - 1] || path;
+      },
+
+      // Whole-day age relative to now, derived from the file timestamp.
+      ageLabel(iso) {
+        if (!iso) return '—';
+        const then = new Date(iso);
+        if (isNaN(then.getTime())) return '—';
+        const days = Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
+        return `${days}d`;
       },
 
       // Used / free presentation helpers.
