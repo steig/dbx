@@ -666,6 +666,25 @@
           this.guidedStep = 2;
         }
         this.refresh();
+        this.resumeJob();
+      },
+
+      // Reattach to a restore that was running when the page was last open.
+      // The server keeps the job alive and buffers its output; on reload we
+      // re-subscribe and replay it. A stale id (server restarted) streams a
+      // 404, handled in attachStream's onerror as "nothing to resume".
+      resumeJob() {
+        let saved = null;
+        try { saved = localStorage.getItem('dbx:job:restore'); } catch (e) { return; }
+        if (!saved) return;
+        this.jobId = saved;
+        this.running = true;
+        this.status = 'Reattaching to running restore…';
+        this.log = [];
+        this.rootCause = '';
+        this.startedAt = Date.now();
+        this.startTicker();
+        this.attachStream(saved);
       },
 
       // PR-Y6: read the mode flag from the shared store. Wrapped in a
@@ -903,6 +922,7 @@
           }
           const { job_id } = await r.json();
           this.jobId = job_id;
+          try { localStorage.setItem('dbx:job:restore', job_id); } catch (e) {}
           // Timer starts when the server accepted the job. setInterval at
           // 1s gives a once-per-second tick; the JS `elapsed` field is
           // recomputed from Date.now() each tick so we never accumulate
@@ -1043,14 +1063,27 @@
               this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
             }
             this.stopTicker();
+            try { localStorage.removeItem('dbx:job:restore'); } catch (e) {}
             es.close();
             this.eventSource = null;
           }
         });
         es.onerror = () => {
-          // EventSource auto-reconnects; only treat as fatal if the job has
-          // ended on the server side (closed stream + no done event seen).
-          if (!this.running) { es.close(); this.eventSource = null; }
+          // readyState CLOSED = the server failed the stream outright (e.g. a
+          // stale job id after a server restart); the browser won't retry, so
+          // stop and drop the saved id. CONNECTING = a transient drop being
+          // retried, so leave a live job alone.
+          if (es.readyState === EventSource.CLOSED) {
+            this.running = false;
+            this.stopTicker();
+            es.close();
+            this.eventSource = null;
+            try { localStorage.removeItem('dbx:job:restore'); } catch (e) {}
+            if (this.log.length === 0) this.status = 'No running restore to resume.';
+          } else if (!this.running) {
+            es.close();
+            this.eventSource = null;
+          }
         };
       },
 

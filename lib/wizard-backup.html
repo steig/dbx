@@ -140,6 +140,27 @@
       init() {
         this.$watch('$store.dbx.view', (v) => { if (v === 'backup') this.refresh(); });
         if (Alpine.store('dbx').view === 'backup') this.refresh();
+        this.resumeJob();
+      },
+
+      // A backup runs as a server-side job that keeps going (and buffers its
+      // output) independently of this page. If one was running when the page
+      // was last open, reattach to it after a reload instead of showing an
+      // idle form. The server replays the buffered log from the start; a job
+      // id that no longer exists (server restarted) streams a 404, which the
+      // onerror handler treats as "nothing to resume" and clears.
+      resumeJob() {
+        let saved = null;
+        try { saved = localStorage.getItem('dbx:job:backup'); } catch (e) { return; }
+        if (!saved) return;
+        this.jobId = saved;
+        this.running = true;
+        this.status = 'Reattaching to running backup…';
+        this.log = [];
+        this.autoFollow = true;
+        this.startedAt = Date.now();   // original start time is lost across reload
+        this.startTicker();
+        this.attachStream(saved);
       },
 
       async refresh() {
@@ -236,6 +257,7 @@
           }
           const { job_id } = await r.json();
           this.jobId = job_id;
+          try { localStorage.setItem('dbx:job:backup', job_id); } catch (e) {}
           this.startedAt = Date.now();
           this.startTicker();
           this.attachStream(job_id);
@@ -299,12 +321,27 @@
               this.elapsed = Math.floor((Date.now() - this.startedAt) / 1000);
             }
             this.stopTicker();
+            try { localStorage.removeItem('dbx:job:backup'); } catch (e) {}
             es.close();
             this.eventSource = null;
           }
         });
         es.onerror = () => {
-          if (!this.running) { es.close(); this.eventSource = null; }
+          // readyState CLOSED = the server failed the stream outright (e.g. a
+          // stale job id after a server restart) and the browser won't retry —
+          // stop and drop the saved id. CONNECTING = a transient drop the
+          // browser is already retrying, so leave a live job alone.
+          if (es.readyState === EventSource.CLOSED) {
+            this.running = false;
+            this.stopTicker();
+            es.close();
+            this.eventSource = null;
+            try { localStorage.removeItem('dbx:job:backup'); } catch (e) {}
+            if (this.log.length === 0) this.status = 'No running backup to resume.';
+          } else if (!this.running) {
+            es.close();
+            this.eventSource = null;
+          }
         };
       },
 
