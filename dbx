@@ -1817,18 +1817,19 @@ cmd_schedule() {
       ;;
 
     sync)
-      # Reconcile config.schedules[] against installed units. Read-only
-      # in this slice (#39 PR A): always behaves as --dry-run. The write
-      # path lands in a follow-up PR. Lets users validate their config
-      # block today before committing to the full declarative flow.
+      # Reconcile config.schedules[] against installed launchd/systemd units.
+      # Default is a read-only preview; --apply executes the plan (install /
+      # update / orphan). Disabled schedules are excluded from config, so they
+      # show — and apply — as orphans.
       require_config
       require_jq
+      local do_apply=false
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --dry-run) shift ;;
-          --force)   die "--force is not yet implemented (write path lands in a follow-up PR; only --dry-run is supported today)" ;;
-          -*)        die "Unknown schedule sync option: $1" ;;
-          *)         die "Unknown schedule sync argument: $1" ;;
+          --dry-run)        do_apply=false; shift ;;
+          --apply|--force)  do_apply=true;  shift ;;
+          -*)               die "Unknown schedule sync option: $1" ;;
+          *)                die "Unknown schedule sync argument: $1" ;;
         esac
       done
 
@@ -1839,7 +1840,12 @@ cmd_schedule() {
 
       schedule_sync_print_plan "$plan"
       local plan_rc=$?
-      echo "  (read-only preview — the write path lands in a follow-up PR)"
+      if [[ "$do_apply" == "true" ]]; then
+        echo ""
+        schedule_sync_apply "$plan"
+        return $?
+      fi
+      echo "  (preview only — re-run with --apply to install / update / orphan units)"
       # Non-zero exit when there's actionable drift so CI / pre-commit
       # hooks can use this as a check.
       return "$plan_rc"
