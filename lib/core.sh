@@ -88,18 +88,76 @@ dbx_publish_arg() {
   printf '%s:%s:%s' "$bind_addr" "${host_port:-$container_port}" "$container_port"
 }
 
+# Read the host port an existing container is published on for a given
+# container-internal port; empty if unbound. Reads HostConfig.PortBindings so it
+# works for stopped containers too (NetworkSettings.Ports is only populated while
+# the container is running). Takes the first binding if several are present.
+#   $1 = container name   $2 = container-internal port (e.g. 5432)
+dbx_container_host_port() {
+  local container="$1" internal="$2"
+  docker inspect \
+    -f "{{with index .HostConfig.PortBindings \"${internal}/tcp\"}}{{range .}}{{.HostPort}} {{end}}{{end}}" \
+    "$container" 2>/dev/null | awk '{print $1}'
+}
+
+# Pure predicate (no docker, so unit-testable): a published-port mismatch is
+# worth warning about only when both the container's current port and the
+# requested port are known and they differ.
+#   $1 = host port the container actually has   $2 = host port requested now
+dbx_port_mismatch() {
+  local have="$1" want="$2"
+  [[ -n "$have" && -n "$want" && "$have" != "$want" ]]
+}
+
+# Warn (don't fail) when an existing managed container is published on a host
+# port other than the one currently requested. The published port is fixed at
+# `docker run` time, so changing DBX_POSTGRES_PORT / DBX_MYSQL_PORT has no effect
+# until the container is recreated — surface that instead of silently ignoring
+# the override (or, on a now-occupied port, dying with an opaque daemon error).
+#   $1 = container name   $2 = container-internal port   $3 = requested host port
+warn_stale_container_port() {
+  local container="$1" internal="$2" want_host="$3"
+  [[ -n "$internal" && -n "$want_host" ]] || return 0
+  local have_host
+  have_host=$(dbx_container_host_port "$container" "$internal")
+  dbx_port_mismatch "$have_host" "$want_host" || return 0
+  log_warn "Container '$container' is published on host port ${have_host}, but ${want_host} was requested."
+  log_warn "A container's published port is fixed when it is created — recreate it to apply the new port:"
+  log_warn "  docker rm -f $container    # on-disk backups in \$DBX_DATA_DIR are unaffected"
+}
+
 require_container() {
   local container="$1"
 
+  # The published host port for the well-known managed containers is fixed at
+  # `docker run` time, so changing DBX_POSTGRES_PORT / DBX_MYSQL_PORT has no
+  # effect on an already-created container. Resolve the requested host port and
+  # the container-internal port up front so we can flag a stale binding clearly
+  # rather than silently ignoring the override or hitting an opaque bind error.
+  local want_internal="" want_host=""
+  case "$container" in
+    postgres-dbx) want_internal=5432; want_host="${DBX_POSTGRES_PORT:-5432}" ;;
+    mysql-dbx)    want_internal=3306; want_host="${DBX_MYSQL_PORT:-3306}" ;;
+  esac
+
   # Already running?
   if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+    warn_stale_container_port "$container" "$want_internal" "$want_host"
     return 0
   fi
 
   # Exists but stopped? Start it
   if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+    warn_stale_container_port "$container" "$want_internal" "$want_host"
     log_info "Starting stopped container: $container"
-    docker start "$container" >/dev/null
+    if ! docker start "$container" >/dev/null 2>&1; then
+      log_error "Failed to start existing container '$container'."
+      [[ -n "$want_host" ]] && \
+        log_error "If the cause is a port conflict, recreate it to (re)bind the port:"
+      [[ -n "$want_host" ]] && \
+        log_error "  docker rm -f $container    # on-disk backups in \$DBX_DATA_DIR are unaffected"
+      die "could not start container: $container"
+    fi
     sleep 2
     return 0
   fi

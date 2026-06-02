@@ -41,6 +41,30 @@ setup() {
 }
 
 # ----------------------------------------------------------------------------
+# dbx_port_mismatch — warn-worthy stale container port?
+# ----------------------------------------------------------------------------
+
+@test "dbx_port_mismatch flags differing known ports" {
+  run dbx_port_mismatch 5432 5433
+  [ "$status" -eq 0 ]
+}
+
+@test "dbx_port_mismatch ignores matching ports" {
+  run dbx_port_mismatch 5433 5433
+  [ "$status" -ne 0 ]
+}
+
+@test "dbx_port_mismatch ignores an unknown current port" {
+  run dbx_port_mismatch "" 5433
+  [ "$status" -ne 0 ]
+}
+
+@test "dbx_port_mismatch ignores an unknown requested port" {
+  run dbx_port_mismatch 5432 ""
+  [ "$status" -ne 0 ]
+}
+
+# ----------------------------------------------------------------------------
 # strip_definer — sed pipeline for MySQL DEFINER clauses
 # ----------------------------------------------------------------------------
 

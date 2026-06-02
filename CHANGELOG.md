@@ -8,6 +8,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 - **Configurable host port for the auto-managed dev containers.** `DBX_POSTGRES_PORT` (default `5432`) and `DBX_MYSQL_PORT` (default `3306`) set the host-side port published for `postgres-dbx` / `mysql-dbx`, so dbx no longer fails to start its container when a local Postgres/MySQL already owns the default port. The container-internal port is unchanged and dbx's own backup/restore (via `docker exec`) are unaffected — only host-side connections use the new port.
 
+### Fixed
+
+- **Clear guidance when an existing container's published port is stale.** A container's port is fixed at `docker run` time, so changing `DBX_POSTGRES_PORT` / `DBX_MYSQL_PORT` does nothing until the container is recreated. dbx now warns when an existing container is published on a different port than requested, and — if starting a stopped container fails — exits with a "recreate it" hint instead of silently continuing into an opaque `container is not running` failure.
+
 ## [0.21.0] - 2026-06-02
 
 ### Added
