@@ -52,10 +52,10 @@ The manifest is referenced from `dbx.json`, per host:
 }
 ```
 
-`manifest` is a path, resolved relative to the directory containing `dbx.json` (same rule as post-restore hook `file` entries). `required` is a boolean: when `true`, **every** restore from this source host runs the scrub gate (pre-restore drift check → declarative scrub → verify), regardless of destination. Use `--no-scrub` on a single restore to bypass it (audited).
+`manifest` is a path, resolved relative to the directory containing `dbx.json` (same rule as post-restore hook `file` entries). `required` is a boolean: when `true`, **every** restore from this source host runs the scrub gate (pre-restore drift check → declarative scrub → verify). Use `--no-scrub` on a single restore to bypass it (audited).
 
-!!! warning "Per-destination gating (`required_for`) is not currently enforced"
-    A `required_for` array (a list of destination aliases) is accepted and parsed, but the restore gate does **not** consult it today — gating is host-wide via `required`. If you set only `required_for` and not `required: true`, **no gate runs**. Until per-destination gating is wired, use `required: true` to protect a host's restores.
+!!! note "`required_for` activates the gate, but does not filter by destination"
+    The gate is **host-wide**: it is active when `required: true` **or** when `scrub.required_for` is a non-empty array. dbx restores always land in a local container (or a `--into` target), so there is no per-destination filtering — listing any destination in `required_for` simply turns the gate on for *all* restores from that host, exactly as `required: true` would. Prefer `required: true` for clarity; `required_for` is honored for backwards compatibility.
 
 ## Manifest schema
 

@@ -37,7 +37,7 @@ If a host has `ssh_tunnel` configured, dbx opens it before the dump runs and tea
 
 ## Image selection
 
-dbx maps a source's flavor and major version to a container image as follows. **Timing differs by engine:** for **MySQL/MariaDB** the image is matched at *backup* time (where `mysqldump` grammar drift across majors matters). For **Postgres** the image is reused at backup time (`pg_dump` is forward-compatible — see [Limitations](#limitations)); the matching + build-on-demand below happens at *restore* time, when the dump is loaded back. The mapping is the same either way:
+dbx maps a source's flavor and major version to a container image as follows. **Timing differs by engine:** for **MySQL/MariaDB** the image is matched at both *backup* and *restore* time (`mysqldump` grammar and SQL modes drift across majors/flavors). For **Postgres** the image is reused at backup time (`pg_dump` is forward-compatible — see [Limitations](#limitations)); the matching + build-on-demand below happens at *restore* time, when the dump is loaded back. The mapping is the same either way:
 
 | Source | Image |
 |--------|-------|

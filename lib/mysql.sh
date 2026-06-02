@@ -369,6 +369,40 @@ mysql_backup() {
 # MySQL Restore
 # ============================================================================
 
+# Ensure MYSQL_CONTAINER runs an image compatible with $backup_file's source.
+# Reads source_flavor/major/minor from the backup's .meta.json (handles
+# .zst/.age/.gpg suffix layering); falls back to the default image for legacy
+# backups with no meta (so their behavior is unchanged). Honors DBX_MYSQL_IMAGE
+# / defaults.mysql_image. Recreation obeys DBX_RECREATE_CONTAINER via the same
+# fail-closed gate as postgres (ensure_container_image dies with the user-DB
+# list rather than destroying data when the image must switch). Returns
+# non-zero on container-state conflict.
+# Args: $1=backup file path
+mysql_ensure_image_for_backup() {
+  local backup_file="$1"
+  local src_flavor src_major src_minor override desired_image
+  local meta_file="${backup_file%.zst}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.age}.meta.json"
+  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.gpg}.meta.json"
+
+  if [[ -f "$meta_file" ]]; then
+    src_flavor=$(jq -r '.source_flavor // "mysql"' "$meta_file")
+    src_major=$(jq -r '.source_major_version // empty' "$meta_file")
+    src_minor=$(jq -r '.source_minor_version // empty' "$meta_file")
+  else
+    src_flavor="mysql"
+    src_major=""
+    src_minor=""
+  fi
+
+  override="${DBX_MYSQL_IMAGE:-$(get_config_value '.defaults.mysql_image' 2>/dev/null || echo '')}"
+  desired_image=$(pick_mysql_image "$src_flavor" "$src_major" "$src_minor" "$override")
+
+  local recreate="${DBX_RECREATE_CONTAINER:-false}"
+  ensure_container_image "$MYSQL_CONTAINER" "$desired_image" "$recreate"
+}
+
 mysql_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
@@ -463,6 +497,10 @@ mysql_restore_backup() {
         mysql --defaults-extra-file="$cred_file" $mysql_force_flag "$target_db" 2> >(mysql_stderr_filter)
     fi
   else
+    # Match the local container image to the backup's source flavor/version
+    # (mirrors the postgres restore path). No-op for same-version restores;
+    # fails closed via DBX_RECREATE_CONTAINER when a switch would drop user DBs.
+    mysql_ensure_image_for_backup "$backup_file" || return 1
     require_container "$MYSQL_CONTAINER"
     restore_target="container $MYSQL_CONTAINER"
 
@@ -536,6 +574,7 @@ mysql_restore_backup_streaming() {
   local transform_inherit_env="${4:-false}"
 
   log_step "Streaming restore (mysql) → $target_db"
+  mysql_ensure_image_for_backup "$backup_file" || return 1
   require_container "$MYSQL_CONTAINER"
 
   local root_pass

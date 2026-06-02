@@ -535,3 +535,36 @@ EOF
   run scrub_validate_manifest "$mf"
   [ "$status" -eq 0 ]
 }
+
+# ----------------------------------------------------------------------------
+# scrub_gate_active — host-wide gate activation
+# ----------------------------------------------------------------------------
+
+@test "scrub_gate_active: false when no manifest configured" {
+  write_config '{"hosts":{"prod":{"scrub":{"required":true}}}}'
+  ! scrub_gate_active "prod"
+}
+
+@test "scrub_gate_active: false when manifest present but neither required nor required_for set" {
+  echo '{"version":1,"tables":{}}' > "$DBX_CONFIG_DIR/dbx.scrub.json"
+  write_config '{"hosts":{"prod":{"scrub":{"manifest":"dbx.scrub.json"}}}}'
+  ! scrub_gate_active "prod"
+}
+
+@test "scrub_gate_active: true when scrub.required is true" {
+  echo '{"version":1,"tables":{}}' > "$DBX_CONFIG_DIR/dbx.scrub.json"
+  write_config '{"hosts":{"prod":{"scrub":{"manifest":"dbx.scrub.json","required":true}}}}'
+  scrub_gate_active "prod"
+}
+
+@test "scrub_gate_active: true when required_for is a non-empty array (no required)" {
+  echo '{"version":1,"tables":{}}' > "$DBX_CONFIG_DIR/dbx.scrub.json"
+  write_config '{"hosts":{"prod":{"scrub":{"manifest":"dbx.scrub.json","required_for":["staging"]}}}}'
+  scrub_gate_active "prod"
+}
+
+@test "scrub_gate_active: false when required_for is an empty array and required absent" {
+  echo '{"version":1,"tables":{}}' > "$DBX_CONFIG_DIR/dbx.scrub.json"
+  write_config '{"hosts":{"prod":{"scrub":{"manifest":"dbx.scrub.json","required_for":[]}}}}'
+  ! scrub_gate_active "prod"
+}
