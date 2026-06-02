@@ -25,7 +25,7 @@ ensure_sidecar_pg_container() {
       -e POSTGRES_USER=sidecaruser \
       -e POSTGRES_DB=sidecardb \
       postgres:17-alpine >/dev/null
-    pg_wait_ready "$name" sidecaruser sidecarpass
+    pg_wait_ready "$name" sidecaruser sidecarpass sidecardb
   fi
 }
 
