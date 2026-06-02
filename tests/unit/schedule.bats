@@ -202,3 +202,30 @@ setup() {
   [ -z "$(schedule_keep_for prod billing)" ]
   [ -z "$(schedule_keep_for prod nonesuch)" ]
 }
+
+@test "schedule_sync_apply runs the right platform primitives per action" {
+  local calls="$BATS_TEST_TMPDIR/sync_calls"; : > "$calls"
+  # Mock the platform layer so we test the orchestration, not launchd/systemd.
+  is_macos()       { return 0; }
+  make_job_name()  { echo "job-$1-$2"; }
+  launchd_create() { echo "create $1 $2 $3" >> "$calls"; }
+  launchd_load()   { echo "load $1" >> "$calls"; }
+  launchd_remove() { echo "remove $1" >> "$calls"; }
+
+  local plan
+  plan=$'install\tprod\tapp\tdaily@5\nupdate\tprod\tbilling\tweekly@1:3\norphan\tstg\told\tdaily\nnochange\tprod\tx\thourly'
+  run schedule_sync_apply "$plan"
+  [ "$status" -eq 0 ]
+
+  # install → create + load
+  grep -q '^create prod app daily@5$' "$calls"
+  grep -q '^load job-prod-app$' "$calls"
+  # update → remove (then) create + load
+  grep -q '^remove job-prod-billing$' "$calls"
+  grep -q '^create prod billing weekly@1:3$' "$calls"
+  # orphan → remove only (no create)
+  grep -q '^remove job-stg-old$' "$calls"
+  ! grep -q 'create stg old' "$calls"
+  # nochange → nothing for that pair
+  ! grep -q 'prod x' "$calls"
+}

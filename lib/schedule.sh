@@ -525,6 +525,45 @@ schedule_sync_print_plan() {
   [[ "$actionable" -gt 0 ]] && return 0 || return 1
 }
 
+# Execute a sync plan: install / update / orphan the platform units, reusing
+# the same primitives as schedule_add / schedule_remove. `update` is an
+# orphan-then-install so the reload is unconditional and platform-uniform.
+# Args: $1 = plan TSV (action TAB host TAB database TAB when).
+schedule_sync_apply() {
+  local plan="$1"
+  local action host database when job_name applied=0
+  while IFS=$'\t' read -r action host database when; do
+    [[ -z "$action" ]] && continue
+    job_name=$(make_job_name "$host" "$database")
+    case "$action" in
+      install)
+        if is_macos; then launchd_create "$host" "$database" "$when"; launchd_load "$job_name"
+        else systemd_create "$host" "$database" "$when"; systemd_enable "$job_name"; fi
+        log_info "installed $host/$database @ $when"
+        applied=$((applied + 1))
+        ;;
+      update)
+        if is_macos; then launchd_remove "$job_name"; launchd_create "$host" "$database" "$when"; launchd_load "$job_name"
+        else systemd_remove "$job_name"; systemd_create "$host" "$database" "$when"; systemd_enable "$job_name"; fi
+        log_info "updated $host/$database → $when"
+        applied=$((applied + 1))
+        ;;
+      orphan)
+        if is_macos; then launchd_remove "$job_name"; else systemd_remove "$job_name"; fi
+        log_info "orphaned $host/$database"
+        applied=$((applied + 1))
+        ;;
+      nochange) ;;
+    esac
+  done <<< "$plan"
+  if [[ "$applied" -eq 0 ]]; then
+    log_info "Nothing to apply — units already match config"
+  else
+    log_success "Applied $applied schedule change(s)"
+  fi
+  return 0
+}
+
 # ============================================================================
 # Unified Interface
 # ============================================================================
