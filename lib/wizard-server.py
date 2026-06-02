@@ -1070,9 +1070,11 @@ def compute_restore_diff(source, target_name, data_dir, config_path):
     }, None
 
 
-def read_schedule_state(lib_dir: str, config_path: str, data_dir: str):
+def read_schedule_state(lib_dir: str, config_path: str, data_dir: str, audit_dir: str, now=None):
     """Source core.sh + schedule.sh in a bash subprocess and read all three
-    TSV blocks (declarative / installed / sync plan). Returns a dict suitable
+    TSV blocks (declarative / installed / sync plan). Declarative rows are
+    enriched with `next_at` (computed next fire time) and `last_run` (newest
+    backup outcome for the pair, from the audit log). Returns a dict suitable
     for JSON response, or raises RuntimeError on shell failure."""
     script = r"""
 set -e
@@ -1124,8 +1126,38 @@ printf '__CFG__\n%s\n__INST__\n%s\n__PLAN__\n%s\n__END__\n' "$CFG" "$INST" "$PLA
             rows.append(row)
         return rows
 
+    declarative = parse_tsv_rows(sections["__CFG__"], ["host", "database", "when"])
+
+    # Enrich declarative rows so the Schedule view shows real "Next run" /
+    # "Last run" instead of placeholders: next_at is computed from the `when`
+    # expression; last_run is the newest backup outcome for the pair.
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    last_by_pair = {}
+    for entry in _read_audit_log_full(audit_dir):
+        if entry.get("action") != "backup":
+            continue
+        h, d = entry.get("db_host"), entry.get("database")
+        outcome = entry.get("outcome")
+        ts = _parse_iso8601_utc(entry.get("timestamp"))
+        if not isinstance(h, str) or not isinstance(d, str) or ts is None:
+            continue
+        if outcome not in ("success", "failure"):
+            continue
+        cur = last_by_pair.get((h, d))
+        if cur is None or ts > cur[0]:
+            last_by_pair[(h, d)] = (ts, outcome)
+    for row in declarative:
+        nxt = _compute_next_schedule_fire(row.get("when"), now)
+        row["next_at"] = nxt.strftime("%Y-%m-%dT%H:%M:%SZ") if nxt else None
+        lr = last_by_pair.get((row.get("host"), row.get("database")))
+        row["last_run"] = (
+            {"outcome": lr[1], "timestamp": lr[0].strftime("%Y-%m-%dT%H:%M:%SZ")}
+            if lr else None
+        )
+
     return {
-        "declarative": parse_tsv_rows(sections["__CFG__"], ["host", "database", "when"]),
+        "declarative": declarative,
         "installed":   parse_tsv_rows(sections["__INST__"], ["host", "database", "when"]),
         "plan":        parse_tsv_rows(sections["__PLAN__"], ["action", "host", "database", "when"]),
     }
@@ -2317,7 +2349,7 @@ def make_handler(args):
                 return
             if path == "/api/schedules":
                 try:
-                    state = read_schedule_state(args.lib_dir, args.config_path, args.data_dir)
+                    state = read_schedule_state(args.lib_dir, args.config_path, args.data_dir, args.audit_dir)
                 except RuntimeError as e:
                     send_json(self, 500, {"error": str(e)})
                     return
