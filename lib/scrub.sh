@@ -1423,13 +1423,20 @@ scrub_preflight_drift_check() {
 }
 
 # 0 iff scrub is configured AND required for this host.
+# The gate is host-wide: it fires for every restore from this source. It is
+# active when `scrub.required` is true OR `scrub.required_for` is a non-empty
+# array. Honoring a non-empty `required_for` here is deliberate — a host
+# configured with only `required_for` used to get NO gate at all (a silent
+# PII-leak path), since dbx restores always land in a local container and
+# there is no per-destination filtering to apply.
 # Args: $1 host
 scrub_gate_active() {
   local host="$1"
   scrub_manifest_exists "$host" || return 1
-  local required
+  local required required_for_count
   required=$(jq -r ".hosts[\"$host\"].scrub.required // false" "$CONFIG_FILE" 2>/dev/null || echo "false")
-  [[ "$required" == "true" ]]
+  required_for_count=$(jq -r ".hosts[\"$host\"].scrub.required_for // [] | length" "$CONFIG_FILE" 2>/dev/null || echo "0")
+  [[ "$required" == "true" || "$required_for_count" -gt 0 ]]
 }
 
 # DROP a database in the local container. Used to fail-closed after

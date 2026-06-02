@@ -14,7 +14,7 @@ dbx restore production/myapp/latest
 | `postgres-dbx` | `postgres:17-alpine` (UTF-8) | 5432 |
 | `mysql-dbx` | `mysql:8.0` | 3306 |
 
-Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
+Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. If the default port is already taken by another database on the host, publish on a different host port with `DBX_PG_HOST_PORT` / `DBX_MYSQL_HOST_PORT` (e.g. `DBX_PG_HOST_PORT=5433`). Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
 
 ## Naming
 
@@ -24,8 +24,10 @@ If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>`
 
 | Flag | Effect |
 |------|--------|
-| `--name N` | Target DB name (default: auto-versioned). |
-| `--recreate-container` | Allow destroying user DBs when the container's image doesn't match what the backup needs (see [image selection](backup.md#image-selection)). |
+| `--name N` (`-n`) | Target DB name (default: auto-versioned). |
+| `-v`, `--verbose` | Verbose output (surfaces the engine's per-statement output). |
+| `--no-scrub` | Bypass the [PII scrub gate](scrub.md) for this restore. Logs a loud warning and writes a `scrub_bypass` audit record. No effect if no gate is configured. |
+| `--recreate-container` | Allow destroying user DBs when the container's image doesn't match what the backup needs (see [Container version handling](#container-version-handling)). |
 | `--from-remote PATH` | Fetch the backup from cloud storage instead of looking locally. See below. |
 | `--keep-download` | Keep the locally-staged copy after a `--from-remote` restore succeeds (default: deleted). |
 | `--no-post-restore` | Skip configured [post-restore hooks](post-restore-hooks.md) for this run. |
@@ -113,6 +115,10 @@ dbx looks up the container with `docker inspect` and reads `POSTGRES_USER`, `POS
 
 **`--into` bypasses the [PII scrub gate](scrub.md).** dbx can't safely DROP a user-managed container's DB on a sniff failure, so the gate doesn't run. A loud warning is logged and a `scrub_bypass` audit record is written. The expectation is that you combine `--into` with `--transform` (where your script is the sanitization layer) — see the next section.
 
+**`--into` is refused from a `safety: prod` source.** If the source host is marked `safety: prod` in config, `dbx restore --into` is rejected outright (not merely warned) — you can't push a clone of a prod source into an externally-managed container.
+
+**Configured post-restore hooks do not run with `--into`.** The hook runners target the managed `postgres-dbx` container, so a `--into` restore skips them with a warning. Run any post-restore steps against the target container yourself, or restore into `postgres-dbx` if you need hooks.
+
 **Postgres only.** `--into` for MySQL is not supported yet. Use postgres if you need this.
 
 ## The combined invocation: `--transform` + `--into`
@@ -130,12 +136,16 @@ This pipes the backup through `sanitize.sh` and lands the sanitized rows in the 
 
 ## Container version handling
 
-If the existing restore container's image doesn't match what's needed for the backup, dbx will:
+dbx selects a managed-container image that matches the backup's source: `postgres-dbx` to the source major + extensions, and `mysql-dbx` to the source flavor (`mysql`/`mariadb`) + major.minor (read from the backup's `.meta.json`). If the running container's image doesn't match what the backup needs, dbx will:
 
 - **Silently recreate** when the container has no user databases.
 - **Fail with a list of restored DBs** and instructions to pass `--recreate-container` when there are user DBs to preserve.
 
-This protects you from accidentally nuking a week's worth of restored clones because the container image needs to switch from `postgres:15` to `postgres:17`.
+This protects you from accidentally nuking a week's worth of restored clones because the container image needs to switch (e.g. `postgres:15` → `postgres:17`, or `mysql:8.0` → `mariadb:11.4`). Legacy backups with no `.meta.json` fall back to the default image (`postgres:17-alpine` / `mysql:8.0`), so they restore as before.
+
+## Pre-restore scrub gate
+
+When a [PII scrub gate](scrub.md) is active for the source host (`hosts.<host>.scrub.required: true`, or a non-empty `scrub.required_for`) and `--no-scrub` is not passed, dbx runs a schema-drift check **before** the engine restore and aborts up front if the live schema has columns the manifest doesn't cover — so no data lands on a drift failure. Restoring a bare backup file with no `<host>/<database>` context (and the `--into` flow) skips both this gate and post-restore hooks, since there's no host config to key them off.
 
 ## Audit
 

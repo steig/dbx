@@ -9,6 +9,8 @@ dbx backup --upload production myapp         # backup + push to cloud storage in
 
 Files land at `~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.age|.gpg]`.
 
+Uploads also happen automatically (without `--upload`) when `defaults.auto_upload` is `true`, or per-host `hosts.<host>.auto_upload` is `true` (the per-host value overrides the default). See [configuration](configuration.md).
+
 ## What dbx writes
 
 For every backup:
@@ -35,7 +37,7 @@ If a host has `ssh_tunnel` configured, dbx opens it before the dump runs and tea
 
 ## Image selection
 
-The backup container (`postgres-dbx` or `mysql-dbx`) is chosen from the source's flavor and major version:
+dbx maps a source's flavor and major version to a container image as follows. **Timing differs by engine:** for **MySQL/MariaDB** the image is matched at both *backup* and *restore* time (`mysqldump` grammar and SQL modes drift across majors/flavors). For **Postgres** the image is reused at backup time (`pg_dump` is forward-compatible — see [Limitations](#limitations)); the matching + build-on-demand below happens at *restore* time, when the dump is loaded back. The mapping is the same either way:
 
 | Source | Image |
 |--------|-------|
