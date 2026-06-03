@@ -288,6 +288,7 @@ cmd_serve() {
   local bind="${DBX_SERVE_BIND:-0.0.0.0}"
   local port="${DBX_SERVE_PORT:-8080}"
   local token="${DBX_SERVE_TOKEN:-}"
+  local no_token="${DBX_SERVE_NO_TOKEN:-false}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --bind)    bind="${2:?--bind needs a value}"; shift 2 ;;
@@ -296,23 +297,29 @@ cmd_serve() {
       --port=*)  port="${1#--port=}"; shift ;;
       --token)   token="${2:?--token needs a value}"; shift 2 ;;
       --token=*) token="${1#--token=}"; shift ;;
+      --no-token) no_token=true; shift ;;
       -h|--help)
         cat <<EOF
-Usage: dbx serve [--bind ADDR] [--port N] [--token TOKEN]
+Usage: dbx serve [--bind ADDR] [--port N] [--token TOKEN | --no-token]
 
 Runs the wizard GUI as a persistent, network-reachable service (it does NOT
 exit after a config save). Intended to run under a process manager such as
-systemd on an always-on host. Access is gated by a URL token.
+systemd on an always-on host.
 
 Flags:
   --bind ADDR   Bind address (default: 0.0.0.0 — reachable on all interfaces).
   --port N      Listen port (default: 8080).
   --token TOKEN Fixed access token (default: a random one, printed at startup).
+  --no-token    Disable dbx's URL-token gate entirely. Use ONLY when a trusted
+                identity proxy (e.g. Cloudflare Access) or a private network
+                (e.g. a tailnet) is providing access control.
 
-Env equivalents: DBX_SERVE_BIND, DBX_SERVE_PORT, DBX_SERVE_TOKEN.
+Env equivalents: DBX_SERVE_BIND, DBX_SERVE_PORT, DBX_SERVE_TOKEN,
+DBX_SERVE_NO_TOKEN (set to "true").
 
-Access control is the URL token plus your network (e.g. a tailnet). Binding
-0.0.0.0 exposes it on every interface — only do so on a trusted network.
+By default access is gated by the URL token plus your network. With --no-token
+the fronting proxy / private network is the ONLY gate, so do not expose the
+port publicly in that mode.
 EOF
         return 0
         ;;
@@ -324,7 +331,17 @@ EOF
     || die "Invalid --port value: $port"
   command -v python3 >/dev/null 2>&1 || die "dbx serve requires python3 on the host."
   require_jq
-  token="${token:-$(wizard_make_token)}"
+
+  # Auth mode: either a URL token (default) or none (--no-token), e.g. when
+  # Cloudflare Access / a tailnet is the gate. Built as an array spliced into
+  # the exec below.
+  local -a auth_args=()
+  if [[ "$no_token" == "true" ]]; then
+    auth_args=(--no-auth)
+  else
+    token="${token:-$(wizard_make_token)}"
+    auth_args=(--token "$token")
+  fi
 
   local server_script="$LIB_DIR/wizard-server.py"
   local html="$LIB_DIR/wizard.html"
@@ -347,18 +364,25 @@ EOF
   mkdir -p "$(dirname "$CONFIG_FILE")"
 
   log_step "dbx serve — persistent wizard"
-  log_info "  URL:    http://${bind}:${port}/?token=${token}"
+  if [[ "$no_token" == "true" ]]; then
+    log_info "  URL:    http://${bind}:${port}/   (token auth disabled)"
+  else
+    log_info "  URL:    http://${bind}:${port}/?token=${token}"
+  fi
   log_info "  Config: $CONFIG_FILE"
   log_info "  Stays up after saves; stop with Ctrl-C or 'systemctl stop'."
-  [[ "$bind" == "0.0.0.0" ]] && \
+  if [[ "$no_token" == "true" && "$bind" == "0.0.0.0" ]]; then
+    log_warn "AUTH DISABLED (--no-token) + bound to 0.0.0.0: anyone who can reach this port has full access. Only run this behind a trusted identity proxy (e.g. Cloudflare Access) or on a private network (e.g. a tailnet) — never on a public interface."
+  elif [[ "$bind" == "0.0.0.0" ]]; then
     log_warn "Binding 0.0.0.0 — reachable on all interfaces; rely on your network (e.g. tailnet) + the token for access control."
+  fi
 
   # exec: the python server becomes the foreground process so systemd (or any
   # supervisor) tracks and signals it directly. No --done-marker => persistent.
   exec python3 "$server_script" \
     --host "$bind" \
     --port "$port" \
-    --token "$token" \
+    "${auth_args[@]}" \
     --html "$html" \
     "${frag_args[@]}" \
     --config-path "$CONFIG_FILE" \

@@ -91,7 +91,11 @@ def parse_args():
     p.add_argument("--port", type=int, required=True)
     p.add_argument("--host", default="127.0.0.1",
                    help="Bind address (default 127.0.0.1; e.g. 0.0.0.0 for `dbx serve`)")
-    p.add_argument("--token", required=True)
+    p.add_argument("--token", required=False, default=None)
+    p.add_argument("--no-auth", action="store_true",
+                   help="Disable the URL-token gate entirely. Only safe behind a "
+                        "trusted identity proxy (e.g. Cloudflare Access) or on a "
+                        "private network (e.g. a tailnet).")
     p.add_argument("--html", required=True, help="Path to wizard.html shell")
     p.add_argument("--form-fragment", required=True, help="Path to wizard-form.html")
     p.add_argument("--backups-fragment", required=True, help="Path to wizard-backups.html")
@@ -143,7 +147,10 @@ def parse_args():
     p.add_argument("--done-marker", default=None,
                    help="If set, touched after a successful save (ephemeral wizard "
                         "exits on it). Omitted by `dbx serve` to stay persistent.")
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.no_auth and not args.token:
+        p.error("--token is required unless --no-auth is set")
+    return args
 
 
 def _read_host_safety_map(config_path):
@@ -2019,7 +2026,11 @@ def make_handler(args):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
 
     def valid_token(path):
-        return parse_query(path).get("token", [None])[0] == args.token
+        if args.no_auth:
+            return True
+        # Guard against a None configured token matching a blank ?token=
+        return args.token is not None and \
+            parse_query(path).get("token", [None])[0] == args.token
 
     def compose_html():
         with open(args.html) as f:
@@ -2048,7 +2059,7 @@ def make_handler(args):
             analyze = f.read()
         # Relative so the browser POSTs to whatever origin served the page —
         # works for loopback, an SSH tunnel, and a non-loopback `dbx serve` bind.
-        save_url = f"/save?token={args.token}"
+        save_url = f"/save?token={args.token}" if args.token else "/save"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
