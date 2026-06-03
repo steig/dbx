@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-06-03
+
+### Added
+
+- **`dbx serve --no-token`.** Disables dbx's URL-token gate entirely, for when a trusted identity proxy (e.g. Cloudflare Access) or a private network (e.g. a tailnet) is providing access control — so there's no token to carry in the URL. Server-side this is a new `--no-auth` flag (`--token` becomes optional, required only when `--no-auth` is absent); `dbx serve` exposes it as `--no-token` (or `DBX_SERVE_NO_TOKEN=true`) and warns loudly if combined with a `0.0.0.0` bind. Default behavior is unchanged — a token is still required without `--no-token`.
+
 ## [0.23.0] - 2026-06-03
 
 ### Added
