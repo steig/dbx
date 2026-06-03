@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-06-03
+
+### Added
+
+- **`dbx serve` — persistent, network-reachable wizard GUI.** A new `dbx serve` subcommand runs the wizard server as an always-on service, unlike `dbx wizard --remote` (which binds loopback and exits on the first config save). It binds a configurable address (`--bind`, default `0.0.0.0`), port (`--port`, default `8080`), and a stable token (`--token`) — each also settable via `DBX_SERVE_BIND` / `DBX_SERVE_PORT` / `DBX_SERVE_TOKEN` — stays up after saves, and runs in the foreground so a process manager (e.g. systemd) owns its lifecycle. Access is gated by the URL token plus your network; binding `0.0.0.0` exposes it on all interfaces, so run it only on a trusted network (e.g. a tailnet).
+
 ## [0.22.0] - 2026-06-02
 
 ### Added
