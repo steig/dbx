@@ -89,6 +89,8 @@ JOBS_LOCK = threading.Lock()
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, required=True)
+    p.add_argument("--host", default="127.0.0.1",
+                   help="Bind address (default 127.0.0.1; e.g. 0.0.0.0 for `dbx serve`)")
     p.add_argument("--token", required=True)
     p.add_argument("--html", required=True, help="Path to wizard.html shell")
     p.add_argument("--form-fragment", required=True, help="Path to wizard-form.html")
@@ -138,7 +140,9 @@ def parse_args():
         ),
         help="Directory containing audit.log (default: $DBX_AUDIT_DIR or ~/.local/share/dbx)",
     )
-    p.add_argument("--done-marker", required=True, help="Touched after a successful save")
+    p.add_argument("--done-marker", default=None,
+                   help="If set, touched after a successful save (ephemeral wizard "
+                        "exits on it). Omitted by `dbx serve` to stay persistent.")
     return p.parse_args()
 
 
@@ -2042,7 +2046,9 @@ def make_handler(args):
             scrub = f.read()
         with open(args.analyze_fragment) as f:
             analyze = f.read()
-        save_url = f"http://127.0.0.1:{args.port}/save?token={args.token}"
+        # Relative so the browser POSTs to whatever origin served the page —
+        # works for loopback, an SSH tunnel, and a non-loopback `dbx serve` bind.
+        save_url = f"/save?token={args.token}"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
@@ -2578,7 +2584,7 @@ def make_handler(args):
                 except OSError as e:
                     self._send(500, f"write failed: {e}")
                     return
-                if path == "/save":
+                if path == "/save" and args.done_marker:
                     with open(args.done_marker, "w") as f:
                         f.write("ok\n")
                 self._send(200, '{"ok":true}', "application/json")
@@ -3140,7 +3146,7 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main():
     args = parse_args()
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args))
+    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(args))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
