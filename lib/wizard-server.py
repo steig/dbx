@@ -6,6 +6,12 @@
 # token matching the one passed via --token. The wizard.sh trap kills this
 # process on exit.
 
+# Defer annotation evaluation (PEP 563) so PEP 604 unions like `str | None` in
+# function signatures stay strings instead of being evaluated at import. Without
+# this the module fails to import on Python < 3.10 (e.g. stock macOS python3,
+# 3.9). Keep this as the first statement after the module comments.
+from __future__ import annotations
+
 import argparse
 import collections
 import datetime
@@ -748,7 +754,7 @@ def _parse_audit_date_bound(value: str, end_of_day: bool):
 
 def list_audit_log(audit_dir: str, action: str, limit: int,
                    from_ts: str | None = None, to_ts: str | None = None,
-                   pattern: "re.Pattern | None" = None,
+                   pattern: re.Pattern | None = None,
                    outcome: str | None = None):
     """Return ({"entries": [...], "total": N, "filtered": M}) where entries
     are JSON-parsed audit-log rows, newest first, after applying all filters.
