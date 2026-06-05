@@ -73,6 +73,7 @@ Once installed, `dbx update` upgrades in place when a new release is out.
 
 | Tool | What it enables |
 |------|-----------------|
+| `python3` (≥ 3.7) | Browser-driven wizard GUI (`dbx wizard`, `dbx serve`); without it the wizard falls back to the terminal UI. Override the interpreter with `DBX_PYTHON`. |
 | `libsecret-tools` | Linux desktop credential storage (GNOME Keyring) |
 | `pass` | Linux headless credential storage |
 | `age` | Recommended modern backup encryption |
