@@ -7,6 +7,7 @@
 # process on exit.
 
 import argparse
+import collections
 import datetime
 import http.server
 import json
@@ -43,14 +44,25 @@ AGE_RECIPIENT_RE = re.compile(r"^age1[a-z0-9]{50,80}$")
 VAULT_VALUE_MAX_BYTES = 4096
 
 
+# Cap each job's line buffer. Verbose dumps emit a line per object/row; an
+# unbounded buffer grows without limit in the (long-lived, under `dbx serve`)
+# server process, and reattaching replays the whole backlog in one burst —
+# enough to freeze or OOM the browser tab. Keep only the most recent lines.
+MAX_JOB_LINES = 10000
+
+
 class Job:
-    """One running `dbx restore` process. Lines accumulate in memory; SSE
-    consumers read with an offset. Multiple SSE consumers are OK — each
-    independently tracks how many lines it has already sent."""
+    """One running `dbx restore` process. Lines accumulate in a bounded ring
+    buffer; SSE consumers read with an absolute offset. Multiple SSE consumers
+    are OK — each independently tracks how many lines it has already sent.
+    `dropped` counts lines evicted from the head, so absolute offsets stay
+    valid after eviction and a consumer that has fallen behind the window can
+    skip forward to the oldest line still buffered."""
 
     def __init__(self, popen: subprocess.Popen):
         self.popen = popen
-        self.lines: list[str] = []
+        self.lines: "collections.deque[str]" = collections.deque(maxlen=MAX_JOB_LINES)
+        self.dropped = 0
         self.cv = threading.Condition()
         self.finished = False
         self.exit_code: int | None = None
@@ -62,6 +74,8 @@ class Job:
             assert self.popen.stdout is not None
             for line in self.popen.stdout:
                 with self.cv:
+                    if len(self.lines) == MAX_JOB_LINES:
+                        self.dropped += 1   # this append will evict the head
                     self.lines.append(line.rstrip("\n"))
                     self.cv.notify_all()
         finally:
@@ -2209,11 +2223,17 @@ def make_handler(args):
         handler.send_header("X-Accel-Buffering", "no")  # avoid proxy buffering if any
         handler.end_headers()
 
-        sent = 0
+        sent = 0   # absolute index of the next line to send
         try:
             while True:
                 with job.cv:
-                    pending = job.lines[sent:]
+                    # If our position fell out of the ring buffer (a slow or
+                    # freshly-attached consumer behind a fast verbose run),
+                    # skip forward to the oldest line still buffered. This is
+                    # what bounds the reattach replay to MAX_JOB_LINES.
+                    if sent < job.dropped:
+                        sent = job.dropped
+                    pending = list(job.lines)[sent - job.dropped:]
                     done = job.finished
                     exit_code = job.exit_code
 
@@ -2231,10 +2251,13 @@ def make_handler(args):
 
                 # Block for new data with a keepalive timeout.
                 with job.cv:
-                    if sent == len(job.lines) and not job.finished:
+                    total = job.dropped + len(job.lines)
+                    if sent >= total and not job.finished:
                         job.cv.wait(timeout=15.0)
+                    total = job.dropped + len(job.lines)
+                    idle = sent >= total and not job.finished
                 # Heartbeat comment line keeps proxies/browsers from giving up.
-                if sent == len(job.lines) and not job.finished:
+                if idle:
                     try:
                         handler.wfile.write(b": keepalive\n\n")
                         handler.wfile.flush()
