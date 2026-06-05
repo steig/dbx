@@ -4,6 +4,13 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-06-04
+
+### Fixed
+
+- **`dbx wizard` crashed on Python 3.9.** The wizard server used PEP 604 union syntax (`str | None`) in function signatures, which is evaluated at import time on Python < 3.10 and raised `TypeError: unsupported operand type(s) for |`. Because `wizard.sh` launched the server with bare `python3`, it picked up the stock macOS interpreter (3.9.6) and died with an opaque traceback — effectively requiring Python ≥ 3.10 without detecting or enforcing it. Added `from __future__ import annotations` (PEP 563) so the module imports cleanly back to Python 3.7, and `wizard.sh` now preflights the interpreter for both `dbx wizard` and `dbx serve` — resolving `${DBX_PYTHON:-python3}`, requiring ≥ 3.7, and failing with an actionable message (pointing at the `DBX_PYTHON` override) instead of crashing. (#99)
+- **Browser tab froze or ran out of memory on verbose backups.** Verbose `pg_dump -v` / `mysqldump -v` emit a line per object/row. The wizard's job log buffered every line unbounded on the server (replaying the whole backlog on each SSE re-attach) and rendered one DOM node per line on the client, which could freeze or crash the tab. The server now uses a bounded ring buffer (`MAX_JOB_LINES`) with absolute-offset SSE so re-attach replay is capped, and the client caps its rendered log lines. The backup process itself was never affected.
+
 ## [0.24.0] - 2026-06-03
 
 ### Added
