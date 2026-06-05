@@ -127,6 +127,11 @@
       loadingHosts: false,
       form: { host: '', database: '', verbose: false, upload: false },
       log: [],
+      // Cap the live log at a tail window. Verbose dumps (-v) emit a line per
+      // object/table, so an unbounded array + one DOM node per line via x-for
+      // grows until the browser tab runs out of memory. Keep the most recent
+      // lines; older output scrolls off.
+      maxLogLines: 5000,
       autoFollow: true,     // tail the log to the bottom unless the user scrolls up
       jobId: null,
       eventSource: null,
@@ -302,6 +307,9 @@
             const { line } = JSON.parse(ev.data);
             if (line !== undefined) {
               this.log.push(line);
+              if (this.log.length > this.maxLogLines) {
+                this.log.splice(0, this.log.length - this.maxLogLines);
+              }
               if (this.autoFollow) this.scrollLogToBottom();
             }
           } catch (e) { /* ignore */ }
