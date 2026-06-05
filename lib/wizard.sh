@@ -24,6 +24,22 @@ wizard_detect_browser() {
   echo "ok"
 }
 
+# Resolve the interpreter used to run wizard-server.py. DBX_PYTHON overrides the
+# default `python3` — useful when the first python3 on PATH is too old (e.g. the
+# stock macOS /usr/bin/python3).
+wizard_python_bin() { echo "${DBX_PYTHON:-python3}"; }
+
+# wizard-server.py uses `from __future__ import annotations`, so it imports back
+# to Python 3.7. Verify the chosen interpreter exists and clears that floor,
+# failing with an actionable message rather than an opaque import-time error.
+wizard_require_python() {
+  local py; py=$(wizard_python_bin)
+  command -v "$py" >/dev/null 2>&1 \
+    || die "Python interpreter '$py' not found. Install Python 3.7+ or set DBX_PYTHON to one."
+  "$py" -c 'import sys; raise SystemExit(sys.version_info < (3, 7))' 2>/dev/null \
+    || die "$("$py" -V 2>&1) is too old for the wizard (needs Python 3.7+). Install a newer Python (e.g. 'brew install python') or point DBX_PYTHON at one: DBX_PYTHON=python3.13 dbx wizard"
+}
+
 # Find a free local port via Python's socket library.
 wizard_find_free_port() {
   python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1]); s.close()"
@@ -186,8 +202,9 @@ EOF
   server_log=$(mktemp -t dbx-wizard-srv.XXXXXX)
   server_script="$LIB_DIR/wizard-server.py"
   [[ -f "$server_script" ]] || die "Wizard server missing: $server_script (re-run install.sh to repair)"
+  wizard_require_python
 
-  python3 "$server_script" \
+  "$(wizard_python_bin)" "$server_script" \
     --port "$port" \
     --token "$token" \
     --html "$html_template" \
@@ -329,7 +346,7 @@ EOF
 
   [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) \
     || die "Invalid --port value: $port"
-  command -v python3 >/dev/null 2>&1 || die "dbx serve requires python3 on the host."
+  wizard_require_python
   require_jq
 
   # Auth mode: either a URL token (default) or none (--no-token), e.g. when
@@ -379,7 +396,7 @@ EOF
 
   # exec: the python server becomes the foreground process so systemd (or any
   # supervisor) tracks and signals it directly. No --done-marker => persistent.
-  exec python3 "$server_script" \
+  exec "$(wizard_python_bin)" "$server_script" \
     --host "$bind" \
     --port "$port" \
     "${auth_args[@]}" \
