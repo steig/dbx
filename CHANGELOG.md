@@ -4,6 +4,13 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-06-06
+
+### Added
+
+- **Multiple named storage backends.** dbx can now hold several S3-compatible backends at once (e.g. Cloudflare R2 + MinIO) under a top-level `storages.<name>` map, with `defaults.storage` naming the default. `dbx storage add` prompts for a backend name and stores its secret under `s3-secret-key-<name>`; pick a backend per operation with `dbx backup --upload[=<name>]`, `dbx restore --storage <name>`, or `dbx storage <op> --storage <name>`; a host can pin its own target with `upload_storage`. `dbx storage info` lists every backend and marks the default. The legacy single `storage` block keeps working unchanged (treated as the default; no migration). Generic S3 (endpoint + region) covers MinIO/R2/B2/AWS/Spaces — no per-provider code paths.
+- **Wizard GUI manages multiple backends.** The web wizard's storage section is now a list of named backends — add/remove, set fields, and mark a default — saving to `storages` + `defaults.storage`. An existing single `storage` block is surfaced as a backend named `default` and migrated on the next save.
+
 ## [0.26.0] - 2026-06-06
 
 ### Added
