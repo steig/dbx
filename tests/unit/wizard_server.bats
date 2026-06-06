@@ -119,6 +119,16 @@ JSON
 JSON
     exit 0
     ;;
+  "storage test")
+    # `dbx storage test [--storage <name>]` round-trip. Tests set
+    # DBX_FAKE_STORAGE_TEST_FAIL=1 (on the server process) to force failure.
+    if [[ "${DBX_FAKE_STORAGE_TEST_FAIL:-}" == "1" ]]; then
+      echo "storage test: upload failed" >&2
+      exit 1
+    fi
+    echo "storage test: round-trip OK"
+    exit 0
+    ;;
   "vault list")
     echo "Stored credentials:"
     if [[ -s "$VAULT_STORE" ]]; then
@@ -691,6 +701,18 @@ JSON
   [[ "$output" == *"\"storage\": \"r2\""* ]]
   # Legacy single block replaced (storages is form-managed too).
   [[ "$output" != *"legacyonly"* ]]
+}
+
+@test "GET /api/storage/test returns ok=true for a passing backend" {
+  run curl -s "$(api /api/storage/test)&name=r2"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"ok": true'* || "$output" == *'"ok":true'* ]]
+}
+
+@test "GET /api/storage/test rejects an invalid backend name with 400" {
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/storage/test)&name=bad%3Bname"
+  [ "$status" -eq 0 ]
+  [ "$output" = "400" ]
 }
 
 @test "POST /save with non-object body errors with 400" {

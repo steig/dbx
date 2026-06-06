@@ -2132,12 +2132,17 @@ cmd_storage() {
       storage_add "$@"
       ;;
 
+    test)
+      # Validate a backend with a real upload-list-download-delete round-trip.
+      storage_test_roundtrip "$storage_name"
+      ;;
+
     info|""|backends)
       storage_info "$storage_name"
       ;;
 
     *)
-      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info, add; add --storage <name> to target a backend)"
+      die "Unknown storage action: $action (use: upload, download, list, delete, sync, test, info, add; add --storage <name> to target a backend)"
       ;;
   esac
 }
@@ -2883,7 +2888,24 @@ host_add() {
       jq --arg a "$alias" '.hosts[$a].auto_upload = true' \
         "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
       secure_file "$CONFIG_FILE"
-      log_info "  Storage:   auto-upload enabled for $alias"
+      # With more than one named backend, let the host pick which one its
+      # auto-uploads target; otherwise it uses .defaults.storage / the only one.
+      local _backends; _backends=$(storage_list_backends)
+      if [[ "$(printf '%s\n' "$_backends" | grep -c .)" -gt 1 ]]; then
+        local _pick
+        _pick=$(printf '%s\n' "$_backends" | gum choose --header "Upload '$alias' backups to which storage?")
+        if [[ -n "$_pick" ]]; then
+          tmp=$(mktemp)
+          jq --arg a "$alias" --arg s "$_pick" '.hosts[$a].upload_storage = $s' \
+            "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+          secure_file "$CONFIG_FILE"
+          log_info "  Storage:   auto-upload enabled for $alias → $_pick"
+        else
+          log_info "  Storage:   auto-upload enabled for $alias"
+        fi
+      else
+        log_info "  Storage:   auto-upload enabled for $alias"
+      fi
     else
       log_info "  Storage:   configured globally (auto-upload off for $alias)"
     fi
