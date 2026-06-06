@@ -4,6 +4,16 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-06-06
+
+### Fixed
+
+- **Storage backends with no prefix now list and restore correctly.** Object paths were built as `${bucket}/${prefix}/${key}`, which with an empty prefix produced `bucket//key` (double slash) — S3 stored the object under a leading-slash key, so uploads worked but `dbx storage list <path>` and `restore --from-remote` (latest resolution) looked at the wrong key and found nothing. Paths now join segments with single slashes, skipping empties.
+
+### Added
+
+- Integration coverage for multiple named backends (two MinIO buckets): `--upload=<name>` routing, `storage list --storage <name>`, and `restore --storage <name> --from-remote` fetch targeting.
+
 ## [0.28.0] - 2026-06-06
 
 ### Added
