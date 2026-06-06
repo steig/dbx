@@ -300,37 +300,59 @@
     <!-- Storage -->
     <p class="section-title">Cloud storage (optional)</p>
     <div class="card">
-      <label class="check">
-        <input type="checkbox" x-model="storage.enabled"/>
-        <span>Configure S3 / MinIO / R2 / B2</span>
-      </label>
-      <div x-show="storage.enabled" class="stack-sm" style="margin-top:14px;">
-        <div class="cols-2">
-          <div class="field">
-            <label>Bucket <span class="req">*</span></label>
-            <input type="text" x-model="storage.bucket" placeholder="dbx-backups"/>
+      <p class="hint" style="margin-top:0;">
+        Add one or more S3-compatible backends (MinIO, Cloudflare R2, Backblaze B2, AWS S3, …).
+        The <strong>default</strong> is used by <code>--upload</code> and auto-upload.
+      </p>
+      <template x-for="(s, i) in storages" :key="i">
+        <div class="card" style="margin-top:12px;">
+          <div class="cols-2">
+            <div class="field">
+              <label>Name <span class="req">*</span></label>
+              <input type="text" x-model="s.name" placeholder="r2"/>
+            </div>
+            <div class="field">
+              <label>Bucket <span class="req">*</span></label>
+              <input type="text" x-model="s.bucket" placeholder="dbx-backups"/>
+            </div>
           </div>
-          <div class="field">
-            <label>Endpoint (blank for AWS)</label>
-            <input type="text" x-model="storage.endpoint" placeholder="https://minio.example.com"/>
+          <div class="cols-2">
+            <div class="field">
+              <label>Endpoint (blank for AWS)</label>
+              <input type="text" x-model="s.endpoint" placeholder="https://minio.example.com"/>
+            </div>
+            <div class="field">
+              <label>Region</label>
+              <input type="text" x-model="s.region" placeholder="auto (R2) / us-east-1"/>
+            </div>
+          </div>
+          <div class="cols-2">
+            <div class="field">
+              <label>Prefix / path</label>
+              <input type="text" x-model="s.prefix" placeholder="dbx/"/>
+            </div>
+            <div class="field">
+              <label>Access key</label>
+              <input type="text" x-model="s.access_key" placeholder="AKIA..."/>
+            </div>
+          </div>
+          <div class="hint">
+            Secret goes in the vault, not here:
+            <code x-text="'dbx vault set s3-secret-key-' + (s.name || '&lt;name&gt;')"></code>.
+          </div>
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-top:10px;">
+            <label class="check" style="margin:0;">
+              <input type="radio" name="dbxDefaultStorage" :value="s.name" x-model="defaultStorage"/>
+              <span>Default backend</span>
+            </label>
+            <button type="button" class="btn btn--ghost btn--sm" @click="storages.splice(i, 1)">Remove</button>
           </div>
         </div>
-        <div class="cols-2">
-          <div class="field">
-            <label>Prefix / path</label>
-            <input type="text" x-model="storage.prefix" placeholder="dbx/"/>
-          </div>
-          <div class="field">
-            <label>Access key</label>
-            <input type="text" x-model="storage.access_key" placeholder="AKIA..."/>
-          </div>
-        </div>
-        <div class="hint">
-          The secret key goes in the vault, not here:
-          <code>dbx vault set s3-secret-key</code>.
-          Config references it via <code>secret_key_cmd</code>.
-        </div>
-      </div>
+      </template>
+      <button type="button" class="btn btn--ghost btn--sm" style="margin-top:12px;"
+              @click="storages.push({ name:'', bucket:'', endpoint:'', region:'', prefix:'', access_key:'' })">
+        + Add backend
+      </button>
     </div>
 
     <!-- Defaults -->
@@ -530,7 +552,8 @@
       _savedSnapshot: '',  // form state as of last load/save; drives dirty check
 
       hosts: [emptyHost()],
-      storage: { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' },
+      storages: [],
+      defaultStorage: '',
       defaults: { encryption_type: 'age', keep_backups: 10, compression_level: 3, auto_upload: false },
       notifications: {
         enabled: false,
@@ -642,14 +665,17 @@
           }
           if (this.hosts.length === 0) this.hosts = [emptyHost()];
         }
-        if (cfg.storage && typeof cfg.storage === 'object') {
-          this.storage.enabled = true;
+        if (cfg.storages && typeof cfg.storages === 'object') {
+          this.storages = Object.entries(cfg.storages).map(([name, st]) => {
+            const s3 = (st && st.s3) || {};
+            return { name, bucket: s3.bucket||'', endpoint: s3.endpoint||'', region: s3.region||'', prefix: s3.prefix||'', access_key: s3.access_key||'' };
+          });
+        } else if (cfg.storage && typeof cfg.storage === 'object') {
+          // Legacy single block surfaces as a backend named "default".
           const s3 = cfg.storage.s3 || {};
-          this.storage.bucket     = s3.bucket     || '';
-          this.storage.endpoint   = s3.endpoint   || '';
-          this.storage.prefix     = s3.prefix     || '';
-          this.storage.access_key = s3.access_key || '';
+          this.storages = [{ name: 'default', bucket: s3.bucket||'', endpoint: s3.endpoint||'', region: s3.region||'', prefix: s3.prefix||'', access_key: s3.access_key||'' }];
         }
+        if (cfg.defaults && cfg.defaults.storage) this.defaultStorage = cfg.defaults.storage;
         if (cfg.notifications && typeof cfg.notifications === 'object') {
           const n = cfg.notifications;
           this.notifications.enabled = !!n.enabled;
@@ -706,7 +732,15 @@
           if (h.connection === 'ssh_tunnel' && !h.jump_host) return false;
           if (this.hookError(i)) return false;
         }
-        if (this.storage.enabled && !this.storage.bucket) return false;
+        {
+          const names = new Set();
+          for (const s of this.storages) {
+            if (!s.name || !s.bucket) return false;
+            if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s.name)) return false;
+            if (names.has(s.name)) return false;
+            names.add(s.name);
+          }
+        }
         return true;
       },
 
@@ -747,12 +781,20 @@
           }
           cfg.hosts[h.alias] = block;
         }
-        if (this.storage.enabled) {
-          cfg.storage = { type: 's3', s3: { bucket: this.storage.bucket } };
-          if (this.storage.endpoint) cfg.storage.s3.endpoint = this.storage.endpoint;
-          if (this.storage.prefix)   cfg.storage.s3.prefix = this.storage.prefix;
-          if (this.storage.access_key) cfg.storage.s3.access_key = this.storage.access_key;
-          cfg.storage.s3.secret_key_cmd = 'dbx vault get s3-secret-key';
+        if (this.storages.length) {
+          cfg.storages = {};
+          for (const s of this.storages) {
+            const s3 = { bucket: s.bucket };
+            if (s.endpoint)   s3.endpoint = s.endpoint;
+            if (s.region)     s3.region = s.region;
+            if (s.prefix)     s3.prefix = s.prefix;
+            if (s.access_key) s3.access_key = s.access_key;
+            s3.secret_key_cmd = 'dbx vault get s3-secret-key-' + s.name;
+            cfg.storages[s.name] = { type: 's3', s3 };
+          }
+          if (this.defaultStorage && cfg.storages[this.defaultStorage]) {
+            cfg.defaults.storage = this.defaultStorage;
+          }
         }
         if (this.notifications.enabled) {
           const enabledBackends = Object.entries(this.notifications.backends)
@@ -844,7 +886,8 @@
       reset() {
         if (!confirm('Discard all entries and start over?')) return;
         this.hosts = [emptyHost()];
-        this.storage = { enabled: false, bucket: '', endpoint: '', prefix: '', access_key: '' };
+        this.storages = [];
+        this.defaultStorage = '';
         this.defaults = { encryption_type: 'age', keep_backups: 10, compression_level: 3, auto_upload: false };
         this.notifications = {
           enabled: false,
