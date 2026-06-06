@@ -110,6 +110,19 @@ get_storage_config() {
   get_config_value "$(storage_root_jq).$key" 2>/dev/null || echo ""
 }
 
+# Join path segments with single slashes, skipping empty ones. Without this,
+# a backend with no prefix builds `bucket//key` (double slash), which S3 stores
+# under a leading-slash key — uploads "work" but list-by-path and restore
+# --from-remote then look at the wrong key and find nothing.
+storage_join() {
+  local out="" seg
+  for seg in "$@"; do
+    [[ -z "$seg" ]] && continue
+    if [[ -z "$out" ]]; then out="$seg"; else out="$out/$seg"; fi
+  done
+  printf '%s' "$out"
+}
+
 # ============================================================================
 # S3 Client Detection
 # ============================================================================
@@ -174,7 +187,7 @@ mc_upload() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"  # Remove trailing slash
 
-  local full_path="$(mc_alias_name)/${bucket}/${prefix}/${remote_path}"
+  local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Uploading to: $full_path"
   if mc cp "$local_file" "$full_path" >/dev/null; then
@@ -197,7 +210,7 @@ mc_download() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"
 
-  local full_path="$(mc_alias_name)/${bucket}/${prefix}/${remote_path}"
+  local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Downloading from: $full_path"
   if mc cp "$full_path" "$local_file" >/dev/null; then
@@ -219,8 +232,7 @@ mc_list() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"
 
-  local full_path="$(mc_alias_name)/${bucket}/${prefix}"
-  [[ -n "$path" ]] && full_path="${full_path}/${path}"
+  local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$path")"
 
   mc ls "$full_path" 2>/dev/null
 }
@@ -235,7 +247,7 @@ mc_delete() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"
 
-  local full_path="$(mc_alias_name)/${bucket}/${prefix}/${remote_path}"
+  local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Deleting: $full_path"
   if mc rm "$full_path" >/dev/null 2>&1; then
@@ -294,7 +306,7 @@ aws_upload() {
   prefix="${prefix%/}"
   endpoint_arg=$(aws_get_endpoint_arg)
 
-  local s3_path="s3://${bucket}/${prefix}/${remote_path}"
+  local s3_path="s3://$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Uploading to: $s3_path"
   if aws s3 cp "$local_file" "$s3_path" $endpoint_arg >/dev/null; then
@@ -318,7 +330,7 @@ aws_download() {
   prefix="${prefix%/}"
   endpoint_arg=$(aws_get_endpoint_arg)
 
-  local s3_path="s3://${bucket}/${prefix}/${remote_path}"
+  local s3_path="s3://$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Downloading from: $s3_path"
   if aws s3 cp "$s3_path" "$local_file" $endpoint_arg >/dev/null; then
@@ -341,8 +353,7 @@ aws_list() {
   prefix="${prefix%/}"
   endpoint_arg=$(aws_get_endpoint_arg)
 
-  local s3_path="s3://${bucket}/${prefix}"
-  [[ -n "$path" ]] && s3_path="${s3_path}/${path}"
+  local s3_path="s3://$(storage_join "$bucket" "$prefix" "$path")"
 
   aws s3 ls "$s3_path" $endpoint_arg 2>/dev/null
 }
@@ -358,7 +369,7 @@ aws_delete() {
   prefix="${prefix%/}"
   endpoint_arg=$(aws_get_endpoint_arg)
 
-  local s3_path="s3://${bucket}/${prefix}/${remote_path}"
+  local s3_path="s3://$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Deleting: $s3_path"
   if aws s3 rm "$s3_path" $endpoint_arg >/dev/null 2>&1; then
@@ -681,13 +692,13 @@ storage_sync_download() {
 
       while read -r remote_file; do
         [[ "$remote_file" == *.meta.json ]] && continue
-        local relative="${remote_file#"$(mc_alias_name)/${bucket}/${prefix}/"}"
+        local relative="${remote_file#"$(mc_alias_name)/$(storage_join "$bucket" "$prefix")/"}"
         local local_file="$DATA_DIR/$relative"
         mkdir -p "$(dirname "$local_file")"
         log_info "Downloading: $relative"
         mc cp "$remote_file" "$local_file" >/dev/null
         ((count++)) || true
-      done < <(mc find "$(mc_alias_name)/${bucket}/${prefix}/${remote_path}" --name "*.sql.zst*" 2>/dev/null)
+      done < <(mc find "$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")" --name "*.sql.zst*" 2>/dev/null)
       ;;
     aws)
       aws_configure_env
@@ -697,7 +708,7 @@ storage_sync_download() {
       prefix="${prefix%/}"
       endpoint_arg=$(aws_get_endpoint_arg)
 
-      aws s3 sync "s3://${bucket}/${prefix}/${remote_path}" "$DATA_DIR/$remote_path" \
+      aws s3 sync "s3://$(storage_join "$bucket" "$prefix" "$remote_path")" "$DATA_DIR/$remote_path" \
         --exclude "*" --include "*.sql.zst*" $endpoint_arg
       count=$(find "$DATA_DIR/$remote_path" -name "*.sql.zst*" -type f 2>/dev/null | wc -l)
       ;;
