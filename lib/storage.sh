@@ -6,20 +6,108 @@
 #
 
 # ============================================================================
-# Configuration
+# Configuration — multiple named backends
+#
+# Storage can be configured two ways, both supported:
+#   - Named map:  .storages.<name> = { type, s3 {...} }  (+ .defaults.storage)
+#   - Legacy:     .storage         = { type, s3 {...} }  (single, unnamed)
+#
+# A dynamically-scoped `_STORAGE_NAME` selects the active backend for the
+# duration of an operation: "" means the legacy `.storage` block; any other
+# value means `.storages[<name>]`. Public entry points set it (via
+# resolve_storage_name) and pass it to any sibling they call; the mc_*/aws_*
+# helpers and get_storage_config read it implicitly through bash dynamic scope.
+# Backend names are validated against IDENT_RE before they reach here, so they
+# are safe to interpolate into jq paths and vault/alias names.
 # ============================================================================
 
-# Check if storage is configured
-is_storage_configured() {
-  local storage_type
-  storage_type=$(get_config_value ".storage.type" 2>/dev/null || echo "")
-  [[ -n "$storage_type" && "$storage_type" != "none" ]]
+# jq root for the active backend.
+storage_root_jq() {
+  if [[ -n "${_STORAGE_NAME:-}" ]]; then
+    printf '.storages["%s"]' "$_STORAGE_NAME"
+  else
+    printf '.storage'
+  fi
 }
 
-# Get storage configuration value
+# Vault/keychain key holding the active backend's S3 secret.
+storage_vault_key() {
+  if [[ -n "${_STORAGE_NAME:-}" ]]; then
+    echo "s3-secret-key-${_STORAGE_NAME}"
+  else
+    echo "s3-secret-key"
+  fi
+}
+
+# mc alias for the active backend (kept distinct so backends don't clobber).
+mc_alias_name() {
+  if [[ -n "${_STORAGE_NAME:-}" ]]; then
+    echo "dbx-storage-${_STORAGE_NAME}"
+  else
+    echo "dbx-storage"
+  fi
+}
+
+# Names of all configured named backends (one per line). The legacy .storage
+# block is NOT listed here (it has no name); callers handle it separately.
+storage_list_backends() {
+  get_config_value '(.storages // {}) | keys[]' 2>/dev/null || true
+}
+
+# Resolve which backend to use. Echoes the concrete name, or "" for the legacy
+# single .storage block. Returns non-zero (with a logged error) when nothing is
+# configured or the choice is ambiguous.
+# Arg: $1 = explicit name (from --storage / arg), optional.
+resolve_storage_name() {
+  local explicit="${1:-}"
+  if [[ -n "$explicit" ]]; then
+    echo "$explicit"; return 0
+  fi
+  local default_name
+  default_name=$(get_config_value '.defaults.storage' 2>/dev/null || echo "")
+  if [[ -n "$default_name" ]]; then
+    echo "$default_name"; return 0
+  fi
+  # No explicit, no default: a single named backend wins; else legacy; else error.
+  local names count
+  names=$(storage_list_backends)
+  count=$(printf '%s\n' "$names" | grep -c . || true)
+  if [[ "$count" -eq 1 ]]; then
+    echo "$names"; return 0
+  elif [[ "$count" -gt 1 ]]; then
+    log_error "Multiple storage backends configured; set .defaults.storage or pass --storage <name>. Available: $(echo $names)"
+    return 1
+  fi
+  local legacy_type
+  legacy_type=$(get_config_value '.storage.type' 2>/dev/null || echo "")
+  if [[ -n "$legacy_type" && "$legacy_type" != "none" ]]; then
+    echo ""; return 0   # legacy sentinel
+  fi
+  log_error "No storage configured. Run 'dbx storage add'."
+  return 1
+}
+
+# Check if storage is configured. With an explicit name (or an inherited
+# _STORAGE_NAME), checks that backend; otherwise true if ANY backend (named or
+# legacy) is configured.
+is_storage_configured() {
+  local name="${1:-${_STORAGE_NAME:-}}"
+  if [[ -n "$name" ]]; then
+    local t
+    t=$(get_config_value ".storages[\"$name\"].type" 2>/dev/null || echo "")
+    [[ -n "$t" && "$t" != "none" ]]
+    return
+  fi
+  [[ -n "$(storage_list_backends)" ]] && return 0
+  local lt
+  lt=$(get_config_value ".storage.type" 2>/dev/null || echo "")
+  [[ -n "$lt" && "$lt" != "none" ]]
+}
+
+# Get a config value for the active backend (e.g. "s3.bucket").
 get_storage_config() {
   local key="$1"
-  get_config_value ".storage.$key" 2>/dev/null || echo ""
+  get_config_value "$(storage_root_jq).$key" 2>/dev/null || echo ""
 }
 
 # ============================================================================
@@ -49,8 +137,6 @@ require_s3_client() {
 # MinIO Client (mc) Operations
 # ============================================================================
 
-MC_ALIAS="dbx-storage"
-
 mc_configure() {
   local endpoint bucket access_key secret_key
 
@@ -63,7 +149,7 @@ mc_configure() {
   if [[ -n "$secret_cmd" ]]; then
     secret_key=$(eval "$secret_cmd")
   else
-    secret_key=$(keychain_get "s3-secret-key" 2>/dev/null || true)
+    secret_key=$(keychain_get "$(storage_vault_key)" 2>/dev/null || true)
     if [[ -z "$secret_key" ]]; then
       secret_key=$(get_storage_config "s3.secret_key")
     fi
@@ -74,7 +160,7 @@ mc_configure() {
   fi
 
   # Configure mc alias (quietly)
-  mc alias set "$MC_ALIAS" "$endpoint" "$access_key" "$secret_key" --api S3v4 >/dev/null 2>&1
+  mc alias set "$(mc_alias_name)" "$endpoint" "$access_key" "$secret_key" --api S3v4 >/dev/null 2>&1
 }
 
 mc_upload() {
@@ -88,7 +174,7 @@ mc_upload() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"  # Remove trailing slash
 
-  local full_path="${MC_ALIAS}/${bucket}/${prefix}/${remote_path}"
+  local full_path="$(mc_alias_name)/${bucket}/${prefix}/${remote_path}"
 
   log_info "Uploading to: $full_path"
   if mc cp "$local_file" "$full_path" >/dev/null; then
@@ -111,7 +197,7 @@ mc_download() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"
 
-  local full_path="${MC_ALIAS}/${bucket}/${prefix}/${remote_path}"
+  local full_path="$(mc_alias_name)/${bucket}/${prefix}/${remote_path}"
 
   log_info "Downloading from: $full_path"
   if mc cp "$full_path" "$local_file" >/dev/null; then
@@ -133,7 +219,7 @@ mc_list() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"
 
-  local full_path="${MC_ALIAS}/${bucket}/${prefix}"
+  local full_path="$(mc_alias_name)/${bucket}/${prefix}"
   [[ -n "$path" ]] && full_path="${full_path}/${path}"
 
   mc ls "$full_path" 2>/dev/null
@@ -149,7 +235,7 @@ mc_delete() {
   prefix=$(get_storage_config "s3.prefix")
   prefix="${prefix%/}"
 
-  local full_path="${MC_ALIAS}/${bucket}/${prefix}/${remote_path}"
+  local full_path="$(mc_alias_name)/${bucket}/${prefix}/${remote_path}"
 
   log_info "Deleting: $full_path"
   if mc rm "$full_path" >/dev/null 2>&1; then
@@ -185,7 +271,7 @@ aws_configure_env() {
   if [[ -n "$secret_cmd" ]]; then
     secret_key=$(eval "$secret_cmd")
   else
-    secret_key=$(keychain_get "s3-secret-key" 2>/dev/null || true)
+    secret_key=$(keychain_get "$(storage_vault_key)" 2>/dev/null || true)
     if [[ -z "$secret_key" ]]; then
       secret_key=$(get_storage_config "s3.secret_key")
     fi
@@ -295,6 +381,8 @@ aws_delete() {
 storage_upload() {
   local local_file="$1"
   local remote_path="${2:-}"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${3:-}") || return 1
 
   require_s3_client
 
@@ -332,6 +420,8 @@ storage_upload() {
 storage_download() {
   local remote_path="$1"
   local local_file="${2:-}"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${3:-}") || return 1
 
   require_s3_client
 
@@ -370,6 +460,8 @@ storage_download() {
 
 storage_list() {
   local path="${1:-}"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${2:-}") || return 1
 
   require_s3_client
 
@@ -404,6 +496,8 @@ storage_list() {
 #    YYYYMMDD_HHMMSS timestamp, so lex order == chronological order.
 storage_resolve_remote_path() {
   local remote_path="$1"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${2:-}") || return 1
 
   # Validate shape: must have at least host/db/something.
   local host db tail
@@ -431,7 +525,7 @@ storage_resolve_remote_path() {
   # filter to lines whose last token matches a backup filename — the
   # header lines don't match and get dropped naturally.
   local listing
-  listing=$(storage_list "$host/$db" 2>/dev/null || true)
+  listing=$(storage_list "$host/$db" "$_STORAGE_NAME" 2>/dev/null || true)
 
   # Extract bare filenames. `mc ls` and `aws s3 ls` both print the
   # filename as the last whitespace-separated token on each line.
@@ -467,6 +561,8 @@ storage_resolve_remote_path() {
 # Returns non-zero if download fails or the file ends up empty.
 storage_fetch_remote_backup() {
   local remote_path="$1"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${2:-}") || return 1
 
   local base
   base=$(basename "$remote_path")
@@ -482,7 +578,7 @@ storage_fetch_remote_backup() {
   # Run storage_download but route its informational/log chatter to
   # stderr so the resolved local path (echoed last) isn't intermingled
   # when callers capture stdout.
-  if ! storage_download "$remote_path" "$local_file" >&2; then
+  if ! storage_download "$remote_path" "$local_file" "$_STORAGE_NAME" >&2; then
     log_error "Download failed: $remote_path"
     return 1
   fi
@@ -497,6 +593,8 @@ storage_fetch_remote_backup() {
 
 storage_delete() {
   local remote_path="$1"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${2:-}") || return 1
 
   require_s3_client
 
@@ -523,6 +621,8 @@ storage_delete() {
 storage_sync_upload() {
   local host="$1"
   local database="${2:-}"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${3:-}") || return 1
 
   require_s3_client
 
@@ -545,7 +645,7 @@ storage_sync_upload() {
 
     local relative_path="${file#"$DATA_DIR/"}"
     log_info "Uploading: $relative_path"
-    storage_upload "$file" "$relative_path"
+    storage_upload "$file" "$relative_path" "$_STORAGE_NAME"
     ((count++)) || true
   done < <(find "$backup_dir" -name "*.sql.zst*" -type f)
 
@@ -556,6 +656,8 @@ storage_sync_upload() {
 storage_sync_download() {
   local host="$1"
   local database="${2:-}"
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${3:-}") || return 1
 
   require_s3_client
 
@@ -579,13 +681,13 @@ storage_sync_download() {
 
       while read -r remote_file; do
         [[ "$remote_file" == *.meta.json ]] && continue
-        local relative="${remote_file#"${MC_ALIAS}/${bucket}/${prefix}/"}"
+        local relative="${remote_file#"$(mc_alias_name)/${bucket}/${prefix}/"}"
         local local_file="$DATA_DIR/$relative"
         mkdir -p "$(dirname "$local_file")"
         log_info "Downloading: $relative"
         mc cp "$remote_file" "$local_file" >/dev/null
         ((count++)) || true
-      done < <(mc find "${MC_ALIAS}/${bucket}/${prefix}/${remote_path}" --name "*.sql.zst*" 2>/dev/null)
+      done < <(mc find "$(mc_alias_name)/${bucket}/${prefix}/${remote_path}" --name "*.sql.zst*" 2>/dev/null)
       ;;
     aws)
       aws_configure_env
@@ -610,6 +712,8 @@ storage_sync_download() {
 # only if all four steps succeed; returns 1 with the failing step
 # logged. Side effects on the bucket are cleaned up unless delete fails.
 storage_test_roundtrip() {
+  local _STORAGE_NAME
+  _STORAGE_NAME=$(resolve_storage_name "${1:-}") || return 1
   is_storage_configured || { log_error "storage not configured"; return 1; }
 
   local ts probe_src probe_local probe_remote
@@ -620,37 +724,37 @@ storage_test_roundtrip() {
   probe_local=$(mktemp)
 
   log_info "storage test: upload"
-  if ! storage_upload "$probe_src" "$probe_remote" >/dev/null 2>&1; then
+  if ! storage_upload "$probe_src" "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1; then
     log_error "storage test: upload failed"
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
 
   log_info "storage test: list"
-  if ! storage_list ".dbx-test" 2>/dev/null | grep -q "probe-${ts}"; then
+  if ! storage_list ".dbx-test" "$_STORAGE_NAME" 2>/dev/null | grep -q "probe-${ts}"; then
     log_error "storage test: list did not contain the uploaded probe"
-    storage_delete "$probe_remote" >/dev/null 2>&1 || true
+    storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1 || true
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
 
   log_info "storage test: download"
-  if ! storage_download "$probe_remote" "$probe_local" >/dev/null 2>&1; then
+  if ! storage_download "$probe_remote" "$probe_local" "$_STORAGE_NAME" >/dev/null 2>&1; then
     log_error "storage test: download failed"
-    storage_delete "$probe_remote" >/dev/null 2>&1 || true
+    storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1 || true
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
 
   if ! cmp -s "$probe_src" "$probe_local"; then
     log_error "storage test: downloaded bytes mismatch original"
-    storage_delete "$probe_remote" >/dev/null 2>&1 || true
+    storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1 || true
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
 
   log_info "storage test: delete"
-  if ! storage_delete "$probe_remote" >/dev/null 2>&1; then
+  if ! storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1; then
     log_error "storage test: delete failed (probe left in bucket)"
     rm -f "$probe_src" "$probe_local"
     return 1
@@ -665,37 +769,52 @@ storage_test_roundtrip() {
 # Storage Info
 # ============================================================================
 
+# Print one backend's details. Reads the active backend via the
+# dynamically-scoped _STORAGE_NAME set by the caller.
+_storage_print_one() {
+  local label="$1" tag="${2:-}"
+  echo "  [${label}]${tag:+  ${tag}}"
+  echo "    Type:     $(get_storage_config "type")"
+  echo "    Endpoint: $(get_storage_config "s3.endpoint")"
+  echo "    Bucket:   $(get_storage_config "s3.bucket")"
+  echo "    Prefix:   $(get_storage_config "s3.prefix")"
+}
+
+# storage_info [name] — show one backend, or all (named + legacy) when no name.
 storage_info() {
+  local want="${1:-}"
   echo -e "${BOLD}Storage Configuration:${NC}"
   echo ""
 
-  local storage_type
-  storage_type=$(get_storage_config "type")
+  local default_name names legacy_type
+  default_name=$(get_config_value '.defaults.storage' 2>/dev/null || echo "")
+  names=$(storage_list_backends)
+  legacy_type=$(get_config_value '.storage.type' 2>/dev/null || echo "")
 
-  if [[ -z "$storage_type" || "$storage_type" == "none" ]]; then
+  if [[ -z "$want" && -z "$names" && ( -z "$legacy_type" || "$legacy_type" == "none" ) ]]; then
     echo "  Not configured"
     echo ""
-    echo "  Add to config.json:"
-    echo '  "storage": {'
-    echo '    "type": "s3",'
-    echo '    "s3": {'
-    echo '      "bucket": "backups",'
-    echo '      "endpoint": "http://minio:9000",'
-    echo '      "access_key": "...",'
-    echo '      "secret_key_cmd": "dbx vault get s3-secret-key"'
-    echo '    }'
-    echo '  }'
+    echo "  Add one with: dbx storage add"
     return
   fi
 
-  echo "  Type: $storage_type"
-
-  case "$storage_type" in
-    s3)
-      echo "  Endpoint: $(get_storage_config "s3.endpoint")"
-      echo "  Bucket: $(get_storage_config "s3.bucket")"
-      echo "  Prefix: $(get_storage_config "s3.prefix")"
-      echo "  Client: $(detect_s3_client)"
-      ;;
-  esac
+  if [[ -n "$want" ]]; then
+    local _STORAGE_NAME="$want" tag=""
+    [[ "$want" == "$default_name" ]] && tag="(default)"
+    _storage_print_one "$want" "$tag"
+  else
+    if [[ -n "$names" ]]; then
+      while IFS= read -r n; do
+        [[ -z "$n" ]] && continue
+        local _STORAGE_NAME="$n" tag=""
+        [[ "$n" == "$default_name" ]] && tag="(default)"
+        _storage_print_one "$n" "$tag"
+      done <<< "$names"
+    fi
+    if [[ -n "$legacy_type" && "$legacy_type" != "none" ]]; then
+      local _STORAGE_NAME=""
+      _storage_print_one "legacy" "(.storage)"
+    fi
+  fi
+  echo "    Client:   $(detect_s3_client)"
 }

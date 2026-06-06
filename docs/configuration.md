@@ -38,6 +38,7 @@ Validate after edits with `dbx config validate`.
     "compression_level": 3,
     "keep_backups": 10,
     "auto_upload": false,
+    "storage": "r2",
     "definer_handling": "strip",
     "build_missing_images": true,
     "extension_packages": {
@@ -75,6 +76,11 @@ Validate after edits with `dbx config validate`.
       "access_key": "minioadmin",
       "secret_key_cmd": "dbx vault get s3-secret-key"
     }
+  },
+  "//storages": "Optional: multiple named backends instead of the single `storage` above. defaults.storage names the default; a host may set upload_storage. See storage.md.",
+  "storages": {
+    "r2":    { "type": "s3", "s3": { "endpoint": "https://<acct>.r2.cloudflarestorage.com", "region": "auto", "bucket": "backups", "access_key": "…" } },
+    "minio": { "type": "s3", "s3": { "endpoint": "http://10.0.0.88:9000", "bucket": "backups", "access_key": "…" } }
   },
   "notifications": {
     "enabled": true,
