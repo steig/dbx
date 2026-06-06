@@ -4,6 +4,13 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-06-06
+
+### Added
+
+- **Validate a storage backend from the GUI and CLI.** New `dbx storage test [--storage <name>]` runs a real upload→list→download→delete round-trip against a saved backend; the wizard's storage view gains a per-backend **Test** button (via `GET /api/storage/test`). `dbx host add` now prompts which backend a host auto-uploads to when more than one is configured.
+- **Shareable wizard section URLs + browser history.** Each wizard section is reflected in the URL hash (`#restore`, `#config`, …): back/forward navigate between sections, and a reload or deep link lands on the right one.
+
 ## [0.27.0] - 2026-06-06
 
 ### Added
