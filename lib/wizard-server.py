@@ -570,6 +570,24 @@ def run_scrub_subcommand(dbx_bin: str, argv_tail: list,
         return 124, out, err + f"\ntimed out after {timeout}s"
 
 
+def run_storage_test(dbx_bin: str, name: str = "", timeout: int = 120) -> tuple[int, str, str]:
+    """Run `dbx storage test [--storage <name>]` synchronously — a real
+    upload-list-download-delete round-trip against the saved backend.
+    Returns (exit_code, stdout, stderr)."""
+    argv = [dbx_bin, "storage", "test"]
+    if name:
+        argv += ["--storage", name]
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, (bytes, bytearray)) else (e.stderr or "")
+        return 124, out, err + f"\ntimed out after {timeout}s"
+
+
 def run_analyze_json(dbx_bin: str, host: str, database: str,
                      no_pii_scan: bool = False,
                      timeout: int = 300) -> tuple[int, str, str]:
@@ -2420,6 +2438,17 @@ def make_handler(args):
                 return
             if path == "/api/storage/usage":
                 send_json(self, 200, compute_storage_usage(args.data_dir))
+                return
+            if path == "/api/storage/test":
+                qs = parse_query(self.path)
+                name = (qs.get("name", [""]) or [""])[0]
+                if name and not IDENT_RE.match(name):
+                    send_json(self, 400, {"error": "invalid storage name"})
+                    return
+                rc, out, err = run_storage_test(args.dbx_bin, name)
+                lines = [ln for ln in (err or out or "").strip().splitlines() if ln.strip()]
+                send_json(self, 200, {"ok": rc == 0,
+                                      "message": (lines[-1] if lines else ("ok" if rc == 0 else "failed"))})
                 return
             if path == "/api/storage/clean-preview":
                 qs = parse_query(self.path)

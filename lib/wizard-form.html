@@ -340,17 +340,26 @@
             Secret goes in the vault, not here:
             <code x-text="'dbx vault set s3-secret-key-' + (s.name || '&lt;name&gt;')"></code>.
           </div>
-          <div style="display:flex; align-items:center; justify-content:space-between; margin-top:10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-top:10px; gap:8px;">
             <label class="check" style="margin:0;">
               <input type="radio" name="dbxDefaultStorage" :value="s.name" x-model="defaultStorage"/>
               <span>Default backend</span>
             </label>
-            <button type="button" class="btn btn--ghost btn--sm" @click="storages.splice(i, 1)">Remove</button>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span x-show="s._testMsg" x-text="s._testMsg" style="font-size:12px;"
+                    :style="s._testOk ? 'color:#3fb950' : 'color:#f85149'"></span>
+              <button type="button" class="btn btn--ghost btn--sm" :disabled="s._testing || !s.name"
+                      @click="testBackend(s)" x-text="s._testing ? 'Testing…' : 'Test'"></button>
+              <button type="button" class="btn btn--ghost btn--sm" @click="storages.splice(i, 1)">Remove</button>
+            </div>
+          </div>
+          <div class="hint" x-show="s._testMsg && !s._testOk" style="margin-top:4px;">
+            Test runs against the <em>saved</em> backend — Save first if you just edited it.
           </div>
         </div>
       </template>
       <button type="button" class="btn btn--ghost btn--sm" style="margin-top:12px;"
-              @click="storages.push({ name:'', bucket:'', endpoint:'', region:'', prefix:'', access_key:'' })">
+              @click="storages.push({ name:'', bucket:'', endpoint:'', region:'', prefix:'', access_key:'', _testMsg:'', _testOk:false, _testing:false })">
         + Add backend
       </button>
     </div>
@@ -584,6 +593,22 @@
         }
       },
 
+      async testBackend(s) {
+        s._testMsg = ''; s._testOk = false; s._testing = true;
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const token = params.get('token') || '';
+          const r = await fetch(`/api/storage/test?token=${encodeURIComponent(token)}&name=${encodeURIComponent(s.name)}`);
+          const j = await r.json();
+          s._testOk = !!j.ok;
+          s._testMsg = j.ok ? 'OK' : (j.message || 'failed');
+        } catch (e) {
+          s._testOk = false; s._testMsg = 'request failed';
+        } finally {
+          s._testing = false;
+        }
+      },
+
       async loadCurrentConfig() {
         try {
           const params = new URLSearchParams(window.location.search);
@@ -668,12 +693,12 @@
         if (cfg.storages && typeof cfg.storages === 'object') {
           this.storages = Object.entries(cfg.storages).map(([name, st]) => {
             const s3 = (st && st.s3) || {};
-            return { name, bucket: s3.bucket||'', endpoint: s3.endpoint||'', region: s3.region||'', prefix: s3.prefix||'', access_key: s3.access_key||'' };
+            return { name, bucket: s3.bucket||'', endpoint: s3.endpoint||'', region: s3.region||'', prefix: s3.prefix||'', access_key: s3.access_key||'', _testMsg:'', _testOk:false, _testing:false };
           });
         } else if (cfg.storage && typeof cfg.storage === 'object') {
           // Legacy single block surfaces as a backend named "default".
           const s3 = cfg.storage.s3 || {};
-          this.storages = [{ name: 'default', bucket: s3.bucket||'', endpoint: s3.endpoint||'', region: s3.region||'', prefix: s3.prefix||'', access_key: s3.access_key||'' }];
+          this.storages = [{ name: 'default', bucket: s3.bucket||'', endpoint: s3.endpoint||'', region: s3.region||'', prefix: s3.prefix||'', access_key: s3.access_key||'', _testMsg:'', _testOk:false, _testing:false }];
         }
         if (cfg.defaults && cfg.defaults.storage) this.defaultStorage = cfg.defaults.storage;
         if (cfg.notifications && typeof cfg.notifications === 'object') {
