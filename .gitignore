@@ -1,2 +1,8 @@
 # mkdocs local build output
 site/
+
+# restore-prep operator artifacts — site-specific schema/manifests, never commit to this public repo
+/scrub/
+/hooks/
+*.scrub.json
+*-stage-cleanup.sql
