@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-06-06
+
+### Fixed
+
+- **`restore --from-remote` of a custom-format Postgres backup is no longer treated as MySQL.** dbx writes `pg_dump --format=custom` dumps (binary magic `PGDMP`), but the type sniff only recognized plain-format dumps (the text `PostgreSQL`). When neither the backup metadata nor a host config supplied the type — as with `--from-remote` — a Postgres dump fell through to the MySQL restore path and failed. The sniff now recognizes the `PGDMP` magic.
+
 ## [0.29.0] - 2026-06-06
 
 ### Fixed
