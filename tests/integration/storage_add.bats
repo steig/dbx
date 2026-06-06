@@ -20,6 +20,7 @@ run_wizard() {
 
 @test "storage add: happy path against local MinIO" {
   run run_wizard \
+    "smoke" \
     "S3-compatible (MinIO, R2, B2, ...)" \
     "http://127.0.0.1:9100" \
     "" \
@@ -29,16 +30,20 @@ run_wizard() {
     "minioadmin"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "round-trip OK" ]]
-  [[ "$output" =~ "Remote storage configured" ]]
+  [[ "$output" =~ "Remote storage 'smoke' configured" ]]
 
-  result=$(jq -r '.storage.s3.bucket' "$DBX_CONFIG_DIR/config.json")
+  result=$(jq -r '.storages.smoke.s3.bucket' "$DBX_CONFIG_DIR/config.json")
   [ "$result" = "dbxtest-bucket" ]
-  result=$(jq -r '.storage.s3.endpoint' "$DBX_CONFIG_DIR/config.json")
+  result=$(jq -r '.storages.smoke.s3.endpoint' "$DBX_CONFIG_DIR/config.json")
   [ "$result" = "http://127.0.0.1:9100" ]
+  # First backend becomes the default.
+  result=$(jq -r '.defaults.storage' "$DBX_CONFIG_DIR/config.json")
+  [ "$result" = "smoke" ]
 }
 
 @test "storage add: wrong secret key, abort, rolls back" {
   run run_wizard \
+    "abk" \
     "S3-compatible (MinIO, R2, B2, ...)" \
     "http://127.0.0.1:9100" \
     "" \
@@ -50,12 +55,14 @@ run_wizard() {
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Rolling back" ]]
 
-  result=$(jq -r '.storage // "null"' "$DBX_CONFIG_DIR/config.json")
+  # The provisional backend was removed on rollback.
+  result=$(jq -r '.storages.abk // "null"' "$DBX_CONFIG_DIR/config.json")
   [ "$result" = "null" ]
 }
 
 @test "storage add: wrong secret, retry, succeeds" {
   run run_wizard \
+    "retryk" \
     "S3-compatible (MinIO, R2, B2, ...)" \
     "http://127.0.0.1:9100" \
     "" \
@@ -67,20 +74,21 @@ run_wizard() {
     "minioadmin" \
     "minioadmin"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "Remote storage configured" ]]
+  [[ "$output" =~ "Remote storage 'retryk' configured" ]]
 }
 
 @test "storage add: replace-existing prompt declines, no change" {
-  # Pre-populate a config
-  jq '.storage = {type: "s3", s3: {endpoint: "http://old", bucket: "old", access_key: "oldkey"}}' \
+  # Pre-populate a named backend "oldk".
+  jq '.storages.oldk = {type: "s3", s3: {endpoint: "http://old", bucket: "old", access_key: "oldkey"}}' \
     "$DBX_CONFIG_DIR/config.json" > "$DBX_CONFIG_DIR/c" \
     && mv "$DBX_CONFIG_DIR/c" "$DBX_CONFIG_DIR/config.json"
 
-  # First prompt is the "Replace?" confirm — pick No
-  run run_wizard "n"
+  # Inputs: the backend name (matches the existing one), then "n" to the
+  # "Storage 'oldk' already exists. Replace?" confirm.
+  run run_wizard "oldk" "n"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "Keeping existing" ]]
 
-  result=$(jq -r '.storage.s3.bucket' "$DBX_CONFIG_DIR/config.json")
+  result=$(jq -r '.storages.oldk.s3.bucket' "$DBX_CONFIG_DIR/config.json")
   [ "$result" = "old" ]
 }
