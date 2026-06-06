@@ -54,6 +54,17 @@
     The "Skip PII scrub gate" checkbox on the Restore view bypasses this entirely — use it sparingly.
   </div>
 
+  <div class="note note--info" style="margin-bottom:18px;">
+    <strong>✨ Let AI draft these rules.</strong> <code class="mono">dbx scrub init</code> matches
+    column <em>names</em>; it misses secrets nested in JSON and in key/value config tables. Open this
+    repo in <a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude Code</a>
+    and run the bundled <code class="mono">restore-prep</code> skill — it scans a restored clone for
+    those, recognizes your framework (Django, Rails, Laravel, Magento, …), and generates an extended
+    scrub manifest <em>plus</em> post-restore cleanup hooks (repoint URLs, disable cron/queues, clear
+    token tables) for you to review.
+    <a href="https://steig.github.io/dbx/restore-prep/" target="_blank" rel="noopener">Learn more →</a>
+  </div>
+
   <template x-if="error">
     <div class="note note--danger" style="margin-bottom:18px; white-space: pre-wrap;" x-text="error"></div>
   </template>

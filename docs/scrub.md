@@ -4,6 +4,9 @@ A declarative manifest of every column that holds PII, plus a check that refuses
 
 This is dbx's recommended path for masking PII at restore time. Hand-written [post-restore hooks](post-restore-hooks.md) still work for everything else, but for PII specifically the manifest gives you something hooks can't: an explicit, machine-readable answer to "what's in this database, and how is each piece being handled?"
 
+!!! tip "Let AI draft and extend the manifest"
+    `dbx scrub init` matches column *names*; it misses secrets nested in JSON and in key/value config tables. The [AI restore-prep skill](restore-prep.md) deep-scans a clone for those and **generates** an extended manifest (plus cleanup hooks) for you to review.
+
 ## Why a manifest
 
 A `scrub-pii.sql` file you hand-edited six months ago is a snapshot of the schema as it was six months ago. The day someone ships `users.recovery_email` or `accounts.tax_id_v2`, that file silently stops being correct. The next restore into staging quietly leaks the new column. There is no error. There is no warning. There is just unmasked PII in an environment that was supposed to be safe.

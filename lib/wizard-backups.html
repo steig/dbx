@@ -22,6 +22,15 @@
     </div>
   </div>
 
+  <div class="note note--info" style="margin-bottom:14px;">
+    <strong>✨ Make a backup safe for staging with AI.</strong> Restore one to a clone, then run the
+    <code class="mono">restore-prep</code> skill in
+    <a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude Code</a> — it scans
+    the clone for secrets/PII (including nested-JSON and config-table secrets the dictionary misses)
+    and generates scrub rules + post-restore cleanup hooks to review.
+    <a href="https://steig.github.io/dbx/restore-prep/" target="_blank" rel="noopener">Learn more →</a>
+  </div>
+
   <div class="toolbar">
     <div class="search">
       <input type="search" x-model="filter"

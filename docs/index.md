@@ -79,6 +79,12 @@ Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them wit
 
     Declarative manifest + schema drift detection + fail-closed restore-time gate. The clone is provably scrubbed or it doesn't exist.
 
+-   :material-robot-outline:{ .lg .middle } **[AI restore prep](restore-prep.md)**
+
+    ---
+
+    A Claude Code skill scans a clone for nested/config-table secrets, recognizes your framework, and generates the scrub manifest + post-restore cleanup hooks for you to review.
+
 -   :material-cloud-upload-outline:{ .lg .middle } **S3 / MinIO / R2**
 
     ---
