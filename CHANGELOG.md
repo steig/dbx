@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-06-06
+
+### Added
+
+- **AI-assisted restore prep (`restore-prep` skill).** A new [Claude Code](https://claude.com/claude-code) skill (`.claude/skills/restore-prep/`) that scans a *restored clone* — never prod — to make it safe for staging. It fingerprints the application framework (Django, Rails, Laravel, Node, Spring/Quartz, WordPress, Magento + commerce, Supabase), recursively deep-scans every JSON/JSONB column, and scans key/value config tables (Magento `core_config_data`, WordPress `wp_options`) — classifying secrets and PII by value-pattern and key-name with **value-free output** (locations and categories, never the secret itself). Those findings inform a generated [PII scrub manifest](https://steig.github.io/dbx/scrub/) and [post-restore cleanup hooks](https://steig.github.io/dbx/post-restore-hooks/) (repoint URLs, disable cron/queues, clear token tables). PostgreSQL (recursive CTE) and MySQL 8 (iterative worklist). Ships a `frameworks.md` playbook of where each stack hides jobs/tokens/config/login, new [docs](https://steig.github.io/dbx/restore-prep/), and AI-scan callouts in the wizard. The skill proposes; the operator reviews and wires the artifacts in. (#101)
+
 ## [0.25.0] - 2026-06-04
 
 ### Fixed
