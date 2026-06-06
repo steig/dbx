@@ -63,6 +63,7 @@ cmd_backup() {
   local database=""
   local verbose=false
   local upload=false
+  local upload_storage=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -73,6 +74,11 @@ cmd_backup() {
         ;;
       --upload)
         upload=true
+        shift
+        ;;
+      --upload=*)
+        upload=true
+        upload_storage="${1#--upload=}"
         shift
         ;;
       -*)
@@ -119,7 +125,9 @@ cmd_backup() {
       log_info "--- $db ---"
       local backup_args=("$host" "$db")
       [[ "$verbose" == "true" ]] && backup_args+=("-v")
-      [[ "$upload" == "true" ]] && backup_args+=("--upload")
+      if [[ "$upload" == "true" ]]; then
+        if [[ -n "$upload_storage" ]]; then backup_args+=("--upload=$upload_storage"); else backup_args+=("--upload"); fi
+      fi
       cmd_backup "${backup_args[@]}" || ((db_errors++)) || true
     done <<< "$databases"
     if [[ $db_errors -gt 0 ]]; then
@@ -215,8 +223,14 @@ cmd_backup() {
   auto_upload=$(get_config_value ".defaults.auto_upload" 2>/dev/null || echo "")
   host_auto_upload=$(get_config_value ".hosts[\"$host\"].auto_upload" 2>/dev/null || echo "")
   if [[ "$upload" == "true" || "$auto_upload" == "true" || "$host_auto_upload" == "true" ]]; then
-    if is_storage_configured; then
-      storage_upload "$completed_file" "$host/$database/$(basename "$completed_file")"
+    # Pick the backend: --upload=<name> wins, else the host's upload_storage,
+    # else the resolved default ("" => storage_upload resolves it).
+    local target_storage="$upload_storage"
+    if [[ -z "$target_storage" ]]; then
+      target_storage=$(get_config_value ".hosts[\"$host\"].upload_storage" 2>/dev/null || echo "")
+    fi
+    if is_storage_configured "$target_storage"; then
+      storage_upload "$completed_file" "$host/$database/$(basename "$completed_file")" "$target_storage"
     else
       log_warn "Storage not configured. Skipping upload."
     fi
@@ -228,6 +242,7 @@ cmd_restore() {
   local target_name=""
   local from_remote=""
   local keep_download=false
+  local restore_storage=""
   local skip_hooks=false
   local hooks_only=false
   local skip_scrub=false
@@ -264,6 +279,14 @@ cmd_restore() {
         ;;
       --keep-download)
         keep_download=true
+        shift
+        ;;
+      --storage)
+        restore_storage="$2"
+        shift 2
+        ;;
+      --storage=*)
+        restore_storage="${1#--storage=}"
         shift
         ;;
       --no-post-restore)
@@ -452,14 +475,14 @@ cmd_restore() {
   # On failure we deliberately leave it so the user can retry.
   local remote_local_file=""
   if [[ -n "$from_remote" ]]; then
-    if ! is_storage_configured; then
+    if ! is_storage_configured "$restore_storage"; then
       die "Cloud storage is not configured. Run 'dbx storage info' for setup help."
     fi
     local resolved
-    resolved=$(storage_resolve_remote_path "$from_remote") \
+    resolved=$(storage_resolve_remote_path "$from_remote" "$restore_storage") \
       || die "Could not resolve remote backup: $from_remote"
     log_step "Fetching remote backup: $resolved"
-    remote_local_file=$(storage_fetch_remote_backup "$resolved") \
+    remote_local_file=$(storage_fetch_remote_backup "$resolved" "$restore_storage") \
       || die "Failed to fetch remote backup: $resolved"
     source="$remote_local_file"
   fi
@@ -614,7 +637,13 @@ cmd_restore() {
   [[ -f "$meta_file" ]] && db_type=$(jq -r '.type // empty' "$meta_file")
   [[ -z "$db_type" && -n "$host" ]] && db_type=$(get_db_type "$host")
   if [[ -z "$db_type" ]]; then
-    if decompress_backup "$backup_file" | head -c 100 | grep -q "PostgreSQL"; then
+    # Capture the decompressed header before matching. Piping straight into
+    # `head` makes the decompressor take SIGPIPE; under `set -o pipefail`
+    # that marks the pipeline failed and would send a real PostgreSQL dump
+    # down the mysql path.
+    local head_sample
+    head_sample=$(decompress_backup "$backup_file" 2>/dev/null | head -c 100 || true)
+    if [[ "$head_sample" == *PostgreSQL* ]]; then
       db_type="postgres"
     else
       db_type="mysql"
@@ -1857,22 +1886,30 @@ cmd_schedule() {
   esac
 }
 
-# Atomically write the .storage.s3 block to $CONFIG_FILE.
-# Args: provider ("AWS S3"|"S3-compatible"), endpoint, region, bucket, prefix, access_key
+# Atomically write a named backend to .storages[<name>] in $CONFIG_FILE, and
+# make it the default (.defaults.storage) if no default is set yet.
+# Secret lives in the vault under s3-secret-key-<name>; the engine's keychain
+# fallback resolves it by name, so no secret_key_cmd is written here.
+# Args: name, endpoint, region, bucket, prefix, access_key
 storage_write_block() {
-  local provider="$1" endpoint="$2" region="$3" bucket="$4" prefix="$5" access_key="$6"
+  local name="$1" endpoint="$2" region="$3" bucket="$4" prefix="$5" access_key="$6"
   local tmp; tmp=$(mktemp)
-  jq --arg ep "$endpoint" --arg rg "$region" --arg bk "$bucket" \
+  jq --arg nm "$name" --arg ep "$endpoint" --arg rg "$region" --arg bk "$bucket" \
      --arg px "$prefix" --arg ak "$access_key" \
-     '.storage = {type: "s3", s3: ({endpoint: $ep, region: $rg, bucket: $bk, prefix: $px, access_key: $ak} | with_entries(select(.value != "")))}' \
+     '.storages[$nm] = {type: "s3", s3: ({endpoint: $ep, region: $rg, bucket: $bk, prefix: $px, access_key: $ak} | with_entries(select(.value != "")))}
+      | (.defaults.storage //= $nm)' \
      "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
   secure_file "$CONFIG_FILE"
 }
 
-# Delete the .storage block. Used by the rollback path.
+# Delete a named backend (rollback path). Clears .defaults.storage if it
+# pointed at the deleted backend.
 storage_delete_block() {
+  local name="$1"
   local tmp; tmp=$(mktemp)
-  jq 'del(.storage)' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  jq --arg nm "$name" \
+     'del(.storages[$nm]) | (if .defaults.storage == $nm then del(.defaults.storage) else . end)' \
+     "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
   secure_file "$CONFIG_FILE"
 }
 
@@ -1881,15 +1918,22 @@ storage_add() {
   require_jq
   require_gum
   require_s3_client
-  # If storage is already configured, ask whether to replace.
-  if is_storage_configured; then
-    local existing
-    existing=$(get_config_value ".storage.s3.endpoint" 2>/dev/null || echo "AWS S3")
-    if ! gum confirm --default=false "Storage is already configured (${existing}). Replace?"; then
-      log_info "Keeping existing storage config."
+
+  # Backend name (multiple named backends are supported). The secret lives in
+  # the vault under s3-secret-key-<name>; rollback/test target this backend.
+  local name
+  name=$(gum input --header "Storage name (e.g. r2, minio, aws):" --placeholder "default")
+  name="${name:-default}"
+  if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+    die "Invalid storage name: '$name' (use letters, digits, '_' or '-')"
+  fi
+  if [[ -n "$(get_config_value ".storages[\"$name\"].type" 2>/dev/null || true)" ]]; then
+    if ! gum confirm --default=false "Storage '$name' already exists. Replace?"; then
+      log_info "Keeping existing '$name'."
       return 0
     fi
   fi
+  local vault_key="s3-secret-key-$name"
 
   # Provider branch
   local provider endpoint region bucket prefix
@@ -1923,7 +1967,7 @@ storage_add() {
 
   # Vault may already contain a secret from a prior run.
   local existing_secret
-  existing_secret=$(keychain_get "s3-secret-key" 2>/dev/null || true)
+  existing_secret=$(keychain_get "$vault_key" 2>/dev/null || true)
   if [[ -n "$existing_secret" ]]; then
     local secret_choice
     secret_choice=$(gum choose --header "Vault already has an S3 secret key." \
@@ -1933,20 +1977,20 @@ storage_add() {
       local new_secret
       new_secret=$(gum input --password --header "New S3 secret key:")
       [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
-      keychain_set "s3-secret-key" "$new_secret"
+      keychain_set "$vault_key" "$new_secret"
     fi
   else
     local new_secret
     new_secret=$(gum input --password --header "S3 secret key:")
     [[ -z "$new_secret" ]] && { log_info "Aborted."; return 0; }
-    keychain_set "s3-secret-key" "$new_secret"
+    keychain_set "$vault_key" "$new_secret"
   fi
 
   while :; do
     log_step "Writing provisional storage config and running round-trip test..."
-    storage_write_block "$provider" "$endpoint" "$region" "$bucket" "$prefix" "$access_key"
+    storage_write_block "$name" "$endpoint" "$region" "$bucket" "$prefix" "$access_key"
 
-    if storage_test_roundtrip; then
+    if storage_test_roundtrip "$name"; then
       log_success "Storage validated."
       break
     fi
@@ -1962,11 +2006,11 @@ storage_add() {
     case "$recover" in
       "Re-enter credentials and retry")
         access_key=$(gum input --header "Access key:" --value "$access_key")
-        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block "$name"; keychain_delete "$vault_key" 2>/dev/null || true; return 1; }
         local new_secret
         new_secret=$(gum input --password --header "S3 secret key:")
-        [[ -z "$new_secret" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
-        keychain_set "s3-secret-key" "$new_secret"
+        [[ -z "$new_secret" ]] && { log_info "Aborted."; storage_delete_block "$name"; keychain_delete "$vault_key" 2>/dev/null || true; return 1; }
+        keychain_set "$vault_key" "$new_secret"
         continue
         ;;
       "Re-enter all storage fields and retry")
@@ -1985,7 +2029,7 @@ storage_add() {
         # users picking "all storage fields" reasonably expect to re-enter it.
         # Secret key stays in the vault — use "Re-enter credentials" for that.
         access_key=$(gum input --header "Access key:" --value "${access_key:-}")
-        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block; keychain_delete "s3-secret-key" 2>/dev/null || true; return 1; }
+        [[ -z "$access_key" ]] && { log_info "Aborted."; storage_delete_block "$name"; keychain_delete "$vault_key" 2>/dev/null || true; return 1; }
         continue
         ;;
       "Save anyway (broken storage kept in config)")
@@ -1994,8 +2038,8 @@ storage_add() {
         ;;
       "Abort and roll back"|"")
         log_info "Rolling back..."
-        storage_delete_block
-        keychain_delete "s3-secret-key" 2>/dev/null || true
+        storage_delete_block "$name"
+        keychain_delete "$vault_key" 2>/dev/null || true
         log_info "Rolled back. Config and vault unchanged."
         return 1
         ;;
@@ -2003,7 +2047,7 @@ storage_add() {
   done
 
   echo
-  log_success "Remote storage configured."
+  log_success "Remote storage '$name' configured."
   if [[ "$provider" == "AWS S3" ]]; then
     log_info "  Provider:  AWS S3 (region: $region)"
   else
@@ -2011,10 +2055,23 @@ storage_add() {
   fi
   log_info "  Bucket:    $bucket"
   log_info "  Prefix:    ${prefix:-(root)}"
+  local _def; _def=$(get_config_value '.defaults.storage' 2>/dev/null || echo "")
+  [[ "$_def" == "$name" ]] && log_info "  Default:   yes (used by --upload / auto-upload)"
   log_info "Try: dbx storage list   (after your first backup uploads)"
 }
 
 cmd_storage() {
+  # --storage <name> may appear anywhere; pull it out, leave the rest as args.
+  local storage_name="" _args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --storage)   storage_name="${2:?--storage needs a value}"; shift 2 ;;
+      --storage=*) storage_name="${1#--storage=}"; shift ;;
+      *)           _args+=("$1"); shift ;;
+    esac
+  done
+  set -- ${_args[@]+"${_args[@]}"}
+
   local action="${1:-info}"
   shift || true
 
@@ -2023,32 +2080,32 @@ cmd_storage() {
       local local_file="${1:-}"
       local remote_path="${2:-}"
 
-      [[ -z "$local_file" ]] && die "Usage: dbx storage upload <local-file> [remote-path]"
+      [[ -z "$local_file" ]] && die "Usage: dbx storage upload [--storage <name>] <local-file> [remote-path]"
       [[ ! -f "$local_file" ]] && die "File not found: $local_file"
 
-      storage_upload "$local_file" "$remote_path"
+      storage_upload "$local_file" "$remote_path" "$storage_name"
       ;;
 
     download)
       local remote_path="${1:-}"
       local local_file="${2:-}"
 
-      [[ -z "$remote_path" ]] && die "Usage: dbx storage download <remote-path> [local-file]"
+      [[ -z "$remote_path" ]] && die "Usage: dbx storage download [--storage <name>] <remote-path> [local-file]"
 
       local result
-      result=$(storage_download "$remote_path" "$local_file")
+      result=$(storage_download "$remote_path" "$local_file" "$storage_name")
       log_info "Downloaded to: $result"
       ;;
 
     list|ls)
       local path="${1:-}"
-      storage_list "$path"
+      storage_list "$path" "$storage_name"
       ;;
 
     delete|rm)
       local remote_path="${1:-}"
-      [[ -z "$remote_path" ]] && die "Usage: dbx storage delete <remote-path>"
-      storage_delete "$remote_path"
+      [[ -z "$remote_path" ]] && die "Usage: dbx storage delete [--storage <name>] <remote-path>"
+      storage_delete "$remote_path" "$storage_name"
       ;;
 
     sync)
@@ -2058,12 +2115,12 @@ cmd_storage() {
 
       case "$direction" in
         upload|up)
-          [[ -z "$host" ]] && die "Usage: dbx storage sync upload <host> [database]"
-          storage_sync_upload "$host" "$database"
+          [[ -z "$host" ]] && die "Usage: dbx storage sync [--storage <name>] upload <host> [database]"
+          storage_sync_upload "$host" "$database" "$storage_name"
           ;;
         download|down)
-          [[ -z "$host" ]] && die "Usage: dbx storage sync download <host> [database]"
-          storage_sync_download "$host" "$database"
+          [[ -z "$host" ]] && die "Usage: dbx storage sync [--storage <name>] download <host> [database]"
+          storage_sync_download "$host" "$database" "$storage_name"
           ;;
         *)
           die "Usage: dbx storage sync <upload|download> <host> [database]"
@@ -2075,12 +2132,12 @@ cmd_storage() {
       storage_add "$@"
       ;;
 
-    info|"")
-      storage_info
+    info|""|backends)
+      storage_info "$storage_name"
       ;;
 
     *)
-      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info, add)"
+      die "Unknown storage action: $action (use: upload, download, list, delete, sync, info, add; add --storage <name> to target a backend)"
       ;;
   esac
 }
