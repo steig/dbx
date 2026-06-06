@@ -256,6 +256,36 @@
         // 'guided' (3-step source→target→confirm wizard). Persisted here
         // so the user's choice survives navigating away + back.
         restoreMode: 'quick',
+
+        // Valid section slugs, used for #hash routing in init() below.
+        views: ['dashboard','backup','restore','backups','runs','config','schedule','vault','scrub','storage','analyze'],
+
+        // Mirror `view` <-> the URL hash so every section has a shareable slug
+        // (#restore, #config, …), the browser back/forward buttons navigate
+        // between sections, and a reload / deep link lands on the right one.
+        // `view` stays the single source of truth: nav clicks AND programmatic
+        // view changes (dashboard quick-links, etc.) both reflect into the hash.
+        init() {
+          const slugOf = () => (window.location.hash || '').replace(/^#/, '');
+          const valid = (s) => this.views.includes(s);
+          const initial = slugOf();
+          if (valid(initial)) {
+            this.view = initial;
+          } else {
+            // Reflect the default slug without adding a spurious history entry.
+            history.replaceState(null, '', '#' + this.view);
+          }
+          // hash -> view (back/forward, manual edits, deep links)
+          window.addEventListener('hashchange', () => {
+            const v = slugOf();
+            if (valid(v) && v !== this.view) this.view = v;
+          });
+          // view -> hash (push, so each navigation is its own history entry)
+          Alpine.effect(() => {
+            const slug = this.view;
+            if (slug && slugOf() !== slug) window.location.hash = slug;
+          });
+        },
       });
     });
   </script>
