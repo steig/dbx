@@ -107,6 +107,18 @@ EOF
   [[ "$output" == *"storage"* || "$output" == *"Storage"* ]]
 }
 
+@test "--from-remote: custom-format (PGDMP) dump detected as postgres, not mysql" {
+  configure_storage
+  # Force the content sniff (no meta .type, unknown host) with a decompressed
+  # header equal to pg_dump's custom-format binary magic "PGDMP" — which the
+  # old text-only sniff (*PostgreSQL*) misclassified as mysql.
+  EXTRA_STUBS='decompress_backup() { printf "PGDMP\000\001\015\000"; }'
+  run restore_subshell --from-remote "prod/users/users_20260510_120000.sql.zst" --name target
+  [ "$status" -eq 0 ]
+  grep -q "pg_restore_backup" "$CALLS_LOG"
+  ! grep -q "mysql_restore_backup" "$CALLS_LOG"
+}
+
 @test "--from-remote with explicit file path downloads via storage_download" {
   configure_storage
 

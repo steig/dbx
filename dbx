@@ -643,7 +643,12 @@ cmd_restore() {
     # down the mysql path.
     local head_sample
     head_sample=$(decompress_backup "$backup_file" 2>/dev/null | head -c 100 || true)
-    if [[ "$head_sample" == *PostgreSQL* ]]; then
+    # pg_dump custom/directory format begins with the binary magic "PGDMP";
+    # plain-format dumps contain the text "PostgreSQL". mysqldump output is SQL
+    # text with neither. Recognize BOTH postgres shapes — dbx writes custom
+    # format by default, so a PGDMP-only sniff (text match) misclassified those
+    # as mysql whenever the host/meta type was unknown (e.g. restore --from-remote).
+    if [[ "$head_sample" == PGDMP* || "$head_sample" == *PostgreSQL* ]]; then
       db_type="postgres"
     else
       db_type="mysql"
