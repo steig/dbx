@@ -2598,7 +2598,7 @@ def make_handler(args):
                 # being DELETED if the form omitted them (e.g., user unchecked
                 # storage.enabled). Keys outside the form-managed list are
                 # preserved verbatim.
-                FORM_MANAGED = {"hosts", "defaults", "storage", "notifications"}
+                FORM_MANAGED = {"hosts", "defaults", "storage", "storages", "notifications"}
                 try:
                     if os.path.isfile(args.config_path):
                         with open(args.config_path) as f:

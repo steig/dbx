@@ -675,6 +675,24 @@ JSON
   [[ "$output" == *"\"schedules\":"* ]]
 }
 
+@test "POST /save persists .storages map + defaults.storage (multi-backend)" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": {}, "storage": { "type": "s3", "s3": { "bucket": "legacyonly" } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{},"defaults":{"storage":"r2"},"storages":{"r2":{"type":"s3","s3":{"bucket":"rb","endpoint":"https://r2"}},"minio":{"type":"s3","s3":{"bucket":"mb"}}}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\":true"* ]]
+  run cat "$WIZ_SCRATCH/config.json"
+  # Named backends + default persisted.
+  [[ "$output" == *"\"r2\""* ]]
+  [[ "$output" == *"\"minio\""* ]]
+  [[ "$output" == *"\"storage\": \"r2\""* ]]
+  # Legacy single block replaced (storages is form-managed too).
+  [[ "$output" != *"legacyonly"* ]]
+}
+
 @test "POST /save with non-object body errors with 400" {
   run curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
     -d '"justastring"' "$(api /save)"
