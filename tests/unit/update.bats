@@ -85,3 +85,21 @@ setup() {
   result=$(maybe_notify_update 2>&1)
   [ -z "$result" ]
 }
+
+# Regression: maybe_notify_update runs as the LAST statement of main(), so its
+# return value becomes `dbx <cmd>`'s exit code. When you're already on the
+# latest release the version_gt comparison is false (1); leaking that made every
+# command exit non-zero once up to date (caught by the LXC auto-updater).
+@test "maybe_notify_update: exits 0 when already on the latest version" {
+  update_check_enabled() { return 0; }   # bats has no TTY; force the check on
+  write_update_cache "$VERSION"          # cache == current => version_gt false
+  maybe_notify_update
+}
+
+@test "maybe_notify_update: exits 0 when a newer version is available" {
+  update_check_enabled() { return 0; }
+  write_update_cache "99.99.99"
+  run maybe_notify_update
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"99.99.99 is available"* ]]
+}
