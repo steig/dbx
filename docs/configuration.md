@@ -124,5 +124,6 @@ These control [build-on-demand custom Postgres images](backup.md#build-on-demand
 | Key | Type | Notes |
 |-----|------|-------|
 | `exclude_data` | array of strings | Tables to dump schema-only (data omitted). |
+| `exclude_dependents` | bool | Postgres only. When `exclude_data` empties a table that other (kept) tables reference by foreign key, those references dangle and the restore fails FK validation. With `exclude_dependents: true`, dbx cascades the exclusion to the referencing tables (transitively) so the dump stays consistent. Default `false` — dbx instead **warns** at backup time, listing each `child → parent` that would dangle. Also settable globally as `defaults.exclude_dependents`. |
 | `parallel_jobs` | int | Passed to `pg_dump --jobs`. |
 | `post_restore` | array | Per-DB [post-restore hooks](post-restore-hooks.md). |
