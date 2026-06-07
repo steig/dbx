@@ -6,6 +6,79 @@
 #
 
 # ============================================================================
+# Referential-integrity guard for exclude_data
+#
+# Excluding a table's data (pg_dump --exclude-table-data) leaves the table
+# empty. If a KEPT table has a foreign key into an excluded one, its rows
+# reference parent rows that no longer exist and the restore fails when the FK
+# is validated. These helpers detect that and (optionally) cascade the
+# exclusion downward so the dump stays referentially consistent.
+# ============================================================================
+
+# Read FK edges ("child<TAB>parent" per line) on stdin; given a newline-
+# separated seed set of excluded tables ($1), echo the transitive closure —
+# the seed plus every table that (directly or transitively) references an
+# excluded one — newline-separated, sorted-unique. Pure; no external I/O.
+fk_exclusion_closure() {
+  local seed="$1"
+  local edges; edges="$(cat)"
+  local set="|" t
+  while IFS= read -r t; do [[ -n "$t" ]] && set="${set}${t}|"; done <<< "$seed"
+  local changed=1 child parent
+  while [[ "$changed" == 1 ]]; do
+    changed=0
+    while IFS=$'\t' read -r child parent; do
+      [[ -z "$child" || -z "$parent" ]] && continue
+      if [[ "$set" == *"|${parent}|"* && "$set" != *"|${child}|"* ]]; then
+        set="${set}${child}|"
+        changed=1
+      fi
+    done <<< "$edges"
+  done
+  printf '%s' "${set#|}" | tr '|' '\n' | grep -v '^$' | sort -u
+}
+
+# Read FK edges on stdin; echo "child<TAB>parent" for each FK whose parent is
+# in the excluded set ($1, newline-separated) but whose child is not — the
+# dangling references a restore would choke on. Pure.
+fk_dangling_pairs() {
+  local seed="$1"
+  local edges; edges="$(cat)"
+  local set="|" t
+  while IFS= read -r t; do [[ -n "$t" ]] && set="${set}${t}|"; done <<< "$seed"
+  local child parent
+  while IFS=$'\t' read -r child parent; do
+    [[ -z "$child" || -z "$parent" ]] && continue
+    if [[ "$set" == *"|${parent}|"* && "$set" != *"|${child}|"* ]]; then
+      printf '%s\t%s\n' "$child" "$parent"
+    fi
+  done <<< "$edges"
+}
+
+# Whether to cascade exclude_data to dependents. Per-database override wins
+# over the global default; both default to false (warn-only).
+get_exclude_dependents() {
+  local host="$1" database="$2" v
+  v=$(get_config_value ".hosts[\"$host\"].databases[\"$database\"].exclude_dependents" 2>/dev/null || echo "")
+  [[ -z "$v" ]] && v=$(get_config_value ".defaults.exclude_dependents" 2>/dev/null || echo "")
+  [[ "$v" == "true" ]] && echo "true" || echo "false"
+}
+
+# Query the source DB's public-schema FK edges via the managed container's
+# psql. Echoes "child<TAB>parent" lines. Requires POSTGRES_CONTAINER running.
+pg_fk_edges() {
+  local db_host="$1" db_port="$2" db_user="$3" db_pass="$4" database="$5"
+  docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+    psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" -tA -F $'\t' -c \
+    "SELECT src.relname, tgt.relname
+       FROM pg_constraint c
+       JOIN pg_class src ON src.oid = c.conrelid
+       JOIN pg_class tgt ON tgt.oid = c.confrelid
+       JOIN pg_namespace n ON n.oid = src.relnamespace
+      WHERE c.contype = 'f' AND n.nspname = 'public';" 2>/dev/null < /dev/null || true
+}
+
+# ============================================================================
 # PostgreSQL Backup
 # ============================================================================
 
@@ -61,6 +134,35 @@ pg_backup() {
   [[ ${#exclude_opts[@]} -gt 0 ]] && log_info "Excluding data from: ${exclude_opts[*]}"
 
   require_container "$POSTGRES_CONTAINER"
+
+  # Referential-integrity guard: a kept table with an FK into an excluded
+  # (emptied) table dangles on restore. Warn by default; with
+  # exclude_dependents, cascade the exclusion downward to keep the dump valid.
+  if [[ ${#exclude_opts[@]} -gt 0 ]]; then
+    local _excluded _edges _closure _added _dangling _t _child _parent
+    _excluded=$(get_excluded_tables "$host" "$database")
+    _edges=$(pg_fk_edges "$db_host" "$db_port" "$db_user" "$db_pass" "$database")
+    if [[ -n "$_edges" ]]; then
+      if [[ "$(get_exclude_dependents "$host" "$database")" == "true" ]]; then
+        _closure=$(printf '%s\n' "$_edges" | fk_exclusion_closure "$_excluded")
+        _added=$(comm -13 <(printf '%s\n' "$_excluded" | sort -u) <(printf '%s\n' "$_closure" | sort -u))
+        if [[ -n "$_added" ]]; then
+          log_info "exclude_dependents: cascading exclusion to dependents: $(echo $_added | tr '\n' ' ')"
+          while IFS= read -r _t; do
+            [[ -n "$_t" ]] && exclude_opts+=(--exclude-table-data="$_t")
+          done <<< "$_added"
+        fi
+      else
+        _dangling=$(printf '%s\n' "$_edges" | fk_dangling_pairs "$_excluded")
+        if [[ -n "$_dangling" ]]; then
+          log_warn "Kept tables reference excluded-data tables — restore may fail FK validation:"
+          while IFS=$'\t' read -r _child _parent; do
+            [[ -n "$_child" ]] && log_warn "  $_child → $_parent (excluded); add $_child to exclude_data or set exclude_dependents:true"
+          done <<< "$_dangling"
+        fi
+      fi
+    fi
+  fi
 
   # Use pg_dump from container, connect to remote, pipe through zstd
   # Capture stderr to check for errors while still allowing verbose progress
