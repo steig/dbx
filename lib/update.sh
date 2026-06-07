@@ -95,4 +95,9 @@ maybe_notify_update() {
   if [[ -n "$latest" ]] && version_gt "$latest" "$VERSION"; then
     log_info "dbx $latest is available (you have $VERSION). Run 'dbx update' to upgrade."
   fi
+
+  # Always succeed: this runs as the last statement of main(), so leaking the
+  # version_gt comparison's exit status (1 when already on the latest release)
+  # would make every dbx command exit non-zero once you're up to date.
+  return 0
 }

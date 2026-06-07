@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-06-06
+
+### Fixed
+
+- **Read-only commands no longer exit non-zero once you're on the latest release.** The update notifier runs as the final statement of `main()`, and when no newer release existed its internal `version_gt` comparison returned 1 — leaking that as the exit code, so `dbx --version`, `dbx help`, etc. exited 1 whenever update checks were enabled and you were up to date. The notifier now always returns 0. (Surfaced by the LXC auto-updater: a successful self-update reported `status=1/FAILURE` because its `dbx --version` step died under `set -e`.)
+
 ## [0.30.0] - 2026-06-06
 
 ### Added
