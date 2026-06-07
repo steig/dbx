@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-06-06
+
+### Added
+
+- **Referential-integrity guard for `exclude_data` (Postgres).** Excluding a table's data leaves it empty; a kept table with a foreign key into it then dangles and the restore fails FK validation. dbx now detects this at backup time and, by default, **warns** with each `child → parent` that would dangle. Set `exclude_dependents: true` (per-database or `defaults.exclude_dependents`) to instead **cascade** the exclusion transitively to referencing tables so the dump stays consistent. The FK query only runs when `exclude_data` is non-empty.
+
 ## [0.29.1] - 2026-06-06
 
 ### Fixed
