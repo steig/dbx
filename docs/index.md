@@ -102,13 +102,15 @@ Raw `pg_dump` and `mysqldump` are fine — until they're not. dbx wraps them wit
 !!! info "Not for you if"
     You need streaming/PITR replication, point-in-time recovery from WAL, or anything beyond logical dumps.
 
-## What's new in v0.10.0
+## What's new
 
+-   **[Persistent wizard](serve.md)** — `dbx serve` runs the full GUI as a long-lived, network-reachable service (great as a tailnet / Cloudflare-Access appliance), not just the one-shot `dbx wizard`.
+-   **[Named storage backends](storage.md#multiple-named-backends)** — hold several S3-compatible targets at once (R2, MinIO, AWS…) under a `storages` map and pick one per backup or restore.
+-   **[Referential-integrity guard](configuration.md)** — excluding a table's data no longer silently breaks restores; dbx warns on dangling foreign keys and can cascade the exclusion (`exclude_dependents`).
+-   **Custom Postgres images on demand** — a restore that needs third-party extensions builds a tailored PG image automatically.
 -   **[PII scrub](scrub.md)** — declarative manifest, schema drift detection, fail-closed restore-time gate. A clone is provably scrubbed or it doesn't exist.
--   **[Browser-based config builder](wizards.md)** via `dbx wizard`, plus an [online static version](config-builder.md) that runs entirely in your browser
--   See the full v0.10.0 release notes on [GitHub](https://github.com/steig/dbx/releases/tag/v0.10.0)
 
-See the full [changelog](https://github.com/steig/dbx/blob/main/CHANGELOG.md) on GitHub.
+See the latest [releases](https://github.com/steig/dbx/releases) and the full [changelog](https://github.com/steig/dbx/blob/main/CHANGELOG.md) on GitHub.
 
 ## Quick install
 
