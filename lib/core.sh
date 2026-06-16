@@ -583,12 +583,6 @@ decrypt_stream() {
   gpg --batch --yes --passphrase "$passphrase" --decrypt -
 }
 
-# Check if file is GPG encrypted
-is_encrypted() {
-  local file="$1"
-  [[ "$file" == *.gpg ]]
-}
-
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -627,17 +621,6 @@ strip_definer() {
       # Pass through unchanged
       cat
       ;;
-  esac
-}
-
-# Decompress from stdin based on extension hint
-decompress_stdin() {
-  local ext="$1"
-  case "$ext" in
-    zst) zstd -d ;;
-    gz)  gunzip ;;
-    sql) cat ;;
-    *)   cat ;;
   esac
 }
 
@@ -897,14 +880,6 @@ secure_file() {
   local file="$1"
   if [[ -f "$file" ]]; then
     chmod 600 "$file"
-  fi
-}
-
-# Ensure secure directory permissions
-secure_dir() {
-  local dir="$1"
-  if [[ -d "$dir" ]]; then
-    chmod 700 "$dir"
   fi
 }
 

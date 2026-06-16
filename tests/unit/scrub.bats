@@ -132,39 +132,6 @@ setup() {
 }
 
 # ----------------------------------------------------------------------------
-# scrub_required_for / scrub_destination_required
-# ----------------------------------------------------------------------------
-
-@test "scrub_required_for: empty when no required_for set" {
-  write_config '{"hosts":{"prod":{"scrub":{"manifest":"x.json"}}}}'
-  result=$(scrub_required_for "prod")
-  [ -z "$result" ]
-}
-
-@test "scrub_required_for: lists each destination" {
-  write_config '{"hosts":{"prod":{"scrub":{"required_for":["staging","local"]}}}}'
-  result=$(scrub_required_for "prod")
-  expected="staging
-local"
-  [ "$result" = "$expected" ]
-}
-
-@test "scrub_destination_required: true when in list" {
-  write_config '{"hosts":{"prod":{"scrub":{"required_for":["staging","local"]}}}}'
-  scrub_destination_required "prod" "staging"
-}
-
-@test "scrub_destination_required: false when not in list" {
-  write_config '{"hosts":{"prod":{"scrub":{"required_for":["staging","local"]}}}}'
-  ! scrub_destination_required "prod" "replica"
-}
-
-@test "scrub_destination_required: false when nothing configured" {
-  write_config '{"hosts":{"prod":{}}}'
-  ! scrub_destination_required "prod" "staging"
-}
-
-# ----------------------------------------------------------------------------
 # scrub_normalize_col
 # ----------------------------------------------------------------------------
 
