@@ -1802,6 +1802,7 @@ cmd_schedule() {
       [[ -z "$database" ]] && die "Usage: dbx schedule add <host> <database> [schedule]"
 
       require_config
+      require_jq
       schedule_add "$host" "$database" "$schedule"
       ;;
 
@@ -1812,6 +1813,7 @@ cmd_schedule() {
       [[ -z "$host" ]] && die "Usage: dbx schedule remove <host> <database>"
       [[ -z "$database" ]] && die "Usage: dbx schedule remove <host> <database>"
 
+      require_jq
       schedule_remove "$host" "$database"
       ;;
 

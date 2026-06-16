@@ -34,6 +34,8 @@ Logs at `~/.local/share/dbx/logs/`.
 
 `dbx schedule add` writes a launchd `.plist` (macOS) or systemd `.timer` + `.service` (Linux user-mode) that runs `dbx schedule run-job <host> <database>` at the configured cadence. The scheduled run inherits your shell `PATH` via `dbx`'s installed location.
 
+`add` and `remove` also mirror the change into `config.schedules[]` (config is canonical — see [below](#declarative-schedules-in-configjson)), so the imperative and declarative views stay in sync: after `dbx schedule add`, `dbx schedule sync` reports no drift. `add` upserts on `host`+`database` (updating `when` in place, preserving `enabled`/`keep`); `remove` drops the matching entry.
+
 `run-job` is internal — it's the action the installed unit invokes, not a command you run by hand. It performs the backup and then, if that schedule carries a `keep` value, applies retention for that pair (`dbx clean <host> <database> --keep <keep>`). With no `keep`, a scheduled run behaves exactly like a plain backup (no pruning).
 
 Notifications fire from inside the scheduled run, so failures show up in Slack/desktop/email even when you're not watching.

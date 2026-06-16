@@ -423,6 +423,39 @@ schedule_keep_for() {
   ' "$CONFIG_FILE" 2>/dev/null
 }
 
+# Upsert a schedule entry into config.schedules[] so the imperative
+# `dbx schedule add` keeps config canonical (config is the source of truth;
+# installed units are derived). Matches on host+database: updates `.when` in
+# place — preserving any `enabled`/`keep` on the existing entry — if the pair
+# is already present, otherwise appends a new {host, database, when}. Atomic
+# write, then re-secures the file. No-op if config.json is absent.
+schedule_config_upsert() {
+  local host="$1" database="$2" when="$3"
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  local tmp; tmp=$(mktemp)
+  jq --arg h "$host" --arg d "$database" --arg w "$when" '
+    .schedules = ((.schedules // []) as $s
+      | if any($s[]; .host == $h and .database == $d)
+        then ($s | map(if .host == $h and .database == $d then .when = $w else . end))
+        else ($s + [{host: $h, database: $d, when: $w}])
+        end)
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
+# Remove a schedule entry (matched on host+database) from config.schedules[].
+# Inverse of schedule_config_upsert; leaves an empty array if it was the last
+# entry. No-op if config.json is absent.
+schedule_config_delete() {
+  local host="$1" database="$2"
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  local tmp; tmp=$(mktemp)
+  jq --arg h "$host" --arg d "$database" '
+    .schedules = ((.schedules // []) | map(select((.host == $h and .database == $d) | not)))
+  ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  secure_file "$CONFIG_FILE"
+}
+
 # Emit one TSV line per installed unit:
 #   host TAB database TAB when
 # Units installed before this feature (no marker) emit "?" for `when`.
@@ -587,6 +620,10 @@ schedule_add() {
     systemd_enable "$job_name"
   fi
 
+  # Mirror into config.schedules[] so config stays the canonical source of
+  # truth (sync reconciles from it). Stores the friendly expression as `.when`.
+  schedule_config_upsert "$host" "$database" "$schedule"
+
   log_info "Schedule: $schedule"
   log_info "Logs: $HOME/.local/share/dbx/logs/"
 }
@@ -605,6 +642,9 @@ schedule_remove() {
   else
     systemd_remove "$job_name"
   fi
+
+  # Keep config canonical: drop the matching entry from config.schedules[].
+  schedule_config_delete "$host" "$database"
 }
 
 schedule_list() {
