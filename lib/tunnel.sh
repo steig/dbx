@@ -97,8 +97,11 @@ create_ssh_tunnel() {
   TUNNEL_REUSED=false
   log_success "Tunnel established (PID: $TUNNEL_PID)"
 
-  # Set trap to cleanup tunnel on exit (only if we created it)
-  trap cleanup_tunnel EXIT INT TERM
+  # Set trap to clean up the tunnel on exit. cleanup_secrets (installed by
+  # setup_security_trap at startup) shares the same EXIT/INT/TERM slots, so
+  # chain it here rather than clobbering it — otherwise a tunneled run would
+  # leave PGPASSWORD/MYSQL_PWD/AWS creds un-unset on exit.
+  trap 'cleanup_tunnel; cleanup_secrets' EXIT INT TERM
 }
 
 cleanup_tunnel() {

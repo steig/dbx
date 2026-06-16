@@ -35,13 +35,6 @@ get_encryption_type() {
   echo "${enc_type:-none}"
 }
 
-# Check if any encryption is enabled
-is_any_encryption_enabled() {
-  local enc_type
-  enc_type=$(get_encryption_type)
-  [[ "$enc_type" != "none" && -n "$enc_type" ]]
-}
-
 # ============================================================================
 # Age Encryption
 # ============================================================================
