@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **Stale managed-container port detection.** When an auto-managed container already exists but is published on a different host port than `DBX_PG_HOST_PORT` / `DBX_MYSQL_HOST_PORT` now request, dbx warns that a container's published port is fixed at `docker run` time and points at `docker rm -f <container>` to recreate it — instead of silently ignoring the override or dying with an opaque daemon error. A failed `docker start` of an existing container now also exits with that recreate hint. Builds on the host-port overrides shipped in 0.26.0. The `-p` mapping is now built by a small unit-tested helper (`dbx_publish_arg`). Thanks @joepetrini (#96).
+
 ## [0.30.1] - 2026-06-06
 
 ### Fixed

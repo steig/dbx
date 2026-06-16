@@ -21,6 +21,50 @@ setup() {
 @test "human_size 1073741824 → 1GB" { [ "$(human_size 1073741824)" = "1GB" ]; }
 
 # ----------------------------------------------------------------------------
+# dbx_publish_arg — docker -p host:container mapping for managed containers
+# ----------------------------------------------------------------------------
+
+@test "dbx_publish_arg defaults host port to the container port when empty" {
+  [ "$(dbx_publish_arg 127.0.0.1 '' 5432)" = "127.0.0.1:5432:5432" ]
+}
+
+@test "dbx_publish_arg uses the override host port when provided" {
+  [ "$(dbx_publish_arg 127.0.0.1 5433 5432)" = "127.0.0.1:5433:5432" ]
+}
+
+@test "dbx_publish_arg keeps the container port fixed for mysql" {
+  [ "$(dbx_publish_arg 127.0.0.1 33070 3306)" = "127.0.0.1:33070:3306" ]
+}
+
+@test "dbx_publish_arg honors a non-loopback bind address" {
+  [ "$(dbx_publish_arg 0.0.0.0 5433 5432)" = "0.0.0.0:5433:5432" ]
+}
+
+# ----------------------------------------------------------------------------
+# dbx_port_mismatch — warn-worthy stale container port?
+# ----------------------------------------------------------------------------
+
+@test "dbx_port_mismatch flags differing known ports" {
+  run dbx_port_mismatch 5432 5433
+  [ "$status" -eq 0 ]
+}
+
+@test "dbx_port_mismatch ignores matching ports" {
+  run dbx_port_mismatch 5433 5433
+  [ "$status" -ne 0 ]
+}
+
+@test "dbx_port_mismatch ignores an unknown current port" {
+  run dbx_port_mismatch "" 5433
+  [ "$status" -ne 0 ]
+}
+
+@test "dbx_port_mismatch ignores an unknown requested port" {
+  run dbx_port_mismatch 5432 ""
+  [ "$status" -ne 0 ]
+}
+
+# ----------------------------------------------------------------------------
 # strip_definer — sed pipeline for MySQL DEFINER clauses
 # ----------------------------------------------------------------------------
 
