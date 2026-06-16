@@ -39,20 +39,6 @@ setup() {
 }
 
 # ----------------------------------------------------------------------------
-# is_any_encryption_enabled
-# ----------------------------------------------------------------------------
-
-@test "is_any_encryption_enabled false when type is none" {
-  write_config '{"defaults":{"encryption_type":"none"}}'
-  ! is_any_encryption_enabled
-}
-
-@test "is_any_encryption_enabled true when type is age" {
-  write_config '{"defaults":{"encryption_type":"age"}}'
-  is_any_encryption_enabled
-}
-
-# ----------------------------------------------------------------------------
 # get_encryption_extension — used to suffix backup filenames
 # ----------------------------------------------------------------------------
 

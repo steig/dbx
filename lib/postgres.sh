@@ -324,7 +324,7 @@ pg_restore_backup() {
   mkdir -p "$tmp_dir"
   chmod 700 "$tmp_dir"
   local tmpfile
-  tmpfile=$(mktemp -p "$tmp_dir")
+  tmpfile=$(mktemp "$tmp_dir/dbx.XXXXXX")
   trap "rm -f '$tmpfile'" RETURN
 
   # Check if file is encrypted
@@ -449,15 +449,6 @@ pg_run_sql_stream() {
 }
 
 # ============================================================================
-# PostgreSQL Backup Verification
-# ============================================================================
-
-# Backward compatibility alias - use verify_backup from core.sh
-pg_verify_backup() {
-  verify_backup "$@"
-}
-
-# ============================================================================
 # PostgreSQL Analysis
 # ============================================================================
 
@@ -561,7 +552,7 @@ pg_restore_backup_streaming() {
   local tmp_dir tmpfile in_container_dump
   tmp_dir="$DATA_DIR/.tmp"
   mkdir -p "$tmp_dir" && chmod 700 "$tmp_dir"
-  tmpfile=$(mktemp -p "$tmp_dir")
+  tmpfile=$(mktemp "$tmp_dir/dbx.XXXXXX")
   # Randomize the in-container path so concurrent --transform/--into
   # restores don't collide on /tmp/restore-stream.dump.
   in_container_dump="/tmp/restore-stream-$$-${RANDOM}.dump"
