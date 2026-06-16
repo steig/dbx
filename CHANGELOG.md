@@ -4,9 +4,17 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-06-16
+
 ### Added
 
 - **Stale managed-container port detection.** When an auto-managed container already exists but is published on a different host port than `DBX_PG_HOST_PORT` / `DBX_MYSQL_HOST_PORT` now request, dbx warns that a container's published port is fixed at `docker run` time and points at `docker rm -f <container>` to recreate it — instead of silently ignoring the override or dying with an opaque daemon error. A failed `docker start` of an existing container now also exits with that recreate hint. Builds on the host-port overrides shipped in 0.26.0. The `-p` mapping is now built by a small unit-tested helper (`dbx_publish_arg`). Thanks @joepetrini (#96).
+
+### Fixed
+
+- **Tunneled runs no longer leak DB/cloud credentials into the environment on exit.** `create_ssh_tunnel` installed its cleanup trap over the same `EXIT`/`INT`/`TERM` slots as the startup `cleanup_secrets` trap, clobbering it — so a backup/restore over an SSH tunnel would exit without unsetting `PGPASSWORD` / `MYSQL_PWD` / AWS credentials. Both handlers now run on exit. (#113)
+- **Concurrent wizard saves can no longer lost-update `config.json` or collide on the temp file.** `dbx serve` is threaded, so two browser tabs (or multiple clients) saving at once could overwrite each other's blocks or clash on the shared `.wizard-tmp` file. Every config read-modify-write now runs under a process-wide lock and writes to a per-writer unique temp file. (#113)
+- **Postgres restore works on systems whose `mktemp` lacks `-p`** (BSD/macOS). The two restore paths now use a portable `mktemp` template. (#113)
 
 ## [0.30.1] - 2026-06-06
 
