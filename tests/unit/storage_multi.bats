@@ -103,3 +103,65 @@ CFG_MULTI='{"storages":{"r2":{"type":"s3","s3":{"bucket":"rb","endpoint":"https:
   write_config '{}'
   ! is_storage_configured
 }
+
+# ----------------------------------------------------------------------------
+# resolve_storage_name — extra edge cases
+# ----------------------------------------------------------------------------
+
+@test "resolve_storage_name: legacy type=none is not configured -> error" {
+  write_config '{"storage":{"type":"none"}}'
+  run resolve_storage_name ''
+  [ "$status" -ne 0 ]
+}
+
+@test "resolve_storage_name: named backends take precedence over a legacy block" {
+  write_config '{"storage":{"type":"s3"},"storages":{"r2":{"type":"s3"}}}'
+  [ "$(resolve_storage_name '')" = "r2" ]
+}
+
+# ----------------------------------------------------------------------------
+# storage_write_block / storage_delete_block — config mutators in `dbx`
+# (sourced via the DBX_NO_AUTO_MAIN gate so the CLI dispatch doesn't run)
+# ----------------------------------------------------------------------------
+
+@test "storage_write_block: creates .storages[name] and sets default when unset" {
+  write_config '{}'
+  DBX_NO_AUTO_MAIN=1 source "$DBX_BIN"
+  storage_write_block "r2" "https://r2.example" "auto" "backups" "prod" "AKIA"
+  [ "$(jq -r '.storages.r2.type' "$CONFIG_FILE")" = "s3" ]
+  [ "$(jq -r '.storages.r2.s3.bucket' "$CONFIG_FILE")" = "backups" ]
+  [ "$(jq -r '.defaults.storage' "$CONFIG_FILE")" = "r2" ]
+}
+
+@test "storage_write_block: does not clobber an existing default" {
+  write_config '{"defaults":{"storage":"aws"},"storages":{"aws":{"type":"s3"}}}'
+  DBX_NO_AUTO_MAIN=1 source "$DBX_BIN"
+  storage_write_block "r2" "https://r2.example" "" "backups" "" "AKIA"
+  [ "$(jq -r '.defaults.storage' "$CONFIG_FILE")" = "aws" ]
+}
+
+@test "storage_write_block: drops empty s3 fields" {
+  write_config '{}'
+  DBX_NO_AUTO_MAIN=1 source "$DBX_BIN"
+  storage_write_block "r2" "https://r2.example" "" "backups" "" "AKIA"
+  [ "$(jq -r '.storages.r2.s3 | has("region")' "$CONFIG_FILE")" = "false" ]
+  [ "$(jq -r '.storages.r2.s3 | has("prefix")' "$CONFIG_FILE")" = "false" ]
+  [ "$(jq -r '.storages.r2.s3.endpoint' "$CONFIG_FILE")" = "https://r2.example" ]
+}
+
+@test "storage_delete_block: removes backend and clears default pointing at it" {
+  write_config '{"defaults":{"storage":"r2"},"storages":{"r2":{"type":"s3"}}}'
+  DBX_NO_AUTO_MAIN=1 source "$DBX_BIN"
+  storage_delete_block "r2"
+  [ "$(jq -r '.storages | has("r2")' "$CONFIG_FILE")" = "false" ]
+  [ "$(jq -r '.defaults | has("storage")' "$CONFIG_FILE")" = "false" ]
+}
+
+@test "storage_delete_block: leaves an unrelated default intact" {
+  write_config '{"defaults":{"storage":"aws"},"storages":{"r2":{"type":"s3"},"aws":{"type":"s3"}}}'
+  DBX_NO_AUTO_MAIN=1 source "$DBX_BIN"
+  storage_delete_block "r2"
+  [ "$(jq -r '.storages | has("r2")' "$CONFIG_FILE")" = "false" ]
+  [ "$(jq -r '.storages | has("aws")' "$CONFIG_FILE")" = "true" ]
+  [ "$(jq -r '.defaults.storage' "$CONFIG_FILE")" = "aws" ]
+}
