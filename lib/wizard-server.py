@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime
+import functools
 import http.server
 import json
 import os
@@ -104,6 +105,23 @@ class Job:
 
 JOBS: dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
+
+# Serializes every read-modify-write of config.json. The server is threaded
+# (one thread per request), so two concurrent saves — two browser tabs, or
+# multiple `dbx serve` clients — could otherwise lost-update each other's
+# blocks. Held across the full read→mutate→atomic-replace in each writer.
+CONFIG_LOCK = threading.Lock()
+
+
+def _config_locked(fn):
+    """Serialize a config.json read-modify-write through CONFIG_LOCK. The whole
+    function runs under the lock; its early-return validation paths release it
+    correctly because the `with` exits on any return."""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        with CONFIG_LOCK:
+            return fn(*a, **kw)
+    return wrapper
 
 
 def parse_args():
@@ -372,6 +390,7 @@ def _validate_manifest_shape(manifest) -> str | None:
     return None
 
 
+@_config_locked
 def write_scrub_manifest(target_path, config_path: str, manifest,
                          host_for_config) -> tuple[bool, str | None]:
     """Atomically write `manifest` to `target_path`. When `host_for_config`
@@ -468,7 +487,7 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
     scrub_block["manifest"] = stored
     block["scrub"] = scrub_block
 
-    cfg_tmp = config_path + ".wizard-tmp"
+    cfg_tmp = f"{config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
     try:
         with open(cfg_tmp, "w") as f:
             json.dump(cfg, f, indent=2)
@@ -484,6 +503,7 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
     return True, None
 
 
+@_config_locked
 def write_exclude_data(config_path: str, host, database, tables) -> tuple[bool, str | None]:
     """Patch config.hosts[host].databases[database].exclude_data with `tables`
     (replace semantics — the Analyze view sends the full desired set each save).
@@ -534,7 +554,7 @@ def write_exclude_data(config_path: str, host, database, tables) -> tuple[bool, 
     else:
         db_block.pop("exclude_data", None)
 
-    cfg_tmp = config_path + ".wizard-tmp"
+    cfg_tmp = f"{config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
     try:
         with open(cfg_tmp, "w") as f:
             json.dump(cfg, f, indent=2)
@@ -1215,6 +1235,7 @@ printf '__CFG__\n%s\n__INST__\n%s\n__PLAN__\n%s\n__END__\n' "$CFG" "$INST" "$PLA
     }
 
 
+@_config_locked
 def write_schedules_block(config_path: str, schedules):
     """Validate and write the schedules[] block into the existing config.json,
     preserving every other key. Returns (ok, error_message). `schedules` is
@@ -1267,7 +1288,7 @@ def write_schedules_block(config_path: str, schedules):
 
     config["schedules"] = cleaned
 
-    tmp_path = config_path + ".wizard-tmp"
+    tmp_path = f"{config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
     try:
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(tmp_path, "w") as f:
@@ -2628,31 +2649,35 @@ def make_handler(args):
                 # storage.enabled). Keys outside the form-managed list are
                 # preserved verbatim.
                 FORM_MANAGED = {"hosts", "defaults", "storage", "storages", "notifications"}
-                try:
-                    if os.path.isfile(args.config_path):
-                        with open(args.config_path) as f:
-                            existing = json.load(f)
-                        if not isinstance(existing, dict):
+                # Serialize the read-merge-write so a concurrent save (another
+                # tab, or another `dbx serve` client) can't lost-update the
+                # block we merged or collide on the tmp file.
+                with CONFIG_LOCK:
+                    try:
+                        if os.path.isfile(args.config_path):
+                            with open(args.config_path) as f:
+                                existing = json.load(f)
+                            if not isinstance(existing, dict):
+                                existing = {}
+                        else:
                             existing = {}
-                    else:
+                    except (OSError, json.JSONDecodeError):
                         existing = {}
-                except (OSError, json.JSONDecodeError):
-                    existing = {}
-                merged = {k: v for k, v in existing.items() if k not in FORM_MANAGED}
-                for k in FORM_MANAGED:
-                    if k in form_cfg:
-                        merged[k] = form_cfg[k]
-                try:
-                    os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
-                    tmp_path = args.config_path + ".wizard-tmp"
-                    with open(tmp_path, "w") as f:
-                        json.dump(merged, f, indent=2)
-                        f.write("\n")
-                    os.chmod(tmp_path, 0o600)
-                    os.replace(tmp_path, args.config_path)
-                except OSError as e:
-                    self._send(500, f"write failed: {e}")
-                    return
+                    merged = {k: v for k, v in existing.items() if k not in FORM_MANAGED}
+                    for k in FORM_MANAGED:
+                        if k in form_cfg:
+                            merged[k] = form_cfg[k]
+                    try:
+                        os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
+                        tmp_path = f"{args.config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
+                        with open(tmp_path, "w") as f:
+                            json.dump(merged, f, indent=2)
+                            f.write("\n")
+                        os.chmod(tmp_path, 0o600)
+                        os.replace(tmp_path, args.config_path)
+                    except OSError as e:
+                        self._send(500, f"write failed: {e}")
+                        return
                 if path == "/save" and args.done_marker:
                     with open(args.done_marker, "w") as f:
                         f.write("ok\n")
