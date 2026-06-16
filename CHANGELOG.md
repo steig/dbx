@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Changed
+
+- **`dbx schedule add` / `remove` now keep `config.schedules[]` in sync.** Config is the canonical source of truth for schedules, but the imperative commands previously only touched the installed launchd/systemd unit — leaving `dbx schedule sync` to report phantom drift after every `add`. `add` now upserts the entry into `config.schedules[]` (matching on `host`+`database`, updating `when` in place and preserving `enabled`/`keep`), and `remove` drops it. Completes the declarative-schedules work. (#39)
+
 ## [0.31.0] - 2026-06-16
 
 ### Added

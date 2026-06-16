@@ -229,3 +229,67 @@ setup() {
   # nochange → nothing for that pair
   ! grep -q 'prod x' "$calls"
 }
+
+# ----------------------------------------------------------------------------
+# schedule_config_upsert / schedule_config_delete — config.schedules[] mirror
+# ----------------------------------------------------------------------------
+
+@test "schedule_config_upsert appends a new entry when the pair is absent" {
+  write_config '{"hosts":{}}'
+  schedule_config_upsert prod app daily@5
+  [ "$(jq -r '.schedules | length' "$CONFIG_FILE")" = "1" ]
+  [ "$(jq -r '.schedules[0] | "\(.host)/\(.database)@\(.when)"' "$CONFIG_FILE")" = "prod/app@daily@5" ]
+}
+
+@test "schedule_config_upsert updates .when in place and preserves enabled/keep" {
+  write_config '{"hosts":{},"schedules":[{"host":"prod","database":"app","when":"daily@5","keep":7,"enabled":false}]}'
+  schedule_config_upsert prod app hourly
+  [ "$(jq -r '.schedules | length' "$CONFIG_FILE")" = "1" ]
+  [ "$(jq -r '.schedules[0].when' "$CONFIG_FILE")" = "hourly" ]
+  [ "$(jq -r '.schedules[0].keep' "$CONFIG_FILE")" = "7" ]
+  [ "$(jq -r '.schedules[0].enabled' "$CONFIG_FILE")" = "false" ]
+}
+
+@test "schedule_config_upsert adds a second distinct pair" {
+  write_config '{"schedules":[{"host":"prod","database":"app","when":"daily@5"}]}'
+  schedule_config_upsert staging x weekly@1:3
+  [ "$(jq -r '.schedules | length' "$CONFIG_FILE")" = "2" ]
+}
+
+@test "schedule_config_delete removes the matching pair, leaves others" {
+  write_config '{"schedules":[{"host":"prod","database":"app","when":"daily@5"},{"host":"prod","database":"billing","when":"daily@6"}]}'
+  schedule_config_delete prod app
+  [ "$(jq -r '.schedules | length' "$CONFIG_FILE")" = "1" ]
+  [ "$(jq -r '.schedules[0].database' "$CONFIG_FILE")" = "billing" ]
+}
+
+@test "schedule_config_delete on a missing pair is a no-op" {
+  write_config '{"schedules":[{"host":"prod","database":"app","when":"daily@5"}]}'
+  schedule_config_delete prod nonesuch
+  [ "$(jq -r '.schedules | length' "$CONFIG_FILE")" = "1" ]
+}
+
+@test "schedule_config_upsert round-trips through schedule_config_read" {
+  write_config '{"hosts":{}}'
+  schedule_config_upsert prod app daily@5
+  schedule_config_read | grep -qE $'^prod\tapp\tdaily@5$'
+}
+
+@test "schedule_add mirrors into config.schedules[] (platform layer mocked)" {
+  write_config '{"hosts":{}}'
+  is_macos()       { return 0; }
+  make_job_name()  { echo "job-$1-$2"; }
+  launchd_create() { :; }
+  launchd_load()   { :; }
+  schedule_add prod app daily@5
+  [ "$(jq -r '.schedules[0] | "\(.host)/\(.database)@\(.when)"' "$CONFIG_FILE")" = "prod/app@daily@5" ]
+}
+
+@test "schedule_remove drops the entry from config.schedules[] (platform layer mocked)" {
+  write_config '{"schedules":[{"host":"prod","database":"app","when":"daily@5"}]}'
+  is_macos()       { return 0; }
+  make_job_name()  { echo "job-$1-$2"; }
+  launchd_remove() { :; }
+  schedule_remove prod app
+  [ "$(jq -r '.schedules | length' "$CONFIG_FILE")" = "0" ]
+}
