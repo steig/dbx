@@ -93,6 +93,39 @@ setup() {
 }
 
 # ----------------------------------------------------------------------------
+# require_writable_host_for_restore_into — prod-source --into gate + opt-out
+# ----------------------------------------------------------------------------
+
+@test "restore-into gate: dies on prod source and points at DBX_ALLOW_PROD_RESTORE" {
+  write_config '{"hosts":{"production":{"type":"postgres","user":"x","safety":"prod"}}}'
+  run require_writable_host_for_restore_into "production"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"safety=prod"* ]]
+  [[ "$output" == *"DBX_ALLOW_PROD_RESTORE=1"* ]]
+}
+
+@test "restore-into gate: DBX_ALLOW_PROD_RESTORE=1 bypasses with a loud warning" {
+  write_config '{"hosts":{"production":{"type":"postgres","user":"x","safety":"prod"}}}'
+  export DBX_ALLOW_PROD_RESTORE=1
+  run require_writable_host_for_restore_into "production"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DBX_ALLOW_PROD_RESTORE=1"* ]]
+}
+
+@test "restore-into gate: succeeds silently on a non-prod source host" {
+  write_config '{"hosts":{"staging":{"type":"postgres","user":"x","safety":"stage"}}}'
+  run require_writable_host_for_restore_into "staging"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "restore-into gate: succeeds silently on empty alias" {
+  write_config '{"hosts":{}}'
+  run require_writable_host_for_restore_into ""
+  [ "$status" -eq 0 ]
+}
+
+# ----------------------------------------------------------------------------
 # dbx config validate — shape check on the safety field
 # ----------------------------------------------------------------------------
 
