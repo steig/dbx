@@ -18,6 +18,7 @@ dbx-restore \- restore a backup into a container or alternate target
 .RB [ \-\-no\-scrub ]
 .RB [ \-\-recreate\-container ]
 .RB [ \-\-keep\-download ]
+.RB [ \-\-with\-globals ]
 .IR source
 .SH DESCRIPTION
 Restore a backup into a local Docker container, an alternate container,
@@ -130,6 +131,27 @@ Required when the existing container has unrelated user data in it
 (see also
 .BR dbx-restore (1)
 "Refusing recreate" error message).
+.TP
+.BR \-\-with\-globals ", " \-\-globals
+(PostgreSQL only) Before the database restore, apply the backup's
+.I <backup>.globals.sql
+sidecar \(em cluster roles, memberships, role-level grants, and
+tablespaces captured by
+.B dbx backup \-\-globals.
+Opt\-in: without this flag the sidecar is ignored; with the flag but no
+sidecar present, a warning is logged and the database\-only restore
+proceeds. The sidecar is applied idempotently (without
+.BR ON_ERROR_STOP ),
+so "role already exists" notices on a re\-restore are expected and
+non\-fatal, and failures applying globals never abort the database
+restore. Incompatible with
+.B \-\-transform
+and
+.BR \-\-into
+(globals are cluster\-scoped; those paths target a single database in a
+container
+.B dbx
+does not manage). Ignored for MySQL / MariaDB.
 .SH EXAMPLES
 Restore the latest
 .I myapp
@@ -159,6 +181,14 @@ Restore from S3:
 .RS
 .nf
 dbx restore s3://prod/users/latest
+.fi
+.RE
+.PP
+Restore a database and recreate the source's roles / grants:
+.PP
+.RS
+.nf
+dbx restore production/myapp/latest --name myapp_review --with-globals
 .fi
 .RE
 .SH ENVIRONMENT

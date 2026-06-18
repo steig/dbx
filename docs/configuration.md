@@ -38,6 +38,7 @@ Validate after edits with `dbx config validate`.
     "compression_level": 3,
     "keep_backups": 10,
     "auto_upload": false,
+    "backup_globals": false,
     "storage": "r2",
     "definer_handling": "strip",
     "build_missing_images": true,
@@ -116,6 +117,7 @@ These control [build-on-demand custom Postgres images](backup.md#build-on-demand
 | `definer_handling` | `"strip"` \| `"keep"` \| `"rewrite"` | MySQL only. Default `strip` removes `DEFINER` clauses so restores don't fail on missing users. |
 | `safety` | `"prod"` \| `"stage"` \| `"local"` | Risk tier for the host (absent defaults to `local`). `prod` opens `dbx query` sessions read-only and blocks `dbx restore --into` from that source. |
 | `scrub` | object | PII scrub settings. `scrub.manifest` is the path to the [scrub](scrub.md) manifest; `scrub.required` (bool) makes restores from this host run the scrub gate. |
+| `backup_globals` | bool | Postgres only. When `true`, [`dbx backup`](backup.md#roles-grants-and-globals) also captures cluster roles/grants/tablespaces into a `<backup>.globals.sql` sidecar (`pg_dumpall --globals-only --no-role-passwords`). Default `false`. Per-host overrides the global `defaults.backup_globals`; the `--globals` / `--no-globals` flag overrides both. Apply at restore with `dbx restore --with-globals`. |
 | `databases` | object | Map of database name → per-DB options. |
 | `post_restore` | array | Host-level [post-restore hooks](post-restore-hooks.md) — run for every DB on this host. |
 

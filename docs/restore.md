@@ -39,8 +39,9 @@ If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>`
 | `--transform PATH` | Pipe the restore byte-stream through a host-side executable before any write to the target. Runs under `env -i` by default (cleaned env, only allowlisted vars + `DBX_TRANSFORM_*` passed through). See [Streaming sanitization](#streaming-sanitization-with-transform) below. |
 | `--transform-inherit-env` | Inherit dbx's full environment into the `--transform` subprocess (legacy behavior). Requires `--transform`. |
 | `--into NAME` | Restore into a named external docker container (e.g. a compose-managed postgres sidecar) instead of the managed `postgres-dbx`. Postgres only. See [Targeting an external container](#targeting-an-external-container-with-into) below. |
+| `--with-globals` (`--globals`) | Apply the backup's `<backup>.globals.sql` sidecar (cluster roles/grants/tablespaces) before the database restore. Postgres only; no-op with a warning if the backup has no sidecar. See [Applying roles, grants, and globals](#applying-roles-grants-and-globals) below. |
 
-`--hooks-only` requires `--name <existing-db>` and is mutually exclusive with `--no-post-restore`, `--from-remote`, `--transform`, and `--into`.
+`--hooks-only` requires `--name <existing-db>` and is mutually exclusive with `--no-post-restore`, `--from-remote`, `--transform`, and `--into`. `--with-globals` is incompatible with `--transform` / `--into` (globals are cluster-scoped; those paths target a single DB in a container dbx doesn't manage).
 
 ## Restoring from cloud storage
 
@@ -137,6 +138,38 @@ dbx restore production/myapp/latest \
 ```
 
 This pipes the backup through `sanitize.sh` and lands the sanitized rows in the named sidecar — no unsanitized bytes on disk, no temp file the operator could read mid-restore, no managed-container clutter. The two flags compose; failures of either step trigger atomic rollback + drop.
+
+## Applying roles, grants, and globals
+
+A restore loads a single database and runs with `--no-owner --no-privileges`, so
+it never recreates the source cluster's roles or grants. When a backup was taken
+with [`--globals`](backup.md#roles-grants-and-globals), it carries a
+`<backup>.globals.sql` sidecar (cluster roles, memberships, role-level grants,
+tablespaces). Pass `--with-globals` to replay it into the target cluster
+**before** the database restore:
+
+```bash
+dbx restore production/myapp/latest --name myapp_review --with-globals
+```
+
+Behavior:
+
+- **Opt-in.** Without `--with-globals` the sidecar is ignored and only the
+  database is restored (the historical behavior). With the flag but no sidecar
+  present, dbx warns and continues with the database-only restore.
+- **Idempotent.** The sidecar is applied with `psql` *without* `ON_ERROR_STOP`,
+  so re-restoring into a cluster that already has the roles produces
+  "role already exists" notices that are **expected and non-fatal** — existing
+  roles are left as-is rather than recreated, and the restore proceeds. Errors
+  from applying globals never abort the database restore.
+- **No passwords.** The sidecar was captured with `--no-role-passwords`, so
+  restored roles have no password set; grant credentials out of band.
+- **Managed container only.** `--with-globals` applies cluster-scoped changes to
+  `postgres-dbx` (or the `DEV_SERVICES_MODE=remote` target). It is rejected with
+  `--transform` / `--into`, which target a database inside a container dbx does
+  not own — applying cluster globals there would mutate that cluster's roles.
+  For those flows, apply the `.globals.sql` sidecar manually.
+- **MySQL/MariaDB:** unsupported; the flag is ignored with a warning.
 
 ## Container version handling
 

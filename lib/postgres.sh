@@ -88,7 +88,10 @@ pg_fk_edges() {
 # .gpg) and a sibling .meta.json is written next to it with size,
 # checksum, and dbx_version.
 # Args: $1=host alias, $2=database name, $3=output base path,
-#       $4=verbose ("true"/"false")
+#       $4=verbose ("true"/"false"),
+#       $5=backup mode ("" full / "schema" / "data"),
+#       $6=globals flag ("true"/"false"/""; "" defers to per-host /
+#          .defaults.backup_globals config)
 # Returns 0 on success, non-zero (and removes $output_file) on failure.
 pg_backup() {
   local host="$1"
@@ -97,6 +100,7 @@ pg_backup() {
   local verbose="${4:-false}"
   # "" (full), "schema" (pre-data + post-data, no rows), or "data" (rows only).
   local backup_mode="${5:-}"
+  local globals_flag="${6:-}"
 
   local start_time
   start_time=$(date +%s)
@@ -177,7 +181,11 @@ pg_backup() {
   # name avoids the `.sql.zst` substring so backup-listing globs skip it.
   local partial_file
   partial_file=$(mktemp "$(dirname "$output_file")/.dbx-partial.XXXXXX")
-  trap "rm -rf '$tmpdir'; rm -f '$partial_file'" RETURN
+  # Globals (roles/grants/tablespaces) go to a sibling partial; published
+  # only if capture is enabled and the dump succeeds. Cleaned on RETURN.
+  local partial_globals
+  partial_globals=$(mktemp "$(dirname "$output_file")/.dbx-globals.XXXXXX")
+  trap "rm -rf '$tmpdir'; rm -f '$partial_file' '$partial_globals'" RETURN
 
   local err_file="$tmpdir/errors.log"
 
@@ -274,6 +282,29 @@ pg_backup() {
     scrub_schema_json=$(printf '%s\n' "$scrub_schema_tsv" | scrub_schema_tsv_to_json 2>/dev/null || echo "{}")
   fi
 
+  # Capture cluster-wide globals (roles/grants/tablespaces) when enabled.
+  # `pg_dumpall --globals-only` connects to the maintenance DB (defaults to
+  # `postgres`); it dumps role definitions cluster-wide, independent of the
+  # single database above. Best-effort: a failure here (e.g. the login role
+  # lacks privileges to read pg_authid) WARNs but does not fail the backup —
+  # the per-database dump is the primary artifact.
+  local globals_captured="false"
+  if [[ "$(pg_globals_backup_enabled "$host" "$globals_flag")" == "true" ]]; then
+    log_info "Capturing globals (roles/grants/tablespaces) via pg_dumpall --globals-only..."
+    if docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+        pg_dumpall --host="$db_host" --port="$db_port" --username="$db_user" \
+        --globals-only --no-role-passwords 2>"$err_file" < /dev/null > "$partial_globals" \
+        && [[ -s "$partial_globals" ]]; then
+      secure_file "$partial_globals"
+      globals_captured="true"
+      [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "globals captured"
+    else
+      log_warn "pg_dumpall --globals-only failed or produced no output; continuing without a globals sidecar."
+      [[ -s "$err_file" ]] && log_warn "  $(head -1 "$err_file")"
+      : > "$partial_globals"
+    fi
+  fi
+
   # Create metadata JSON
   local meta_file="${output_file}.meta.json"
   jq -n \
@@ -289,6 +320,7 @@ pg_backup() {
     --arg backup_mode "${backup_mode:-full}" \
     --argjson src_exts "$src_exts_json" \
     --argjson scrub_schema "$scrub_schema_json" \
+    --argjson globals "$globals_captured" \
     '{
       host: $host,
       database: $database,
@@ -301,17 +333,32 @@ pg_backup() {
       source_major_version: $src_major,
       backup_mode: $backup_mode,
       source_extensions: $src_exts,
-      scrub_schema: $scrub_schema
+      scrub_schema: $scrub_schema,
+      globals: $globals
     }' > "$meta_file"
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
+
+  # Publish the globals sidecar before the canonical backup name appears,
+  # so any consumer that sees the backup also sees its sidecar. Named after
+  # the full backup path (encryption suffix included), matching .meta.json.
+  local globals_file
+  globals_file=$(pg_globals_sidecar_path "$output_file")
+  if [[ "$globals_captured" == "true" ]]; then
+    if ! mv "$partial_globals" "$globals_file"; then
+      log_error "Failed to move globals sidecar into place: $globals_file"
+      rm -f "$meta_file"
+      audit_backup "$host" "$database" "failure"
+      return 1
+    fi
+  fi
 
   # Publish atomically: the canonical name only appears once the data is
   # fully written and its .meta.json is in place. Until this mv, `latest`
   # and the listing globs see nothing under $output_file.
   if ! mv "$partial_file" "$output_file"; then
     log_error "Failed to move backup into place: $output_file"
-    rm -f "$meta_file"
+    rm -f "$meta_file" "$globals_file"
     audit_backup "$host" "$database" "failure"
     return 1
   fi
@@ -324,6 +371,7 @@ pg_backup() {
 
   log_success "Backup complete: $output_file"
   log_info "Checksum (SHA256): $checksum"
+  [[ "$globals_captured" == "true" ]] && log_info "Globals sidecar: $globals_file"
 }
 
 # ============================================================================
@@ -436,14 +484,27 @@ pg_ensure_image_for_backup() {
 # $target_db on the postgres-dbx container. Creates the target
 # database if it doesn't exist. pg_restore warnings are passed through;
 # fatal errors are surfaced.
-# Args: $1=backup file path, $2=target database name
+# Args: $1=backup file path, $2=target database name,
+#       $3=with_globals ("true" to apply the globals sidecar, if present)
 pg_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
+  local with_globals="${3:-false}"
 
   log_step "Restoring PostgreSQL backup to: $target_db"
 
   pg_ensure_image_for_backup "$backup_file" || return 1
+
+  # Resolve the globals sidecar (cluster-wide roles/grants) up front. Only
+  # applied when the user opted in with --with-globals AND the sidecar exists.
+  local globals_file=""
+  if [[ "$with_globals" == "true" ]]; then
+    globals_file=$(pg_globals_sidecar_path "$backup_file")
+    if [[ ! -f "$globals_file" ]]; then
+      log_warn "--with-globals: no globals sidecar found at $(basename "$globals_file"); restoring database only."
+      globals_file=""
+    fi
+  fi
 
   # Decompress backup first (use DATA_DIR to avoid /tmp quota issues)
   local tmp_dir="$DATA_DIR/.tmp"
@@ -496,6 +557,13 @@ pg_restore_backup() {
 
     log_info "Restoring to remote: $pg_host:$pg_port"
 
+    # Apply globals before the database so any tablespaces/roles they define
+    # exist first. Cluster-scoped, so it runs against the maintenance DB.
+    if [[ -n "$globals_file" ]]; then
+      pg_apply_globals "$globals_file" \
+        env PGPASSWORD="$pg_pass" PGHOST="$pg_host" PGPORT="$pg_port"
+    fi
+
     # Create database if it doesn't exist
     PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U postgres \
       -c "CREATE DATABASE \"$target_db\"" 2>/dev/null || true
@@ -513,6 +581,12 @@ pg_restore_backup() {
   else
     require_container "$POSTGRES_CONTAINER"
     restore_target="container $POSTGRES_CONTAINER"
+
+    # Apply globals before the database (see remote branch). psql runs inside
+    # the managed container and reads the sidecar piped on stdin.
+    if [[ -n "$globals_file" ]]; then
+      pg_apply_globals "$globals_file" docker exec -i "$POSTGRES_CONTAINER"
+    fi
 
     # Create database if it doesn't exist
     docker exec "$POSTGRES_CONTAINER" \
@@ -590,6 +664,81 @@ pg_parse_server_version_num() {
   [[ -z "$raw" ]] && { echo "unknown"; return 0; }
   [[ "$raw" =~ ^[0-9]+$ ]] || { echo "unknown"; return 0; }
   echo "$((raw / 10000))"
+}
+
+# ============================================================================
+# PostgreSQL Globals (roles / grants / tablespaces)
+# ============================================================================
+#
+# pg_dump captures a single database but NOT the cluster-wide objects that
+# live outside it: roles (users/groups), their memberships, role-level
+# GRANTs, and tablespace definitions. dbx restores run --no-owner
+# --no-privileges, so without these globals a restored clone has none of the
+# source's users or permissions. When enabled, dbx captures them at backup
+# time with `pg_dumpall --globals-only` into a `<backup>.globals.sql` sidecar
+# and can replay them at restore time behind `--with-globals`.
+
+# Sidecar path for a backup file. The sidecar sits next to the backup under
+# its FULL name (encryption suffix included), exactly like the .meta.json —
+# so a backup `db_20240101.sql.zst.age` gets `db_20240101.sql.zst.age.globals.sql`.
+# Pure string op; no filesystem access.
+# Args: $1 backup file path
+pg_globals_sidecar_path() {
+  printf '%s.globals.sql\n' "$1"
+}
+
+# Decide whether globals capture is on for a backup. Precedence, highest first:
+#   1. explicit flag arg ("true"/"false", empty = unset)
+#   2. per-host  .hosts[$host].backup_globals
+#   3. global    .defaults.backup_globals
+#   4. default: off
+# Echoes "true" or "false".
+# Args: $1 host alias, $2 flag value ("true"/"false"/"")
+pg_globals_backup_enabled() {
+  local host="$1" flag="${2:-}"
+  if [[ "$flag" == "true" || "$flag" == "false" ]]; then
+    echo "$flag"; return 0
+  fi
+  # Query jq directly rather than via get_config_value: the `// empty` in
+  # get_config_value collapses a literal `false` to "" (jq's `//` treats
+  # false as empty), which would make an explicit per-host `false` fall
+  # through to the default. Emit "set:<bool>" only when the key is actually
+  # present, so an explicit `false` is distinguishable from "unset".
+  [[ -f "$CONFIG_FILE" ]] || { echo "false"; return 0; }
+  local v
+  v=$(jq -r \
+    "if (.hosts[\"$host\"] | objects | has(\"backup_globals\"))
+       then \"set:\(.hosts[\"$host\"].backup_globals)\"
+     elif (.defaults | objects | has(\"backup_globals\"))
+       then \"set:\(.defaults.backup_globals)\"
+     else \"unset\" end" "$CONFIG_FILE" 2>/dev/null || echo "unset")
+  [[ "$v" == "set:true" ]] && echo "true" || echo "false"
+}
+
+# Apply a globals sidecar into a postgres cluster, idempotently. The sidecar
+# (`pg_dumpall --globals-only` output) is cluster-scoped SQL — bare CREATE
+# ROLE / CREATE TABLESPACE / GRANT statements — applied via psql against the
+# `postgres` maintenance DB, NOT a single database. It runs WITHOUT
+# ON_ERROR_STOP so that "role already exists" on a re-restore is a warning,
+# not a failure: existing roles are left as-is rather than recreated. Errors
+# and warnings from psql are surfaced (filtered like pg_restore output) but
+# never abort the restore.
+#
+# Args: $1=sidecar SQL file path. Remaining args form the psql invocation
+#       prefix, e.g. `docker exec -i CONTAINER` or `env PGPASSWORD=... `.
+#       The function appends `psql -U postgres -d postgres -f -` and feeds
+#       the sidecar on stdin.
+# Returns 0 always (best-effort, idempotent); logs a warning on hard failure.
+pg_apply_globals() {
+  local sidecar="$1"; shift
+  [[ -f "$sidecar" ]] || { log_warn "Globals sidecar not found: $sidecar"; return 0; }
+  log_info "Applying globals (roles/grants/tablespaces) from $(basename "$sidecar")..."
+  log_info "  (existing roles are kept; \"already exists\" messages are expected and non-fatal)"
+  if ! "$@" psql -U postgres -d postgres -v ON_ERROR_STOP=0 -f - < "$sidecar" \
+        2>&1 | grep -E "^(psql|ERROR|WARNING)" || true; then
+    log_warn "Applying globals reported errors (see above); continuing with the database restore."
+  fi
+  return 0
 }
 
 # Detect the major version of a remote Postgres server. Returns "unknown" on

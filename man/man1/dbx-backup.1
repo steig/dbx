@@ -6,6 +6,7 @@ dbx-backup \- back up a remote PostgreSQL, MySQL, or MariaDB database
 .RB [ \-v | \-\-verbose ]
 .RB [ \-\-upload ]
 .RB [ \-\-schema-only | \-\-data-only ]
+.RB [ \-\-globals | \-\-no\-globals ]
 .I host
 .RI [ database ]
 .SH DESCRIPTION
@@ -66,6 +67,28 @@ MySQL runs only the data pass
 A data-only dump restores cleanly only into a target that already has the
 matching schema. Mutually exclusive with
 .BR \-\-schema-only .
+.TP
+.BR \-\-globals ", " \-\-no\-globals
+(PostgreSQL only) Capture, or force-skip, cluster-wide globals \(em roles,
+memberships, role-level grants, and tablespaces \(em into a
+.I <backup>.globals.sql
+sidecar via
+.BR "pg_dumpall \-\-globals\-only \-\-no\-role\-passwords" .
+A single
+.B pg_dump
+does not include these, and restores run
+.B \-\-no\-owner \-\-no\-privileges,
+so without this a restored clone has none of the source's users or
+permissions. Capture is opt\-in and off by default; these flags override the
+per\-host
+.B backup_globals
+and global
+.B defaults.backup_globals
+config keys for this run. The sidecar omits password hashes
+.RB ( \-\-no\-role\-passwords );
+restored roles have no password. Apply it at restore time with
+.B dbx restore \-\-with\-globals.
+Ignored for MySQL / MariaDB.
 .SH EXAMPLES
 Back up the
 .I myapp
@@ -148,7 +171,19 @@ Sidecar with file size, SHA-256 checksum, source flavor / version,
 backup mode
 .RB ( full / schema / data ),
 .B dbx
-version, and other metadata.
+version, a
+.B globals
+boolean, and other metadata.
+.TP
+.I ~/.data/dbx/<host>/<database>/<file>.globals.sql
+(PostgreSQL,
+.B \-\-globals
+only) Cluster roles / grants / tablespaces captured by
+.BR "pg_dumpall \-\-globals\-only" .
+Created
+.BR "chmod 600" ;
+applied at restore with
+.BR "dbx restore \-\-with\-globals" .
 .SH EXIT STATUS
 .TP
 0

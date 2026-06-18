@@ -7,6 +7,7 @@ dbx backup -v production myapp               # verbose (passes through to pg_dum
 dbx backup --upload production myapp         # backup + push to cloud storage in one shot
 dbx backup --schema-only production myapp    # structure only, no rows
 dbx backup --data-only production myapp      # rows only, no DDL
+dbx backup --globals production myapp        # also capture cluster roles/grants (Postgres)
 ```
 
 Files land at `~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.age|.gpg]`.
@@ -18,8 +19,9 @@ Uploads also happen automatically (without `--upload`) when `defaults.auto_uploa
 For every backup:
 
 - **The dump file** — `pg_dump --format=custom` for Postgres, `mysqldump` (two-pass schema + data) for MySQL, piped through `zstd` and optionally `age`/`gpg`.
-- **A sibling `.meta.json`** with size, timestamp, encryption mode, SHA-256 checksum, source flavor + major version, the backup mode (`full` / `schema` / `data`), and (Postgres) source extensions. Used at restore time to pick the right container image.
+- **A sibling `.meta.json`** with size, timestamp, encryption mode, SHA-256 checksum, source flavor + major version, the backup mode (`full` / `schema` / `data`), (Postgres) source extensions, and a `globals` boolean recording whether a globals sidecar was captured. Used at restore time to pick the right container image.
 - **An audit log line** at `~/.local/share/dbx/audit.log`.
+- **(Postgres, opt-in) a `<backup>.globals.sql` sidecar** with cluster-wide roles, grants, and tablespaces — see [Roles, grants, and globals](#roles-grants-and-globals).
 
 ## Schema-only / data-only
 
@@ -57,6 +59,53 @@ To dump schema only for noisy or huge tables (sessions, caches, logs), set `excl
 ```
 
 `dbx analyze <host> <database>` walks you through this interactively, showing size per table.
+
+## Roles, grants, and globals
+
+A `pg_dump` captures a single database but **not** the cluster-wide objects that
+live outside it: roles (users/groups), their memberships, role-level `GRANT`s,
+and tablespace definitions. dbx also restores with `--no-owner --no-privileges`,
+so by default a restored clone has none of the source's users or permissions —
+a common "my users are gone after restore" surprise.
+
+Postgres backups can optionally capture these globals into a
+`<backup>.globals.sql` sidecar via `pg_dumpall --globals-only`:
+
+```bash
+dbx backup --globals production myapp     # capture globals for this run
+dbx backup --no-globals production myapp  # force-skip even if config enables it
+```
+
+It is **opt-in** (off by default). Turn it on persistently in [config](configuration.md):
+
+```json
+{
+  "defaults": { "backup_globals": true },
+  "hosts": {
+    "production": { "backup_globals": true }
+  }
+}
+```
+
+Precedence (highest first): the `--globals` / `--no-globals` flag →
+`hosts.<host>.backup_globals` → `defaults.backup_globals` → off.
+
+Notes:
+
+- The sidecar is plaintext SQL. dbx captures it with `--no-role-passwords`, so
+  it contains role **definitions and memberships but not password hashes** —
+  restored roles have no password and must be granted one out of band. This
+  both avoids leaking credential material into a clone and removes the
+  superuser privilege `pg_dumpall` would otherwise need to read `pg_authid`.
+- The sidecar is `chmod 600` and travels with the backup: it is uploaded
+  alongside the dump (and its `.meta.json`) and removed by `dbx clean`/retention.
+- Capture is best-effort: if `pg_dumpall --globals-only` fails (e.g. the login
+  role can't read the needed catalogs), dbx logs a warning and the per-database
+  backup still succeeds without a sidecar.
+- Globals are **MySQL/MariaDB-unsupported**; `--globals` is ignored there.
+
+Apply the sidecar at restore time with `dbx restore --with-globals` — see
+[restore](restore.md#applying-roles-grants-and-globals).
 
 ## SSH tunnels
 
