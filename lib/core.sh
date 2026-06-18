@@ -1109,6 +1109,44 @@ verify_backup() {
   fi
 }
 
+# Pre-import checksum gate for restore. Unlike verify_backup (which also
+# prints a metadata table and probes readability for `dbx verify`), this is
+# fail-closed only on a genuine SHA-256 mismatch: a missing .meta.json or a
+# .meta.json without a checksum warns and returns 0, so older/metadata-less
+# backups still restore. Reuses the same digest helper as backup time.
+# Args: $1=path to backup file
+# Returns 0 if the checksum matches or there's nothing to compare against,
+# 1 only on a real mismatch.
+verify_backup_checksum() {
+  local backup_file="$1"
+  local meta_file="${backup_file}.meta.json"
+
+  if [[ ! -f "$meta_file" ]]; then
+    log_warn "No metadata file for $(basename "$backup_file"); skipping checksum verification"
+    return 0
+  fi
+
+  local expected_checksum
+  expected_checksum=$(jq -r '.checksums.sha256 // empty' "$meta_file")
+  if [[ -z "$expected_checksum" ]]; then
+    log_warn "No SHA256 checksum in metadata; skipping checksum verification"
+    return 0
+  fi
+
+  local actual_checksum
+  actual_checksum=$(_sha256_stdin < "$backup_file")
+
+  if [[ "$expected_checksum" == "$actual_checksum" ]]; then
+    log_success "Checksum verified: $actual_checksum"
+    return 0
+  fi
+
+  log_error "Checksum mismatch for $(basename "$backup_file")"
+  log_error "Expected: $expected_checksum"
+  log_error "Actual:   $actual_checksum"
+  return 1
+}
+
 # ============================================================================
 # Image Selection
 # ============================================================================

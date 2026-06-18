@@ -27,6 +27,7 @@ If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>`
 | `--name N` (`-n`) | Target DB name (default: auto-versioned). |
 | `-v`, `--verbose` | Verbose output (surfaces the engine's per-statement output). |
 | `--no-scrub` | Bypass the [PII scrub gate](scrub.md) for this restore. Logs a loud warning and writes a `scrub_bypass` audit record. No effect if no gate is configured. |
+| `--skip-verify` | Skip the pre-import SHA-256 checksum check. By default dbx verifies the resolved backup against its `.meta.json` before importing (after download for `--from-remote`) and aborts on mismatch; a missing or checksum-less `.meta.json` only warns. |
 | `--recreate-container` | Allow destroying user DBs when the container's image doesn't match what the backup needs (see [Container version handling](#container-version-handling)). |
 | `--from-remote PATH` | Fetch the backup from cloud storage instead of looking locally. See below. |
 | `--keep-download` | Keep the locally-staged copy after a `--from-remote` restore succeeds (default: deleted). |

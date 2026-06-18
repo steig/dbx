@@ -246,6 +246,7 @@ cmd_restore() {
   local skip_hooks=false
   local hooks_only=false
   local skip_scrub=false
+  local skip_verify=false
   local transform_script=""
   local transform_inherit_env=false
   local into_container=""
@@ -301,6 +302,11 @@ cmd_restore() {
         # Break-glass: bypass the PII scrub gate (debugging only).
         # Loud warning emitted below where the gate would have fired.
         skip_scrub=true
+        shift
+        ;;
+      --skip-verify)
+        # Bypass the pre-import SHA-256 checksum verification.
+        skip_verify=true
         shift
         ;;
       --transform)
@@ -590,6 +596,19 @@ cmd_restore() {
   fi
 
   [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
+
+  # Verify the backup's SHA-256 against its .meta.json before importing.
+  # For --from-remote this runs after the download (backup_file points at
+  # the fetched file). Non-fatal when no metadata or no checksum is present
+  # (warns); aborts only on a real mismatch.
+  if [[ "$skip_verify" == "false" ]]; then
+    log_step "Verifying backup checksum: $(basename "$backup_file")"
+    if ! verify_backup_checksum "$backup_file"; then
+      die "Backup checksum verification failed for $backup_file. Refusing to import. Pass --skip-verify to override."
+    fi
+  else
+    log_warn "--skip-verify: skipping backup checksum verification for $backup_file"
+  fi
 
   # Per-host safety enforcement. If the SOURCE host (the one this backup
   # came from) is marked safety=prod AND the user is using --into to
