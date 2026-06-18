@@ -107,3 +107,18 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" =~ "host add" ]]
 }
+
+@test "dbx config validate: accepts type=mariadb" {
+  write_config '{"hosts":{"maria":{"type":"mariadb","user":"root"}}}'
+  run "$DBX_BIN" config validate
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"invalid type"* ]]
+}
+
+@test "dbx config validate: flags an unknown type and lists mariadb" {
+  write_config '{"hosts":{"oops":{"type":"sqlite","user":"x"}}}'
+  run "$DBX_BIN" config validate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid type 'sqlite'"* ]]
+  [[ "$output" == *"mariadb"* ]]
+}

@@ -106,7 +106,7 @@ These control [build-on-demand custom Postgres images](backup.md#build-on-demand
 
 | Key | Type | Notes |
 |-----|------|-------|
-| `type` | `"postgres"` \| `"mysql"` | Required. Drives engine adapter selection. |
+| `type` | `"postgres"` \| `"mysql"` \| `"mariadb"` | Required. Drives engine adapter selection. `mariadb` uses the MySQL adapter (server flavor is auto-detected, so `mysql` works for MariaDB too). |
 | `user` | string | DB role used for the dump. |
 | `host`, `port` | string, int | Direct-connect alternatives to `ssh_tunnel`. |
 | `ssh_tunnel.jump_host` | string | `ssh` alias or `user@host`. |

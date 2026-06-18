@@ -1308,10 +1308,10 @@ EOF
         huser=$(jq -r ".hosts[\"$h\"].user // empty" "$CONFIG_FILE")
 
         if [[ -z "$htype" ]]; then
-          log_error "Host '$h': missing 'type' (postgres or mysql)"
+          log_error "Host '$h': missing 'type' (postgres, mysql, or mariadb)"
           ((errors++)) || true
         elif [[ "$htype" != "postgres" && "$htype" != "postgresql" && "$htype" != "mysql" && "$htype" != "mariadb" ]]; then
-          log_error "Host '$h': invalid type '$htype' (use postgres or mysql)"
+          log_error "Host '$h': invalid type '$htype' (use postgres, mysql, or mariadb)"
           ((errors++)) || true
         fi
 
@@ -2721,7 +2721,7 @@ host_add() {
     break
   done
 
-  new_type=$(gum choose --header "Database type:" "postgres" "mysql")
+  new_type=$(gum choose --header "Database type:" "postgres" "mysql" "mariadb")
   [[ -z "$new_type" ]] && { log_info "Aborted."; return 0; }
 
   new_user=$(gum input --header "Database user:" --placeholder "postgres")
