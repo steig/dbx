@@ -28,9 +28,15 @@ import threading
 import urllib.parse
 
 
-# host/db identifier shape — kept literal-translated from host_alias_valid in
-# the bash side (tests/unit/host_add.bats checks dots/dashes/underscores).
+# Database / table / backup-dir identifier shape. Allows a dot for
+# schema-qualified Postgres tables and caps length to keep argv + audit-log
+# rows bounded. NOT for host aliases — those use HOST_ALIAS_RE below.
 IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Host-alias shape — kept byte-for-byte in sync with host_alias_valid in the
+# bash side (lib/core.sh). No dots (aliases become jq paths + dir names) and
+# no length cap, matching the CLI exactly so an alias the wizard accepts is
+# never rejected by `dbx host add`. tests/unit/alias_validation.bats guards this.
+HOST_ALIAS_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 # Target-name shape used by --name. dbx itself only allows the same characters.
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # Source shape: `<host>/<db>/latest` or `<host>/<db>/<filename>`.
@@ -408,7 +414,7 @@ def write_scrub_manifest(target_path, config_path: str, manifest,
     # the manifest first and then rejected a bad host alias, which left
     # an orphaned file the user was told didn't save.
     if host_for_config is not None and host_for_config != "":
-        if not isinstance(host_for_config, str) or not IDENT_RE.match(host_for_config):
+        if not isinstance(host_for_config, str) or not HOST_ALIAS_RE.match(host_for_config):
             return False, "host alias has invalid characters"
 
     config_dir = os.path.realpath(os.path.dirname(config_path))
@@ -511,7 +517,7 @@ def write_exclude_data(config_path: str, host, database, tables) -> tuple[bool, 
     Form view only writes exclude_data when non-empty. The host + database must
     already exist in config; the Analyze pickers only offer configured pairs, so
     a missing one is a real error rather than something to silently create."""
-    if not isinstance(host, str) or not IDENT_RE.match(host):
+    if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
         return False, "host must match the alias shape"
     if not isinstance(database, str) or not IDENT_RE.match(database):
         return False, "database must match the db-name shape"
@@ -1252,7 +1258,7 @@ def write_schedules_block(config_path: str, schedules):
         host = s.get("host")
         database = s.get("database")
         when = s.get("when")
-        if not isinstance(host, str) or not IDENT_RE.match(host):
+        if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
             return False, f"schedules[{i}].host must match the host-alias shape"
         if not isinstance(database, str) or not IDENT_RE.match(database):
             return False, f"schedules[{i}].database must match the db-name shape"
@@ -2222,7 +2228,7 @@ def make_handler(args):
         host = body.get("host")
         if not isinstance(host, str) or not host:
             return None, "host is required"
-        if not IDENT_RE.match(host):
+        if not HOST_ALIAS_RE.match(host):
             return None, "host has invalid characters"
         if host not in configured_hosts:
             return None, f"host '{host}' is not configured (add it in the Config view)"
@@ -2596,7 +2602,7 @@ def make_handler(args):
             if path == "/api/scrub/manifest":
                 qs = parse_query(self.path)
                 host = (qs.get("host", [""]) or [""])[0]
-                if not host or not IDENT_RE.match(host):
+                if not host or not HOST_ALIAS_RE.match(host):
                     send_json(self, 400, {"error": "host is required and must match the alias shape"})
                     return
                 manifest, resolved, err = read_scrub_manifest(args.config_path, host)
@@ -2767,7 +2773,7 @@ def make_handler(args):
                 if not isinstance(host, str) or not host:
                     send_json(self, 400, {"error": "host is required"})
                     return
-                if not IDENT_RE.match(host):
+                if not HOST_ALIAS_RE.match(host):
                     send_json(self, 400, {"error": "host has invalid characters"})
                     return
                 configured = list_configured_hosts()
@@ -3035,7 +3041,7 @@ def make_handler(args):
                     return
                 host = body.get("host")
                 database = body.get("database")
-                if not isinstance(host, str) or not IDENT_RE.match(host):
+                if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
                     if host not in ("local", "localhost"):
                         send_json(self, 400, {"error": "host must match the alias shape or be 'local'"})
                         return
@@ -3146,7 +3152,7 @@ def make_handler(args):
                     return
                 host = body.get("host")
                 database = body.get("database")
-                if not isinstance(host, str) or not IDENT_RE.match(host):
+                if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
                     send_json(self, 400, {"error": "host must match the alias shape"})
                     return
                 if not isinstance(database, str) or not IDENT_RE.match(database):
