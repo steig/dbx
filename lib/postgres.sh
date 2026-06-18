@@ -109,9 +109,6 @@ pg_backup() {
   # Warn about plaintext passwords
   warn_plaintext_password "$host"
 
-  local jobs
-  jobs=$(get_parallel_jobs "$host" "$database")
-
   # Build exclude options
   local exclude_opts=()
   while IFS= read -r table; do
