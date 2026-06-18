@@ -95,6 +95,8 @@ pg_backup() {
   local database="$2"
   local output_file="$3"
   local verbose="${4:-false}"
+  # "" (full), "schema" (pre-data + post-data, no rows), or "data" (rows only).
+  local backup_mode="${5:-}"
 
   local start_time
   start_time=$(date +%s)
@@ -188,6 +190,13 @@ pg_backup() {
     --compress=0
   )
   [[ "$verbose" == "true" ]] && pg_opts+=(--verbose)
+  # --schema-only / --data-only select pg_dump sections. pre-data+post-data
+  # together cover the full schema (table defs, indexes, constraints) with
+  # no rows; data is the COPY/INSERT payload only.
+  case "$backup_mode" in
+    schema) pg_opts+=(--section=pre-data --section=post-data) ;;
+    data)   pg_opts+=(--section=data) ;;
+  esac
   pg_opts+=("${exclude_opts[@]}")
 
   # Get compression level from config
@@ -277,6 +286,7 @@ pg_backup() {
     --arg dbx_version "${VERSION:-unknown}" \
     --arg src_flavor "postgres" \
     --arg src_major "$src_major" \
+    --arg backup_mode "${backup_mode:-full}" \
     --argjson src_exts "$src_exts_json" \
     --argjson scrub_schema "$scrub_schema_json" \
     '{
@@ -289,6 +299,7 @@ pg_backup() {
       dbx_version: $dbx_version,
       source_flavor: $src_flavor,
       source_major_version: $src_major,
+      backup_mode: $backup_mode,
       source_extensions: $src_exts,
       scrub_schema: $scrub_schema
     }' > "$meta_file"

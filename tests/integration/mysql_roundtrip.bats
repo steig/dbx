@@ -76,6 +76,52 @@ teardown() {
   echo "$output" | grep -qF "$real_name"
 }
 
+@test "mysql: --schema-only restores tables with zero rows (#129)" {
+  seed_mysql_db "$TEST_DB" "CREATE TABLE widgets(id int PRIMARY KEY, name text);
+  INSERT INTO widgets VALUES (1,'a'),(2,'b'),(3,'c');"
+
+  dbx_run backup local-mysql "$TEST_DB" --schema-only
+  [ "$status" -eq 0 ]
+
+  local backup_file meta
+  backup_file=$(ls "$DBX_DATA_DIR/local-mysql/$TEST_DB"/*.sql.zst | head -1)
+  meta="${backup_file}.meta.json"
+  [ "$(jq -r .backup_mode "$meta")" = "schema" ]
+
+  # Artifact has the table definition but no INSERTs.
+  zstd -dc "$backup_file" | grep -q "CREATE TABLE"
+  ! zstd -dc "$backup_file" | grep -q "INSERT INTO"
+
+  dbx_run restore "local-mysql/$TEST_DB/latest" --name "$RESTORE_DB"
+  [ "$status" -eq 0 ]
+
+  local rows
+  rows=$(mysql_row_count "$RESTORE_DB" "widgets")
+  [ "$rows" = "0" ]
+}
+
+@test "mysql: --data-only artifact carries INSERTs, no CREATE TABLE (#129)" {
+  seed_mysql_db "$TEST_DB" "CREATE TABLE widgets(id int PRIMARY KEY, name text);
+  INSERT INTO widgets VALUES (1,'a'),(2,'b'),(3,'c');"
+
+  dbx_run backup local-mysql "$TEST_DB" --data-only
+  [ "$status" -eq 0 ]
+
+  local backup_file meta
+  backup_file=$(ls "$DBX_DATA_DIR/local-mysql/$TEST_DB"/*.sql.zst | head -1)
+  meta="${backup_file}.meta.json"
+  [ "$(jq -r .backup_mode "$meta")" = "data" ]
+
+  zstd -dc "$backup_file" | grep -q "INSERT INTO"
+  ! zstd -dc "$backup_file" | grep -q "CREATE TABLE"
+}
+
+@test "mysql: --schema-only and --data-only are mutually exclusive (#129)" {
+  dbx_run backup local-mysql "$TEST_DB" --schema-only --data-only
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -qi "mutually exclusive"
+}
+
 @test "mysql: mariadb source → backup uses mariadb image and writes mariadb flavor" {
   ensure_mariadb_source
 

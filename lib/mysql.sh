@@ -38,12 +38,15 @@ mysql_stderr_filter() {
 # sibling .meta.json with size, checksum, dbx_version, and
 # `type: "mysql"`.
 # Args: $1=host alias, $2=database name, $3=output base path,
-#       $4=verbose ("true"/"false")
+#       $4=verbose ("true"/"false"), $5=backup mode
+#       ("" full, "schema" schema-only, "data" data-only)
 mysql_backup() {
   local host="$1"
   local database="$2"
   local output_file="$3"
   local verbose="${4:-false}"
+  # "" (full = both passes), "schema" (pass 1 only), or "data" (pass 2 only).
+  local backup_mode="${5:-}"
 
   local start_time
   start_time=$(date +%s)
@@ -154,7 +157,10 @@ mysql_backup() {
   docker cp "$cred_file" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
   docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
 
-  # Pass 1: Schema for ALL tables (including excluded ones)
+  # Pass 1: Schema for ALL tables (including excluded ones).
+  # Skipped entirely for --data-only (leaves an empty schema.sql).
+  : > "$tmpdir/schema.sql"
+  if [[ "$backup_mode" != "data" ]]; then
   log_info "Dumping schema (tables, views, routines, triggers)..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (schema pass) started"
   # When verbose, tee mysqldump's stderr live to the user's terminal in
@@ -201,6 +207,7 @@ mysql_backup() {
       die "Schema dump failed"
     fi
   fi
+  fi
 
   # ALWAYS surface mysqldump's stderr (even on exit 0), filtering only the
   # cosmetic password warning. mysqldump SILENTLY SKIPS tables the backup
@@ -229,16 +236,21 @@ mysql_backup() {
       | sed 's/^/  /' \
       >&2 || true
   }
-  _dbx_mysqldump_surface_warnings "schema pass" "$err_file"
+  if [[ "$backup_mode" != "data" ]]; then
+    _dbx_mysqldump_surface_warnings "schema pass" "$err_file"
 
-  if [[ ! -s "$tmpdir/schema.sql" ]]; then
-    cat "$err_file" >&2
-    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
-    audit_backup "$host" "$database" "failure"
-    die "Schema dump produced empty output - check connection and permissions"
+    if [[ ! -s "$tmpdir/schema.sql" ]]; then
+      cat "$err_file" >&2
+      docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
+      audit_backup "$host" "$database" "failure"
+      die "Schema dump produced empty output - check connection and permissions"
+    fi
   fi
 
-  # Pass 2: Data for non-excluded tables
+  # Pass 2: Data for non-excluded tables.
+  # Skipped entirely for --schema-only (leaves an empty data.sql).
+  : > "$tmpdir/data.sql"
+  if [[ "$backup_mode" != "schema" ]]; then
   log_info "Dumping data..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (data pass) started"
   local ignore_opts=()
@@ -282,6 +294,7 @@ mysql_backup() {
     fi
   fi
   _dbx_mysqldump_surface_warnings "data pass" "$err_file"
+  fi
 
   # Clean up credential file in container
   docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
@@ -349,6 +362,7 @@ mysql_backup() {
     --arg src_flavor "$flavor" \
     --arg src_major "$src_major" \
     --arg src_minor "$src_minor" \
+    --arg backup_mode "${backup_mode:-full}" \
     --argjson scrub_schema "$scrub_schema_json" \
     '{
       host: $host,
@@ -362,6 +376,7 @@ mysql_backup() {
       source_flavor: $src_flavor,
       source_major_version: $src_major,
       source_minor_version: $src_minor,
+      backup_mode: $backup_mode,
       source_extensions: [],
       scrub_schema: $scrub_schema
     }' > "$meta_file"

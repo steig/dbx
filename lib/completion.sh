@@ -75,7 +75,7 @@ _dbx_subactions() {
 _dbx_flags() {
   case "$1" in
     backup)
-      printf '%s\n' --verbose --upload ;;
+      printf '%s\n' --verbose --upload --schema-only --data-only ;;
     restore)
       printf '%s\n' \
         --name --no-post-restore --hooks-only --no-scrub \

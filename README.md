@@ -111,7 +111,7 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 
 | Command | Description |
 |---------|-------------|
-| `dbx backup [-v] [--upload] <host> [database]` | Back up one DB or every DB on a host |
+| `dbx backup [-v] [--upload] [--schema-only \| --data-only] <host> [database]` | Back up one DB or every DB on a host; `--schema-only` dumps structure with no rows, `--data-only` dumps rows with no DDL (mutually exclusive) |
 | `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download] [--no-post-restore \| --hooks-only] [--transform PATH] [--into NAME]` | Restore to a local container; `--from-remote` (or `s3://...`) pulls straight from cloud storage; `--no-post-restore` skips configured hooks; `--hooks-only --name X` re-runs hooks against an existing DB; `--transform PATH` pipes the restore stream through a host script (streaming sanitize, atomic on postgres); `--into NAME` targets a named running container instead of the managed postgres-dbx (postgres only) |
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
 | `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
