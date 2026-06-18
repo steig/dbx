@@ -301,6 +301,29 @@ require_writable_host() {
   fi
 }
 
+# Safety gate specifically for `restore --into` when the SOURCE backup comes from a
+# prod-flagged host. By default this refuses — raw production data flowing into a local
+# sidecar is exactly what safety=prod guards against. DBX_ALLOW_PROD_RESTORE=1 is an
+# explicit, loud opt-out for acknowledged dev workflows (e.g. boring sidecars): it
+# bypasses ONLY this gate and leaves every other prod protection intact (read-only
+# transactions, the post-restore-hook / scrub-apply refusals still go through
+# require_writable_host). Args: $1 = source host alias.
+require_writable_host_for_restore_into() {
+  local alias="${1:-}"
+  [[ -z "$alias" ]] && return 0
+  host_exists "$alias" || return 0
+  [[ "$(host_safety "$alias")" != "prod" ]] && return 0
+  if [[ "${DBX_ALLOW_PROD_RESTORE:-}" == "1" ]]; then
+    log_warn "DBX_ALLOW_PROD_RESTORE=1 — restoring prod-source backup from '$alias' into a local container."
+    log_warn "  Production data may contain unsanitized PII; keep the target container local and ephemeral."
+    return 0
+  fi
+  die "Refusing restore --into from prod-source backup (host '$alias', safety=prod).
+This guards against raw production data landing in a local container. To allow it
+intentionally, set DBX_ALLOW_PROD_RESTORE=1 (keeps the host's other prod protections),
+or remove the safety flag for '$alias' in config.json."
+}
+
 # ============================================================================
 # Keychain/Vault Functions (cross-platform credential storage)
 # ============================================================================

@@ -401,9 +401,7 @@ cmd_restore() {
         _early_host="${_early_host%%/*}"
       fi
     fi
-    if [[ -n "$_early_host" ]] && host_exists "$_early_host"; then
-      require_writable_host "$_early_host" "restore --into from prod-source backup"
-    fi
+    require_writable_host_for_restore_into "$_early_host"
   fi
 
   require_docker
@@ -599,8 +597,8 @@ cmd_restore() {
   # where a prod-source restore can mutate a live DB the operator might
   # not realize is also prod. Plain restores (no --into) land in the
   # managed postgres-dbx / mysql-dbx and are fine — those are dev clones.
-  if [[ -n "$into_container" && -n "$host" ]] && host_exists "$host"; then
-    require_writable_host "$host" "restore --into from prod-source backup"
+  if [[ -n "$into_container" && -n "$host" ]]; then
+    require_writable_host_for_restore_into "$host"
   fi
 
   # Determine target database name
