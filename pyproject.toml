@@ -1,0 +1,30 @@
+# Ruff configuration for dbx's Python (currently only lib/wizard-server.py, the
+# hand-rolled stdlib HTTP server behind `dbx wizard` / `dbx serve`).
+#
+# Scope is intentionally narrow: lint for real bugs and dead code, not style.
+# The default ruff rule set (Pyflakes `F` + a curated slice of pycodestyle `E`)
+# already passes clean on wizard-server.py and catches the things that actually
+# bite a long-lived network-facing server: unused imports/variables, redefined
+# names, f-strings without placeholders, mutable-default gotchas, etc.
+#
+# We deliberately do NOT run `ruff format --check` in CI. The file is
+# hand-formatted (aligned argparse blocks, deliberate comment spacing); ruff's
+# formatter would rewrite ~1/3 of a 3.3k-line security-sensitive file with
+# purely cosmetic, semantics-preserving changes. That churn buries real diffs
+# and `git blame` for no correctness gain, which is the opposite of this check's
+# intent. `ruff check` is the value; formatting is left to the author.
+
+[tool.ruff]
+# Only the wizard server is Python today; this keeps ruff fast and predictable
+# if stray .py files ever land elsewhere in the tree.
+include = ["lib/wizard-server.py"]
+target-version = "py39"  # must import on stock macOS python3 (3.9); see file header
+
+[tool.ruff.lint]
+# Default selection (F + E) — bug-catchers and basic correctness. No opt-in to
+# import-sorting (I), naming (N), or other style rulesets that would only
+# generate churn on this hand-written module.
+select = ["E", "F"]
+# E501 (line too long) is style, not a bug, and several long help/URL strings
+# here are intentional; we don't enforce a line length.
+ignore = ["E501"]
