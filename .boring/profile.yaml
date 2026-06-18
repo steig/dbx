@@ -1,0 +1,49 @@
+profile_version: "1"
+name: dbx
+
+# dbx is a pure-bash CLI. The `node` preset gives us a Debian base with
+# Claude Code preinstalled + passwordless sudo; the actual dbx toolchain is
+# apt-installed in `setup:` below. (No preset is bash-shaped, and node is the
+# leanest one that still bakes in the in-container agent.)
+preset: node
+
+# The repo is bind-mounted at /workspace automatically. Run dbx in place with
+# `./dbx help` — its LIB_DIR resolves to ./lib next to the script.
+
+setup:
+  # dbx's runtime + test dependencies. age is only needed for the encrypted
+  # backup paths and the integration suite; harmless to have for unit work.
+  - sudo apt-get update
+  - sudo apt-get install -y jq zstd shellcheck bats age
+  # Smoke-check the fast loop so a broken container fails at `boring open`,
+  # not on your first command.
+  - shellcheck -S error dbx lib/*.sh
+  - bash -n dbx && for f in lib/*.sh; do bash -n "$f"; done
+  - bats tests/unit/
+
+guardrails:
+  # dbx releases from main; never let the agent (or a fat-fingered human) push there.
+  forbid_branches: [main]
+  forbid_commands:
+    - "gh pr merge"
+    - "gh release"
+  allowed_claude_tools: [read, edit, grep, glob, bash]
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: integration tests + running dbx for real.
+#
+# dbx drives the *host* Docker daemon to spin postgres/mysql containers, so a
+# dev container can only do this via docker-outside-of-docker: mount the host
+# socket and install the docker CLI. This weakens the isolation boring gives
+# you (the in-container agent can now reach every container on your host) — so
+# it's opt-in. Uncomment this block, then re-run `boring open .`.
+#
+# mounts:
+#   - /var/run/docker.sock:/var/run/docker.sock
+#
+# Append to setup: above (don't make a second `setup:` key):
+#   - sudo apt-get install -y docker.io
+#   # DooD permission fix: align in-container access to the mounted socket.
+#   - sudo chmod 666 /var/run/docker.sock
+#   - bats tests/integration/
+# ---------------------------------------------------------------------------
