@@ -10,3 +10,8 @@ site/
 # Claude Code local state
 .claude/settings.local.json
 .claude/worktrees/
+
+# boring (dev container) generated artifacts — regenerated from .boring/profile.yaml,
+# contain absolute host paths; never commit
+.devcontainer/
+.boring/codegen/

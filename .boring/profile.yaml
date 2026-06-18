@@ -7,14 +7,19 @@ name: dbx
 # leanest one that still bakes in the in-container agent.)
 preset: node
 
+# 0.12.1 requires the key even when there are no sidecars; dbx's own
+# integration tests spin their containers via the host docker daemon, not here.
+services: []
+
 # The repo is bind-mounted at /workspace automatically. Run dbx in place with
 # `./dbx help` — its LIB_DIR resolves to ./lib next to the script.
 
 setup:
   # dbx's runtime + test dependencies. age is only needed for the encrypted
-  # backup paths and the integration suite; harmless to have for unit work.
+  # backup paths; python3 is needed by the wizard-server unit tests (they bind
+  # a free port + drive `dbx serve`) — the slim node image lacks it, unlike CI.
   - sudo apt-get update
-  - sudo apt-get install -y jq zstd shellcheck bats age
+  - sudo apt-get install -y jq zstd shellcheck bats age python3
   # Smoke-check the fast loop so a broken container fails at `boring open`,
   # not on your first command.
   - shellcheck -S error dbx lib/*.sh
@@ -26,8 +31,8 @@ guardrails:
   forbid_branches: [main]
   forbid_commands:
     - "gh pr merge"
-    - "gh release"
-  allowed_claude_tools: [read, edit, grep, glob, bash]
+    - "gh release create"
+  allowed_tools: [read, write, edit, grep, glob, bash]
 
 # ---------------------------------------------------------------------------
 # OPTIONAL: integration tests + running dbx for real.
