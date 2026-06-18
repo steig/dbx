@@ -291,25 +291,35 @@ mysql_backup() {
   comp_level=$(get_config_value ".defaults.compression_level" 2>/dev/null || echo "3")
   [[ ! "$comp_level" =~ ^[0-9]+$ ]] && comp_level=3
 
-  # Combine, compress, and optionally encrypt
+  # Combine, compress, and optionally encrypt.
+  # Atomic write: build the artifact in a sibling temp file in the SAME
+  # directory and mv it onto $output_file LAST (after .meta.json), so the
+  # canonical name only ever appears once fully written. A kill/disk-full
+  # mid-stream leaves the temp behind (removed by the RETURN trap), never
+  # a truncated backup under the name that `latest` would select. The temp
+  # name avoids the `.sql.zst` substring so backup-listing globs skip it.
+  local partial_file
+  partial_file=$(mktemp "$(dirname "$output_file")/.dbx-partial.XXXXXX")
+  trap "rm -rf '$tmpdir'; rm -f '$partial_file'; docker exec '$MYSQL_CONTAINER' rm -f '$container_cnf' 2>/dev/null; true" RETURN
+
   log_info "Compressing..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "zstd + encrypt pipeline started"
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
-    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$output_file"
+    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$partial_file"
   else
-    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" > "$output_file"
+    cat "$tmpdir/schema.sql" "$tmpdir/data.sql" | zstd -T0 -"$comp_level" > "$partial_file"
   fi
-  secure_file "$output_file"
+  secure_file "$partial_file"
 
   # Calculate checksum and create metadata
   local end_time duration file_size checksum
   end_time=$(date +%s)
   duration=$((end_time - start_time))
-  file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
+  file_size=$(stat -f%z "$partial_file" 2>/dev/null || stat -c%s "$partial_file" 2>/dev/null || echo "0")
   if [[ "$verbose" == "true" ]]; then
     log_step_elapsed "$start_time" "compress + encrypt done — $(human_size "$file_size") on disk"
   fi
-  checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
+  checksum=$(sha256sum "$partial_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$partial_file" 2>/dev/null | cut -d' ' -f1)
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "sha256 done"
 
   # Capture information_schema.columns for the pre-restore scrub drift
@@ -357,6 +367,16 @@ mysql_backup() {
     }' > "$meta_file"
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
+
+  # Publish atomically: the canonical name only appears once the data is
+  # fully written and its .meta.json is in place. Until this mv, `latest`
+  # and the listing globs see nothing under $output_file.
+  if ! mv "$partial_file" "$output_file"; then
+    cat "$err_file" >&2
+    rm -f "$meta_file"
+    audit_backup "$host" "$database" "failure"
+    die "Failed to move backup into place: $output_file"
+  fi
 
   # Audit log
   audit_backup "$host" "$database" "success" "$output_file" "$file_size" "$duration"

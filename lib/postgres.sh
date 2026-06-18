@@ -169,7 +169,16 @@ pg_backup() {
   local tmpdir
   tmpdir=$(mktemp -d)
   chmod 700 "$tmpdir"
-  trap "rm -rf '$tmpdir'" RETURN
+
+  # Atomic write: stream the dump to a sibling temp file in the SAME
+  # directory, then mv it onto $output_file LAST so the canonical name
+  # only ever appears once fully written. A kill/disk-full mid-stream
+  # leaves the temp behind (removed by the RETURN trap), never a
+  # truncated backup under the name that `latest` would select. The temp
+  # name avoids the `.sql.zst` substring so backup-listing globs skip it.
+  local partial_file
+  partial_file=$(mktemp "$(dirname "$output_file")/.dbx-partial.XXXXXX")
+  trap "rm -rf '$tmpdir'; rm -f '$partial_file'" RETURN
 
   local err_file="$tmpdir/errors.log"
 
@@ -195,42 +204,39 @@ pg_backup() {
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
     # With encryption
     if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$output_file"; then
+      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$partial_file"; then
       log_error "pg_dump failed"
-      rm -f "$output_file"
       audit_backup "$host" "$database" "failure"
       return 1
     fi
   else
     # Without encryption
     if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" > "$output_file"; then
+      pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" > "$partial_file"; then
       log_error "pg_dump failed"
-      rm -f "$output_file"
       audit_backup "$host" "$database" "failure"
       return 1
     fi
   fi
 
   # Check if output file was actually created and has content
-  if [[ ! -s "$output_file" ]]; then
+  if [[ ! -s "$partial_file" ]]; then
     log_error "pg_dump produced no output. Errors:"
     cat "$err_file" >&2
-    rm -f "$output_file"
     audit_backup "$host" "$database" "failure"
     return 1
   fi
 
   # Secure file permissions
-  secure_file "$output_file"
+  secure_file "$partial_file"
 
   # Calculate checksum and create metadata file
   local file_size checksum
-  file_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo "0")
+  file_size=$(stat -f%z "$partial_file" 2>/dev/null || stat -c%s "$partial_file" 2>/dev/null || echo "0")
   if [[ "$verbose" == "true" ]]; then
     log_step_elapsed "$start_time" "pg_dump + compress + encrypt done — $(human_size "$file_size") on disk"
   fi
-  checksum=$(sha256sum "$output_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1)
+  checksum=$(sha256sum "$partial_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$partial_file" 2>/dev/null | cut -d' ' -f1)
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "sha256 done"
 
   # Detect source server version + extensions for restore-time image picking.
@@ -291,6 +297,16 @@ pg_backup() {
     }' > "$meta_file"
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
+
+  # Publish atomically: the canonical name only appears once the data is
+  # fully written and its .meta.json is in place. Until this mv, `latest`
+  # and the listing globs see nothing under $output_file.
+  if ! mv "$partial_file" "$output_file"; then
+    log_error "Failed to move backup into place: $output_file"
+    rm -f "$meta_file"
+    audit_backup "$host" "$database" "failure"
+    return 1
+  fi
 
   # Calculate duration and audit
   local end_time duration

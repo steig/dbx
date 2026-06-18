@@ -105,6 +105,44 @@ teardown() {
   ! echo "$output" | grep -qi "unknown database type"
 }
 
+@test "postgres: successful backup leaves no .dbx-partial temp behind (#117)" {
+  seed_postgres_db "$TEST_DB"
+  dbx_run backup local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+
+  # The atomic-write temp is mv'd into place on success; none should remain.
+  run bash -c "ls $DBX_DATA_DIR/local-pg/$TEST_DB/.dbx-partial.* 2>/dev/null"
+  [ -z "$output" ]
+}
+
+@test "postgres: latest/list ignore a stray partial temp file (#117)" {
+  seed_postgres_db "$TEST_DB" "CREATE TABLE widgets(id int PRIMARY KEY);
+  INSERT INTO widgets VALUES (1),(2),(3);"
+  dbx_run backup local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+
+  local backup_dir="$DBX_DATA_DIR/local-pg/$TEST_DB"
+
+  # Simulate a backup interrupted mid-stream: an EMPTY leftover partial that
+  # is NEWER than the real backup. If listing/`latest` matched it, restore
+  # would pick the empty file and the restored DB would have no rows.
+  touch "$backup_dir/.dbx-partial.ABC123"
+
+  dbx_run list local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qF ".dbx-partial"
+
+  dbx_run restore "local-pg/$TEST_DB/latest" --name "$RESTORE_DB"
+  [ "$status" -eq 0 ]
+
+  # `latest` resolved to the real (complete) backup, not the empty partial.
+  local rows
+  rows=$(pg_row_count "$RESTORE_DB" "widgets")
+  [ "$rows" = "3" ]
+
+  rm -f "$backup_dir/.dbx-partial.ABC123"
+}
+
 @test "postgres: backup meta contains source_version and source_extensions" {
   seed_postgres_db "$TEST_DB"
   dbx_run backup local-pg "$TEST_DB"
