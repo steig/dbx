@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-06-17
+
+### Added
+
+- **`DBX_ALLOW_PROD_RESTORE=1` — opt-in override for `dbx restore --into` from a prod-safety source.** Restoring a backup whose source host is flagged `safety=prod` into a local `--into` container is refused by default — raw production data landing in a local sidecar is exactly what `safety=prod` guards against. The new env var is an explicit, loud opt-out for acknowledged dev workflows (e.g. seeding a throwaway local sidecar): it bypasses **only** this gate and leaves the host's other prod protections intact (read-only transactions, and the post-restore-hook / scrub-apply refusals still go through `require_writable_host`). Non-prod, unknown, and empty hosts are unaffected. The two `restore --into` gate sites now share one `require_writable_host_for_restore_into` helper. (#115)
+
 ## [0.32.0] - 2026-06-16
 
 ### Changed
