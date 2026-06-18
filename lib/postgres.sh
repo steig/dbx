@@ -372,6 +372,7 @@ pg_backup() {
   log_success "Backup complete: $output_file"
   log_info "Checksum (SHA256): $checksum"
   [[ "$globals_captured" == "true" ]] && log_info "Globals sidecar: $globals_file"
+  return 0
 }
 
 # ============================================================================
