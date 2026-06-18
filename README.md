@@ -55,7 +55,7 @@ git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
 ```
 
-Once installed, `dbx update` upgrades in place when a new release is out.
+Once installed, `dbx update` upgrades in place when a new release is out. To remove dbx, see [Uninstall](docs/install.md#uninstall).
 
 > 💡 Prefer a browser-driven setup? After install, `dbx wizard` opens a form in your default browser. Or **try the form first without installing** at <https://steig.github.io/dbx/config-builder>.
 
