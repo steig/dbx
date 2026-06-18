@@ -30,6 +30,7 @@ MAN_PAGES=(
   dbx-test.1
   dbx-analyze.1
   dbx-host.1
+  dbx-build-image.1
   dbx-config.1
   dbx-vault.1
   dbx-wizard.1
