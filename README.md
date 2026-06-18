@@ -499,6 +499,8 @@ Opt out with `DBX_NO_UPDATE_CHECK=1`.
 
 ## Development
 
+A [`justfile`](justfile) wraps the commands CI runs — `just test` (unit + integration), `just lint`, `just syntax`. Run `just` (or `just help`) to list targets.
+
 ```bash
 # Lint
 shellcheck -S error dbx lib/*.sh
