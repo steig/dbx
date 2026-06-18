@@ -133,6 +133,7 @@ nav:
       - Install: install.md
       - Quick start: quick-start.md
       - Configuration: configuration.md
+      - Cloud-hosted Postgres: cloud-postgres.md
       - Config builder: config-builder.md
       - Interactive wizards: wizards.md
       - Persistent wizard (serve): serve.md
