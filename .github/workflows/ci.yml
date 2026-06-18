@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege GITHUB_TOKEN: CI only reads the repo. Overridable per-job if a
+# future job needs more (e.g. packages: write).
+permissions:
+  contents: read
+
 jobs:
   shellcheck:
     name: Shellcheck
