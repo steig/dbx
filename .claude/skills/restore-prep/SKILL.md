@@ -29,7 +29,7 @@ that neutralize all of the above. It proposes; the operator reviews and applies.
 | Artifact | Path (suggested) | Consumed by |
 |---|---|---|
 | Extended PII scrub manifest | `scrub/<db>.scrub.json` | `hosts.<host>.scrub.manifest` + the restore scrub gate |
-| Post-restore cleanup hooks | `hooks/<db>-stage-cleanup.sql` | `databases.<db>.post_restore[]` |
+| Post-restore cleanup hooks | `hooks/<db>-stage-cleanup.sql` | `hosts.<host>.databases.<db>.post_restore[]` |
 | Config snippets | inline in the report | the operator pastes into `config.json` |
 | Findings report | inline (chat) | the human reviewer |
 
@@ -203,7 +203,7 @@ For each flagged table.column, decide **one** action and a confidence:
 | Past `run_at`/`send_at` | null or push far future | hook |
 | Feature flag / entitlement | reset to stage defaults | hook (REVIEW the values) |
 | Admin/login auth | reset password to known dev value, unlock, drop SSO enforce | hook (REVIEW) |
-| Oversized append-only | exclude at backup, or `TRUNCATE` in hook | config `exclude` + report |
+| Oversized append-only | exclude at backup, or `TRUNCATE` in hook | config `exclude_data` + report |
 
 Anything you are not confident about does **not** silently land in a hook — it goes to the
 REVIEW bucket with the reason ("nulling `users.api_token` may break the API-client test suite —
@@ -218,9 +218,10 @@ the generated file and follow it). Validate: `dbx scrub validate <host>` after w
 live schema, exit 2 = drift).
 
 **Write the cleanup hook** as engine-correct, **idempotent** SQL (it re-runs on every refresh).
-dbx binds `:target_db`, `:source_host`, etc. (Postgres `:name`, MySQL `@name`). Postgres runs
-each hook under `psql -1` (atomic); MySQL wraps in a txn but **DDL implicitly commits** — keep
-MySQL hooks pure-DML or document the risk. Example shape:
+dbx binds these vars into every hook: `target_db`, `source_host`, `source_db`, `backup_file`,
+`backup_timestamp`, `restored_at` — Postgres via `psql -v` (reference as `:'target_db'`), MySQL
+via session vars (`@target_db`). Postgres runs each hook under `psql -1` (atomic); MySQL wraps in
+a txn but **DDL implicitly commits** — keep MySQL hooks pure-DML or document the risk. Example shape:
 
 ```sql
 -- hooks/<db>-stage-cleanup.sql  (postgres)
@@ -240,20 +241,26 @@ DELETE FROM event_outbox WHERE dispatched_at IS NULL;
 UPDATE users SET locked_at = NULL WHERE is_admin = true;  -- unlock only; set hash per framework
 ```
 
-**Config snippets** for the operator to paste:
+**Config snippets** for the operator to paste. Everything lives under `hosts.<host>` — the
+scrub gate at the host level, hooks + data exclusions per database:
 ```jsonc
-"databases": {
-  "<db>": {
-    "post_restore": [ { "file": "hooks/<db>-stage-cleanup.sql" } ]
+"hosts": {
+  "<host>": {
+    // Gate restores on a clean scrub: a schema-drift check runs before the engine
+    // restore and aborts if the live schema has PII columns the manifest misses.
+    "scrub": { "required": true, "manifest": "scrub/<db>.scrub.json" },
+    "databases": {
+      "<db>": {
+        "post_restore": [ { "file": "hooks/<db>-stage-cleanup.sql" } ],
+        // optional: keep the clone small — schema is kept, data is skipped per table.
+        "exclude_data": ["audit_log", "events", "sessions"]
+      }
+    }
   }
-},
-// and on the host:
-"scrub": { "required": true, "manifest": "scrub/<db>.scrub.json" }
-// optional, to keep the clone small — exclude oversized append-only tables at backup:
-"backup": { "exclude": ["audit_log", "events", "sessions"] }
+}
 ```
-(Confirm the exact `exclude` key/shape against the host's config and `docs/backup.md` /
-`docs/subsetting.md` before presenting — match what the project actually uses.)
+(`post_restore` also works host-wide at `hosts.<host>.post_restore[]`, which runs before the
+per-db hooks. Each entry is exactly one of `{ "file": "..." }` or `{ "sql": "..." }`.)
 
 ### 6. Verify, then clean up
 ```bash
