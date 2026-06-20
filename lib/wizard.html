@@ -243,6 +243,13 @@
     // coordinate without prop-drilling. Read by every view via $store.dbx.
     document.addEventListener('alpine:init', () => {
       const token = new URLSearchParams(window.location.search).get('token') || '';
+      // #123: the token only rode in on the URL to bootstrap the HttpOnly
+      // session cookie the server set on this page load. Scrub it from the
+      // address bar / history so it stops leaking; the cookie authenticates
+      // every request from here on (api() sends an empty token, ignored).
+      if (token && window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      }
       Alpine.store('dbx', {
         view: 'dashboard',
         token,

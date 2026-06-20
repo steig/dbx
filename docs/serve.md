@@ -39,9 +39,17 @@ Each flag has an environment equivalent, handy for systemd unit files:
 
 ## Authentication
 
-By default access is gated by a **URL token** — every request must carry
-`?token=…` — *plus* whatever your network already enforces. That's the right mode
-when the port is reachable on a LAN or a private tailnet.
+By default access is gated by a **token** — *plus* whatever your network already
+enforces. That's the right mode when the port is reachable on a LAN or a private
+tailnet.
+
+The token rides in the URL (`?token=…`) only on the **first** page load: the
+server consumes it to set an `HttpOnly`, `SameSite=Strict` session cookie, the
+page strips `?token=` from the address bar, and every request thereafter
+authenticates by cookie. So the secret stays out of browser history, the
+`Referer` header (responses send `Referrer-Policy: no-referrer`), and the served
+HTML. The token has no built-in expiry — it's valid for the life of the server
+process; restart `dbx serve` (or rotate `--token`) to invalidate live sessions.
 
 `--no-token` removes dbx's token gate, leaving the fronting layer as the **only**
 control. Use it only when something trustworthy sits in front:

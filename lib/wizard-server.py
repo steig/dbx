@@ -16,6 +16,7 @@ import argparse
 import collections
 import datetime
 import functools
+import hmac
 import http.server
 import ipaddress
 import json
@@ -2174,16 +2175,36 @@ def is_loopback_client(client_host):
     return ip.is_loopback
 
 
+# #123: name of the HttpOnly session cookie that carries the auth token after
+# the first page load, so it no longer has to ride in the URL.
+COOKIE_NAME = "dbx_token"
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
 
-    def valid_token(path):
+    def cookie_token(handler):
+        # Pull the session token out of the Cookie header, if present. Kept
+        # deliberately small — the value is a hex token, no quoting to worry
+        # about. Returns None when the cookie is absent.
+        for part in (handler.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE_NAME:
+                return value
+        return None
+
+    def valid_token(handler):
+        # #123: a request authenticates by EITHER the bootstrap ?token= in the
+        # URL OR the HttpOnly session cookie minted from it on first load. The
+        # comparison is constant-time. A blank ?token= (parse_qs drops it) falls
+        # through to the cookie.
         if args.no_auth:
             return True
-        # Guard against a None configured token matching a blank ?token=
-        return args.token is not None and \
-            parse_query(path).get("token", [None])[0] == args.token
+        if args.token is None:
+            return False
+        supplied = parse_query(handler.path).get("token", [None])[0] or cookie_token(handler)
+        return supplied is not None and hmac.compare_digest(supplied, args.token)
 
     def compose_html():
         with open(args.html) as f:
@@ -2212,7 +2233,9 @@ def make_handler(args):
             analyze = f.read()
         # Relative so the browser POSTs to whatever origin served the page —
         # works for loopback, an SSH tunnel, and a non-loopback `dbx serve` bind.
-        save_url = f"/save?token={args.token}" if args.token else "/save"
+        # No token in the URL (#123): auth rides on the session cookie, so the
+        # secret is never embedded in the served HTML.
+        save_url = "/save"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
@@ -2411,6 +2434,13 @@ def make_handler(args):
         handler._send(code, json.dumps(payload), "application/json")
 
     class H(http.server.BaseHTTPRequestHandler):
+        def end_headers(self):
+            # #123: defense-in-depth against the token leaking via Referer on
+            # any navigation or subresource the wizard triggers. Applied to
+            # every response (all paths funnel through end_headers()).
+            self.send_header("Referrer-Policy", "no-referrer")
+            super().end_headers()
+
         def _send(self, code: int, body="", ctype: str = "text/plain"):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -2421,7 +2451,7 @@ def make_handler(args):
 
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
-            if not valid_token(self.path):
+            if not valid_token(self):
                 self._send(403, "missing or bad token")
                 return
             if path == "/":
@@ -2430,7 +2460,20 @@ def make_handler(args):
                 except Exception as e:
                     self._send(500, f"compose failed: {e}")
                     return
-                self._send(200, html, "text/html; charset=utf-8")
+                # #123: when the token bootstrapped via the URL, mint the
+                # HttpOnly session cookie on this load. The page then scrubs
+                # ?token= from the address bar and authenticates by cookie.
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                if (not args.no_auth and args.token is not None
+                        and parse_query(self.path).get("token", [None])[0]):
+                    self.send_header(
+                        "Set-Cookie",
+                        f"{COOKIE_NAME}={args.token}; HttpOnly; SameSite=Strict; Path=/",
+                    )
+                self.end_headers()
+                self.wfile.write(html.encode())
                 return
             if path == "/api/backups":
                 send_json(self, 200, list_backups(args.data_dir, args.config_path))
@@ -2729,7 +2772,7 @@ def make_handler(args):
 
         def do_POST(self):
             path = urllib.parse.urlparse(self.path).path
-            if not valid_token(self.path):
+            if not valid_token(self):
                 self._send(403, "forbidden")
                 return
 
