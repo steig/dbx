@@ -5,6 +5,8 @@ dbx backup production myapp                  # one DB on a configured host
 dbx backup production                        # every DB configured for production
 dbx backup -v production myapp               # verbose (passes through to pg_dump/mysqldump)
 dbx backup --upload production myapp         # backup + push to cloud storage in one shot
+dbx backup --schema-only production myapp    # structure only, no rows
+dbx backup --data-only production myapp      # rows only, no DDL
 ```
 
 Files land at `~/.data/dbx/<host>/<database>/<database>_<timestamp>.sql.zst[.age|.gpg]`.
@@ -16,8 +18,33 @@ Uploads also happen automatically (without `--upload`) when `defaults.auto_uploa
 For every backup:
 
 - **The dump file** — `pg_dump --format=custom` for Postgres, `mysqldump` (two-pass schema + data) for MySQL, piped through `zstd` and optionally `age`/`gpg`.
-- **A sibling `.meta.json`** with size, timestamp, encryption mode, SHA-256 checksum, source flavor + major version, and (Postgres) source extensions. Used at restore time to pick the right container image.
+- **A sibling `.meta.json`** with size, timestamp, encryption mode, SHA-256 checksum, source flavor + major version, the backup mode (`full` / `schema` / `data`), and (Postgres) source extensions. Used at restore time to pick the right container image.
 - **An audit log line** at `~/.local/share/dbx/audit.log`.
+
+## Schema-only / data-only
+
+By default a backup captures both structure and rows. Two mutually exclusive
+flags narrow that:
+
+- `--schema-only` — table/view/routine/trigger definitions, **no rows**. Useful
+  for schema diffs or seeding an empty stage database.
+- `--data-only` — rows only, **no DDL**. Useful for refreshing data into a
+  target that already has the schema.
+
+```bash
+dbx backup --schema-only production myapp
+dbx backup --data-only   production myapp
+```
+
+Under the hood: Postgres uses `pg_dump --section` (`pre-data,post-data` for
+schema, `data` for data); MySQL runs only the relevant pass of its two-pass
+dumper (`--no-data` or `--no-create-info`). The chosen mode is recorded as
+`backup_mode` in the `.meta.json`. Passing both flags is an error.
+
+A **data-only** dump restores cleanly only into a target that already has the
+matching schema (restore creates a fresh, empty database first). Pair it with a
+prior `--schema-only` load, or restore into a database whose structure is
+already in place.
 
 ## Skipping table data
 

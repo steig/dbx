@@ -64,6 +64,9 @@ cmd_backup() {
   local verbose=false
   local upload=false
   local upload_storage=""
+  # Backup section selector: "" (full), "schema" (--schema-only),
+  # or "data" (--data-only). Threaded into pg_backup/mysql_backup.
+  local backup_mode=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -81,6 +84,16 @@ cmd_backup() {
         upload_storage="${1#--upload=}"
         shift
         ;;
+      --schema-only)
+        [[ "$backup_mode" == "data" ]] && die "--schema-only and --data-only are mutually exclusive"
+        backup_mode="schema"
+        shift
+        ;;
+      --data-only)
+        [[ "$backup_mode" == "schema" ]] && die "--schema-only and --data-only are mutually exclusive"
+        backup_mode="data"
+        shift
+        ;;
       -*)
         die "Unknown option: $1"
         ;;
@@ -95,7 +108,7 @@ cmd_backup() {
     esac
   done
 
-  [[ -z "$host" ]] && die "Usage: dbx backup [-v] [--upload] <host> [database]"
+  [[ -z "$host" ]] && die "Usage: dbx backup [-v] [--upload] [--schema-only|--data-only] <host> [database]"
 
   require_config
   require_jq
@@ -125,6 +138,8 @@ cmd_backup() {
       log_info "--- $db ---"
       local backup_args=("$host" "$db")
       [[ "$verbose" == "true" ]] && backup_args+=("-v")
+      [[ "$backup_mode" == "schema" ]] && backup_args+=("--schema-only")
+      [[ "$backup_mode" == "data" ]] && backup_args+=("--data-only")
       if [[ "$upload" == "true" ]]; then
         if [[ -n "$upload_storage" ]]; then backup_args+=("--upload=$upload_storage"); else backup_args+=("--upload"); fi
       fi
@@ -182,10 +197,10 @@ cmd_backup() {
   local backup_rc=0
   case "$db_type" in
     postgres|postgresql)
-      pg_backup "$host" "$database" "$backup_file" "$verbose" || backup_rc=$?
+      pg_backup "$host" "$database" "$backup_file" "$verbose" "$backup_mode" || backup_rc=$?
       ;;
     mysql|mariadb)
-      mysql_backup "$host" "$database" "$backup_file" "$verbose" || backup_rc=$?
+      mysql_backup "$host" "$database" "$backup_file" "$verbose" "$backup_mode" || backup_rc=$?
       ;;
     *)
       die "Unknown database type: $db_type"

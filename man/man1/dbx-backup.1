@@ -5,6 +5,7 @@ dbx-backup \- back up a remote PostgreSQL, MySQL, or MariaDB database
 .B dbx backup
 .RB [ \-v | \-\-verbose ]
 .RB [ \-\-upload ]
+.RB [ \-\-schema-only | \-\-data-only ]
 .I host
 .RI [ database ]
 .SH DESCRIPTION
@@ -47,6 +48,24 @@ After the backup writes successfully, also upload it to the configured
 remote storage (S3 / MinIO). Requires
 .B dbx storage
 to be configured.
+.TP
+.B \-\-schema-only
+Dump structure only \(em tables, views, routines, triggers \(em with no
+rows. Postgres uses
+.B pg_dump \-\-section=pre-data \-\-section=post-data ;
+MySQL runs only the schema pass
+.RB ( \-\-no-data )
+of its two-pass dumper. Mutually exclusive with
+.BR \-\-data-only .
+.TP
+.B \-\-data-only
+Dump rows only, with no DDL. Postgres uses
+.B pg_dump \-\-section=data ;
+MySQL runs only the data pass
+.RB ( \-\-no-create-info ).
+A data-only dump restores cleanly only into a target that already has the
+matching schema. Mutually exclusive with
+.BR \-\-schema-only .
 .SH EXAMPLES
 Back up the
 .I myapp
@@ -73,6 +92,14 @@ Verbose MySQL backup with live mysqldump progress:
 .RS
 .nf
 dbx backup -v production b2c
+.fi
+.RE
+.PP
+Schema-only backup (no rows) for a schema diff or empty stage seed:
+.PP
+.RS
+.nf
+dbx backup --schema-only production myapp
 .fi
 .RE
 .SH ENVIRONMENT
@@ -118,6 +145,8 @@ suffix.
 .TP
 .I ~/.data/dbx/<host>/<database>/<file>.meta.json
 Sidecar with file size, SHA-256 checksum, source flavor / version,
+backup mode
+.RB ( full / schema / data ),
 .B dbx
 version, and other metadata.
 .SH EXIT STATUS
