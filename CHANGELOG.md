@@ -4,6 +4,14 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-06-20
+
+### Security
+
+- **Wizard config-save can no longer plant a shell command (RCE fix).** `config.json` is a trust boundary — the CLI shell-executes several config fields on the host (`hosts[*].password_cmd`, the notification `webhook_url_cmd` / `smtp_password_cmd` / `command.*` templates, and storage `s3.secret_key_cmd`). The wizard writes `config.json`, so a client reaching `/save` could otherwise inject one and get code execution on the next host operation. These fields are now server-owned on save: their value always comes from the trusted on-disk config, never the client. (This also fixes a latent bug where a form re-save wiped a CLI-set `password_cmd`.) Set them via the CLI / direct config edit only. (#125)
+- **`GET /api/vault/get` no longer leaks secrets over the network.** The endpoint returns a cleartext credential, so it is now served only to a loopback client with the token gate enabled — refused under `--no-token` / `--no-auth` and to any non-loopback client. Reveal a secret on a remote `dbx serve` over an SSH tunnel (which reads as loopback). (#124)
+- **The auth token no longer rides in the URL.** It bootstraps an `HttpOnly`, `SameSite=Strict` session cookie on first load; the page then strips `?token=` from the address bar and authenticates by cookie. Token comparison is constant-time (`hmac.compare_digest`), all responses send `Referrer-Policy: no-referrer`, and the served HTML no longer embeds the token — closing leaks via browser/shell history, `Referer`, and embedded URLs. (#123)
+
 ## [0.35.0] - 2026-06-20
 
 ### Added
