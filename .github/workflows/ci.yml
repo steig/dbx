@@ -78,6 +78,25 @@ jobs:
             bash -n "$f"
           done
 
+  ruff:
+    name: Lint Python (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned so a ruff release can't turn main red without a deliberate bump.
+      # Config (scope + rules) lives in pyproject.toml; format-check is omitted
+      # on purpose — see the comment there.
+      - name: Install ruff
+        run: pip install ruff==0.15.14
+
+      - name: Run ruff check
+        run: ruff check
+
   unit-tests:
     name: Unit tests (bats)
     strategy:
