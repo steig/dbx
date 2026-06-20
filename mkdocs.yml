@@ -137,6 +137,7 @@ nav:
       - Config builder: config-builder.md
       - Interactive wizards: wizards.md
       - Persistent wizard (serve): serve.md
+      - Containerized serve: container.md
   - Using dbx:
       - Backup: backup.md
       - Restore: restore.md

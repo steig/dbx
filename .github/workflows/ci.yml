@@ -128,3 +128,21 @@ jobs:
 
       - name: Run integration tests
         run: bats tests/integration/
+
+  docker-image:
+    name: Build container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build-only (no push) so a broken Dockerfile fails the PR. The release
+      # publish (multi-arch → GHCR) lives in release-image.yml, on tags.
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t dbx:ci .
+
+      - name: Smoke test (version prints, libs resolve)
+        run: |
+          version=$(docker run --rm dbx:ci version)
+          echo "$version"
+          echo "$version" | grep -qE '^dbx [0-9]+\.[0-9]+\.[0-9]+$'
+          docker run --rm dbx:ci --help >/dev/null

@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **Official `dbx serve` container image.** `ghcr.io/steig/dbx` packages the wizard/`serve` appliance for team / headless deployments — a multi-arch (amd64/arm64) image published on each release, plus a `docker/Dockerfile` and `docker/docker-compose.yml` recipe. It drives the host Docker daemon through a bind-mounted socket (database engines stay in the managed `postgres-dbx`/`mysql-dbx` containers), runs the wizard on `:8080`, and persists state in `/config`, `/data`, `/audit` volumes. Host networking is recommended so SSH tunnels and `docker exec` behave as on a host. New `DBX_VAULT_BACKEND` env var forces a keychain-free credential backend (`pass`/`gpg-file`) in a container. Local single-user setups should keep `dbx wizard` as a host process. See [Containerized serve](https://steig.github.io/dbx/container/). (#180)
+
 ## [0.36.0] - 2026-06-20
 
 ### Security
