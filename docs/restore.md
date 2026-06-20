@@ -16,6 +16,9 @@ dbx restore production/myapp/latest
 
 Both bind to `127.0.0.1` only by default so dev databases aren't reachable from the LAN with the default password. Set `DBX_BIND_ADDR=0.0.0.0` before first run if you need remote access. If the default port is already taken by another database on the host, publish on a different host port with `DBX_PG_HOST_PORT` / `DBX_MYSQL_HOST_PORT` (e.g. `DBX_PG_HOST_PORT=5433`). Containers are also created with `--add-host=host.docker.internal:host-gateway` so SSH-tunnel mode works on Linux as well as macOS.
 
+!!! tip "Prove your backups actually restore"
+    `dbx verify` checks the SHA-256 checksum — that proves a backup is intact, not that it restores. To gain real confidence, run a periodic **restore drill** that restores a recent backup into a throwaway database and asserts it loaded. See [Verifying backups are restorable](verifying-backups.md).
+
 ## Naming
 
 If you don't pass `--name`, dbx generates `<db>_v<N>_<YYYYMMDD>` and bumps `<N>` until it finds an unused name in both PG and MySQL containers. Pass `--name X` to override.

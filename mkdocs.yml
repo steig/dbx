@@ -139,6 +139,7 @@ nav:
   - Using dbx:
       - Backup: backup.md
       - Restore: restore.md
+      - Verifying backups: verifying-backups.md
       - Post-restore hooks: post-restore-hooks.md
       - PII scrub: scrub.md
       - AI restore prep: restore-prep.md
