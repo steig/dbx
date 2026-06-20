@@ -24,6 +24,7 @@ import secrets
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import urllib.parse
 
@@ -2086,6 +2087,76 @@ def _remove_age_recipient(path, recipient):
     return _write_age_recipients_atomic(path, new_lines)
 
 
+# config.json is a trust boundary: several fields are eval'd / shell-executed
+# by the dbx CLI on the host — host `password_cmd` (core.sh), the notification
+# `webhook_url_cmd` / `smtp_password_cmd` / `command.*` templates (notify.sh),
+# and storage `s3.secret_key_cmd` (storage.sh). A wizard client that can POST
+# /save must NOT be able to plant one, or the next host operation runs it (#125,
+# config-write -> RCE). On every save we neutralize these: the value may come
+# only from the on-disk (operator/CLI-written) config, never from the client
+# payload. Renamed/new targets have no trusted value and so fail closed (the
+# client field is dropped). These fields stay settable via the CLI.
+def scrub_eval_fields(merged, existing):
+    """Mutate `merged` in place so every eval-bearing field equals its on-disk
+    `existing` value, or is removed when `existing` has none. Returns the list
+    of dotted paths whose client-supplied value was overridden or dropped."""
+    if not isinstance(existing, dict):
+        existing = {}
+    stripped = []
+
+    def preserve(dst, src, key, label):
+        # The eval-bearing field is server-owned: its saved value is always the
+        # trusted on-disk one, never the client's. dst/src may be None when the
+        # enclosing block is absent — nothing to enforce then.
+        if not isinstance(dst, dict):
+            return
+        trusted = src.get(key) if isinstance(src, dict) else None
+        client_sent = key in dst
+        if trusted is None:
+            # No trusted value to restore — drop whatever the client supplied.
+            if client_sent:
+                del dst[key]
+                stripped.append(label)
+        else:
+            # Force the trusted value (restores a CLI-set cmd the form omitted,
+            # and overrides any value the client tried to inject).
+            if client_sent and dst[key] != trusted:
+                stripped.append(label)
+            dst[key] = trusted
+
+    def sub(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else None
+
+    # hosts[alias].password_cmd
+    m_hosts, e_hosts = merged.get("hosts"), existing.get("hosts")
+    if isinstance(m_hosts, dict):
+        for alias, host in m_hosts.items():
+            preserve(host, sub(e_hosts, alias), "password_cmd",
+                     f"hosts.{alias}.password_cmd")
+
+    # notifications.{slack.webhook_url_cmd, email.smtp_password_cmd, command.*}
+    m_n, e_n = merged.get("notifications"), existing.get("notifications")
+    if isinstance(m_n, dict):
+        preserve(sub(m_n, "slack"), sub(e_n, "slack"), "webhook_url_cmd",
+                 "notifications.slack.webhook_url_cmd")
+        preserve(sub(m_n, "email"), sub(e_n, "email"), "smtp_password_cmd",
+                 "notifications.email.smtp_password_cmd")
+        m_cmd, e_cmd = sub(m_n, "command"), sub(e_n, "command")
+        for key in ("on_success", "on_failure", "default"):
+            preserve(m_cmd, e_cmd, key, f"notifications.command.{key}")
+
+    # storage.s3.secret_key_cmd (single-backend) + storages[name].s3.secret_key_cmd
+    preserve(sub(merged.get("storage"), "s3"), sub(existing.get("storage"), "s3"),
+             "secret_key_cmd", "storage.s3.secret_key_cmd")
+    m_ss, e_ss = merged.get("storages"), existing.get("storages")
+    if isinstance(m_ss, dict):
+        for name, backend in m_ss.items():
+            preserve(sub(backend, "s3"), sub(sub(e_ss, name), "s3"),
+                     "secret_key_cmd", f"storages.{name}.s3.secret_key_cmd")
+
+    return stripped
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
@@ -2673,6 +2744,16 @@ def make_handler(args):
                     for k in FORM_MANAGED:
                         if k in form_cfg:
                             merged[k] = form_cfg[k]
+                    # #125: never let a wizard client set an eval-bearing field
+                    # (password_cmd, *_cmd, command templates) — restore each
+                    # from the trusted on-disk config or drop it.
+                    stripped = scrub_eval_fields(merged, existing)
+                    if stripped:
+                        print(
+                            "dbx wizard: refused client-supplied eval field(s) on "
+                            f"config-save: {', '.join(stripped)}",
+                            file=sys.stderr,
+                        )
                     try:
                         os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
                         tmp_path = f"{args.config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"

