@@ -41,6 +41,7 @@ vault
 schedule
 storage
 scrub
+containers
 config
 update
 help
@@ -62,6 +63,7 @@ _dbx_subactions() {
     schedule)   printf '%s\n' add remove list run sync ;;
     storage)    printf '%s\n' upload download sync info add list delete ;;
     scrub)      printf '%s\n' init check validate ;;
+    containers) printf '%s\n' list restart start stop down ;;
     host)       printf '%s\n' add ;;
     completion) printf '%s\n' bash zsh fish ;;
     *) ;;
@@ -328,6 +330,12 @@ dbx_complete() {
         case "${words[1]}" in
           sync) _dbx_databases "${words[3]}" ;;
         esac
+      fi
+      ;;
+
+    containers|container)
+      if [[ $count -eq 2 ]]; then
+        _dbx_subactions containers
       fi
       ;;
 

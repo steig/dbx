@@ -1,0 +1,54 @@
+.TH DBX-CONTAINERS 1 "2026-06-20" "dbx 0.34.0" "User Commands"
+.SH NAME
+dbx-containers \- manage the dbx auto-managed Docker containers as a group
+.SH SYNOPSIS
+.B dbx containers
+.RB [ list | restart | start | stop | down ]
+.RB [ \-y ]
+.SH DESCRIPTION
+dbx restores into auto-managed local containers
+.RB ( postgres-dbx ", " mysql-dbx ,
+or the names set by
+.B DBX_POSTGRES_CONTAINER
+/
+.BR DBX_MYSQL_CONTAINER ),
+which it labels
+.BR com.dbx.managed=true .
+.B dbx containers
+lets you see and control that group without raw
+.BR docker
+commands. The managed set is the union of the known names and every container
+carrying the
+.B com.dbx.managed
+label.
+.SH ACTIONS
+.TP
+.B list
+(default) Show each managed container with its status and image.
+.TP
+.B restart
+Restart the managed containers. Restored databases inside them are preserved.
+.TP
+.B start
+Start any stopped managed containers.
+.TP
+.B stop
+Stop the running managed containers.
+.TP
+.B down " [" \-y ]
+Remove the managed containers. This destroys any restored databases inside
+them; on-disk backups under
+.B $DBX_DATA_DIR
+are unaffected. Prompts for confirmation unless
+.B \-y
+(or
+.BR \-\-yes )
+is given.
+.SH NOTES
+A stopped managed container is also started automatically the next time a dbx
+command needs it, so an explicit
+.B start
+is rarely required.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-restore (1)

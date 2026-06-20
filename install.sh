@@ -37,6 +37,7 @@ MAN_PAGES=(
   dbx-schedule.1
   dbx-storage.1
   dbx-scrub.1
+  dbx-containers.1
   dbx-completion.1
 )
 

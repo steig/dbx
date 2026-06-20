@@ -175,6 +175,7 @@ require_container() {
   case "$container" in
     postgres-dbx)
       docker run -d --name postgres-dbx \
+        --label com.dbx.managed=true --label com.dbx.engine=postgres \
         --add-host=host.docker.internal:host-gateway \
         -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
         -e POSTGRES_INITDB_ARGS="--encoding=UTF8 --locale=C.UTF-8" \
@@ -193,6 +194,7 @@ require_container() {
       ;;
     mysql-dbx)
       docker run -d --name mysql-dbx \
+        --label com.dbx.managed=true --label com.dbx.engine=mysql \
         --add-host=host.docker.internal:host-gateway \
         -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
         -p "$(dbx_publish_arg "$bind_addr" "${DBX_MYSQL_HOST_PORT:-}" 3306)" \
@@ -1573,6 +1575,7 @@ _recreate_container() {
       # Detect DB type from the image name and start with minimal flags.
       if [[ "$image" == postgres:* || "$image" == pgvector/* || "$image" == postgis/* || "$image" == timescale/* || "$image" == dbx-pg* ]]; then
         docker run -d --name "$container" \
+          --label com.dbx.managed=true --label com.dbx.engine=postgres \
           -e POSTGRES_PASSWORD="${DBX_PG_PASSWORD:-devpassword}" \
           "$image" >/dev/null
         log_info "Waiting for PostgreSQL to initialize..."
@@ -1582,6 +1585,7 @@ _recreate_container() {
         done
       elif [[ "$image" == mysql:* || "$image" == mariadb:* ]]; then
         docker run -d --name "$container" \
+          --label com.dbx.managed=true --label com.dbx.engine=mysql \
           -e MYSQL_ROOT_PASSWORD="${DBX_MYSQL_PASSWORD:-devpassword}" \
           "$image" >/dev/null
         log_info "Waiting for MySQL to initialize..."
