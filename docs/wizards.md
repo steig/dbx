@@ -8,7 +8,9 @@ Two commands replace hand-editing `config.json` with end-to-end-validated intera
 dbx host add
 ```
 
-Walks through: alias → database type → user → network (direct or SSH tunnel) → credentials → live connection test → pick databases (multi-select from the live remote list) → per-database options (`exclude_data`, MySQL `definer_handling`) → summary.
+Walks through: alias → database type (`postgres`, `mysql`, or `mariadb`) → user → network (direct or SSH tunnel) → credentials → live connection test → pick databases (multi-select from the live remote list) → per-database options (`exclude_data`, MySQL `definer_handling`) → summary.
+
+MariaDB sources use the MySQL adapter — the server flavor is auto-detected at backup time, so picking `mysql` works for MariaDB too. The explicit `mariadb` choice is there for clarity.
 
 On a failed connection test you get a four-choice recovery:
 
