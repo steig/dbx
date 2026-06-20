@@ -15,6 +15,14 @@ Override in config:
 { "vault": { "backend": "pass", "gpg_key": "your-key-id" } }
 ```
 
+Or force a backend with the `DBX_VAULT_BACKEND` environment variable (wins over
+config and auto-detection) — useful for a headless/container deployment that has
+no host keychain:
+
+```bash
+DBX_VAULT_BACKEND=gpg-file dbx vault info
+```
+
 ## Inspecting the vault
 
 ```bash

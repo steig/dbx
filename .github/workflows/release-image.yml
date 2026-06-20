@@ -1,0 +1,48 @@
+name: Release image
+
+# Publish the official `dbx serve` image to GHCR on each release tag (v*).
+# The tag is cut by the manual release process (see the release checklist), so
+# this just builds the multi-arch image and pushes it as :<version> + :latest.
+on:
+  push:
+    tags: ['v*']
+
+# Read the repo; write packages (push to ghcr.io/<owner>/dbx).
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build & push to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # QEMU + Buildx give us the linux/arm64 build alongside amd64.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (amd64 + arm64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/dbx:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/dbx:latest

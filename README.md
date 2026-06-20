@@ -134,6 +134,8 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 | `dbx version` | Print version |
 | `dbx help` | One-screen reference (full docs: https://steig.github.io/dbx/) |
 
+> 🐳 Running a team / always-on server? `dbx serve` ships as an official container image — `ghcr.io/steig/dbx`. See [Containerized serve](docs/container.md) for the compose / `docker run` recipe. (Local single-user setups should keep `dbx wizard` as a host process.)
+
 ## Configuration
 
 Config lives at `~/.config/dbx/config.json`. Minimal example:
@@ -531,6 +533,7 @@ Every operation appends a JSON line to `~/.local/share/dbx/audit.log`:
 | `DBX_REPO_SLUG` | `steig/dbx` | Override for forks |
 | `DBX_UPDATE_CHECK_INTERVAL` | `86400` | Seconds between update API hits |
 | `DBX_GPG_KEY` | unset | GPG key id for vault encryption |
+| `DBX_VAULT_BACKEND` | unset | Force the credential backend (`keychain`/`secret-tool`/`pass`/`gpg-file`), overriding config + auto-detection. For headless/container use with no host keychain. |
 
 ## Update Notifications
 

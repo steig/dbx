@@ -112,9 +112,12 @@ Because it never exits on save, the service runs until you stop it
 
 `dbx serve` is the natural entrypoint for running dbx as an appliance — a long-lived
 container or LXC that hosts the wizard and orchestrates backups/restores against the
-host Docker daemon. Pair it with `--no-token` behind a tailnet so the box is reachable
-by name from your devices without managing a token, and add a timer that
-fast-forwards the checkout and restarts the service to keep it current.
+host Docker daemon. There's an official image —
+**[`ghcr.io/steig/dbx`](container.md)** — with a compose / `docker run` recipe; the
+[Containerized `dbx serve`](container.md) guide covers the Docker-socket mount,
+keychain-free vault backends, and why host networking is recommended. Pair it with
+`--no-token` behind a tailnet so the box is reachable by name from your devices
+without managing a token.
 
 ## See also
 

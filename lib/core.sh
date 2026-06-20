@@ -358,8 +358,13 @@ detect_vault_backend() {
   local configured_backend
   configured_backend=$(get_config_value ".vault.backend" 2>/dev/null || echo "")
 
+  # DBX_VAULT_BACKEND env wins over config and auto-detection. Lets a headless/
+  # container deployment force a keychain-free backend (pass / gpg-file) without
+  # editing the mounted config.json.
+  if [[ -n "${DBX_VAULT_BACKEND:-}" ]]; then
+    result="$DBX_VAULT_BACKEND"
   # If explicitly configured, use that
-  if [[ -n "$configured_backend" && "$configured_backend" != "auto" ]]; then
+  elif [[ -n "$configured_backend" && "$configured_backend" != "auto" ]]; then
     result="$configured_backend"
   elif is_macos; then
     result="keychain"
