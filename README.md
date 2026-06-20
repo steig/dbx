@@ -235,6 +235,12 @@ auto-upload on for the new host.
 
 Requires `gum`.
 
+Backing up managed Postgres (RDS, Aurora, Cloud SQL, Neon, Supabase) or
+CockroachDB? They all speak the Postgres wire protocol, so the existing
+`type: postgres` path covers them — see
+[Cloud-hosted Postgres](docs/cloud-postgres.md) for per-provider
+connection recipes.
+
 ### Adding remote storage
 
 ```bash
