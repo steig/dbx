@@ -62,6 +62,14 @@ credential fields are CLI-managed for exactly this reason — the server strips
 them from client saves so reaching the wizard never becomes code execution on
 the host (see [Credential storage](credentials.md#notes)).
 
+One endpoint is held to a stricter bar regardless: the vault "reveal secret"
+call (`/api/vault/get`) returns a cleartext credential, so the server serves it
+**only to a loopback client with the token gate enabled.** It is refused under
+`--no-token`, and to any non-loopback client (the value would otherwise cross
+the network in plaintext over non-TLS HTTP). To reveal a stored secret on a
+remote `dbx serve`, reach it through an SSH tunnel (`ssh -L 8080:localhost:8080
+host`) rather than the network bind — the tunnelled request arrives as loopback.
+
 ## Running under systemd
 
 `dbx serve` `exec`s the Python server into the foreground, so a supervisor tracks

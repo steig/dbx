@@ -17,6 +17,7 @@ import collections
 import datetime
 import functools
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -2157,6 +2158,22 @@ def scrub_eval_fields(merged, existing):
     return stripped
 
 
+def is_loopback_client(client_host):
+    """True if the request came from the local host. Handles 127.0.0.0/8, ::1,
+    and IPv4-mapped IPv6 (::ffff:127.0.0.1, seen when the server binds `::`).
+    An SSH tunnel terminates locally, so a tunnelled client also reads as
+    loopback — which is intended (that path is how you reach a remote wizard
+    safely)."""
+    try:
+        ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return ip.is_loopback
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
@@ -2626,6 +2643,19 @@ def make_handler(args):
                 send_json(self, 200, rows)
                 return
             if path == "/api/vault/get":
+                # #124: this returns a cleartext secret in the response body.
+                # Refuse it whenever the token gate is off (--no-auth/--no-token),
+                # and to any non-loopback client — even token-authed, the value
+                # would travel over plaintext (non-TLS) HTTP. Net effect: works
+                # for a local `dbx wizard` and for an SSH-tunnelled session (both
+                # read as loopback); a remote `dbx serve` client gets 403.
+                if args.no_auth or not is_loopback_client(self.client_address[0]):
+                    send_json(self, 403, {
+                        "error": "vault/get is restricted to a loopback client with "
+                                 "auth enabled; reach it over an SSH tunnel "
+                                 "(ssh -L) rather than a remote bind"
+                    })
+                    return
                 qs = parse_query(self.path)
                 key = (qs.get("key", [""]) or [""])[0]
                 if not VAULT_KEY_RE.match(key):
