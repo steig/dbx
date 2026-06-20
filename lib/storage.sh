@@ -426,6 +426,20 @@ storage_upload() {
         ;;
     esac
   fi
+
+  # Also upload the globals sidecar (roles/grants) if a backup carried one,
+  # so the remote copy stays self-contained for a --with-globals restore.
+  local globals_file="${local_file}.globals.sql"
+  if [[ -f "$globals_file" ]]; then
+    case "$client" in
+      mc)
+        mc_upload "$globals_file" "${remote_path}.globals.sql"
+        ;;
+      aws)
+        aws_upload "$globals_file" "${remote_path}.globals.sql"
+        ;;
+    esac
+  fi
 }
 
 storage_download() {
@@ -463,6 +477,20 @@ storage_download() {
       ;;
     aws)
       aws_download "$meta_remote" "$meta_local" 2>/dev/null || true
+      ;;
+  esac
+
+  # Also pull the globals sidecar if present, so a --from-remote restore can
+  # honor --with-globals without a second fetch. Best-effort: absent for
+  # backups taken without globals capture.
+  local globals_remote="${remote_path}.globals.sql"
+  local globals_local="${local_file}.globals.sql"
+  case "$client" in
+    mc)
+      mc_download "$globals_remote" "$globals_local" 2>/dev/null || true
+      ;;
+    aws)
+      aws_download "$globals_remote" "$globals_local" 2>/dev/null || true
       ;;
   esac
 
