@@ -47,3 +47,49 @@ dbx 0.9.0
 ```
 
 Opt out with `DBX_NO_UPDATE_CHECK=1`.
+
+## Uninstall
+
+dbx is a handful of files and (optionally) some scheduled jobs. There is no `--uninstall` flag yet, so removal is manual. Do the steps in order.
+
+### 1. Remove scheduled backups first
+
+If you ever ran `dbx schedule add`, remove those jobs before deleting the binary — otherwise the launchd/systemd units are orphaned and keep firing (and failing).
+
+```bash
+dbx schedule list                       # see what's installed
+dbx schedule remove <host> <database>   # repeat for each job listed
+```
+
+If you've already removed the binary, delete the units directly:
+
+```bash
+# macOS (launchd)
+rm -f ~/Library/LaunchAgents/com.dbx.backup.*.plist
+
+# Linux (systemd user units)
+rm -f ~/.config/systemd/user/com.dbx.backup.*.{service,timer}
+systemctl --user daemon-reload
+```
+
+### 2. Remove the binary, libraries, and man pages
+
+These are the three install locations. The defaults are shown; if you installed with `DBX_INSTALL_DIR`, `DBX_LIB_DIR`, or `DBX_MAN_DIR` set to custom paths, substitute those instead.
+
+```bash
+rm -f  ~/.local/bin/dbx                 # binary        ($DBX_INSTALL_DIR)
+rm -rf ~/.local/lib/dbx                 # libraries     ($DBX_LIB_DIR)
+rm -f  ~/.local/share/man/man1/dbx*.1   # man pages     ($DBX_MAN_DIR)
+```
+
+### 3. Configuration and backups (left in place)
+
+The uninstall above does **not** touch your config or your backups — by design.
+
+- **Config:** `~/.config/dbx` (override: `DBX_CONFIG_DIR`) holds `config.json` and, if you use the vault, `vault.gpg`. Remove it only if you're done with dbx for good:
+
+  ```bash
+  rm -rf ~/.config/dbx
+  ```
+
+- **Backups:** dbx writes backups to the directory you configured (there is no fixed default — check `config.json` or your storage settings for the path). **This is your data.** Inspect it before deleting anything, and do not blindly `rm -rf` it.
