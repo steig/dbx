@@ -290,6 +290,61 @@ restart_wiz() {
   [ "$output" = "403" ]
 }
 
+# ----------------------------------------------------------------------------
+# #123: the URL token bootstraps an HttpOnly session cookie on first load, so
+# it stops leaking via browser/shell history, Referer, and embedded URLs.
+# ----------------------------------------------------------------------------
+
+@test "GET / with URL token mints an HttpOnly SameSite=Strict session cookie" {
+  run curl -s -D - -o /dev/null "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Set-Cookie: dbx_token=$WIZ_TOKEN"* ]]
+  [[ "$output" == *"HttpOnly"* ]]
+  [[ "$output" == *"SameSite=Strict"* ]]
+  [[ "$output" == *"Path=/"* ]]
+}
+
+@test "every response carries Referrer-Policy: no-referrer" {
+  run curl -s -D - -o /dev/null "$(api /)"
+  [[ "$output" == *"Referrer-Policy: no-referrer"* ]]
+  # …including API responses and 403s.
+  run curl -s -D - -o /dev/null "$(api /api/backups)"
+  [[ "$output" == *"Referrer-Policy: no-referrer"* ]]
+  run curl -s -D - -o /dev/null "http://127.0.0.1:$WIZ_PORT/?token=NOPE"
+  [[ "$output" == *"Referrer-Policy: no-referrer"* ]]
+}
+
+@test "the session cookie authenticates a request with no URL token" {
+  # GET an API endpoint with ONLY the cookie (no ?token=) — must succeed.
+  run curl -s -o /dev/null -w "%{http_code}" \
+    -H "Cookie: dbx_token=$WIZ_TOKEN" "http://127.0.0.1:$WIZ_PORT/api/backups"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
+@test "POST /save authenticates by cookie alone (no URL token)" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" -H "Cookie: dbx_token=$WIZ_TOKEN" \
+    -d '{"hosts":{},"defaults":{}}' "http://127.0.0.1:$WIZ_PORT/save"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
+@test "a bad session cookie is rejected with 403" {
+  run curl -s -o /dev/null -w "%{http_code}" \
+    -H "Cookie: dbx_token=WRONG" "http://127.0.0.1:$WIZ_PORT/api/backups"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
+@test "served HTML embeds no token (save URL is /save, cookie-authed)" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'data-save-url="/save"'* ]]
+  # The real token must never appear in the page body.
+  [[ "$output" != *"$WIZ_TOKEN"* ]]
+}
+
 @test "GET /api/backups enumerates DATA_DIR and reads meta.json" {
   run curl -s "$(api /api/backups)"
   [ "$status" -eq 0 ]

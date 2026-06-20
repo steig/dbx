@@ -880,11 +880,11 @@
         if (!this.saveUrl) {
           this.savedMsg = 'CLI mode is not initialized (missing save URL).'; this.savedErr = true; return;
         }
-        // The saveUrl was minted by the server as /save?token=…; for the
-        // no-exit variant, retarget to /api/config-save with the same token.
+        // The saveUrl is the server-minted "/save" (auth rides on the session
+        // cookie, #123); for the no-exit variant, retarget to /api/config-save.
         const url = exit
           ? this.saveUrl
-          : this.saveUrl.replace(/\/save\?/, '/api/config-save?');
+          : this.saveUrl.replace(/\/save\b/, '/api/config-save');
         this.saving = exit ? 'exit' : 'save';
         fetch(url, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
