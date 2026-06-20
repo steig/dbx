@@ -232,6 +232,40 @@ teardown() {
 
 api() { echo "http://127.0.0.1:$WIZ_PORT$1?token=$WIZ_TOKEN"; }
 
+# Relaunch the wizard server on the same port with caller-supplied auth/extra
+# flags (e.g. `restart_wiz --no-auth` or `restart_wiz --token "$WIZ_TOKEN"`).
+# Kills the setup() instance and rebinds WIZ_PID so teardown() still cleans up.
+restart_wiz() {
+  kill "$WIZ_PID" 2>/dev/null
+  wait "$WIZ_PID" 2>/dev/null || true
+  python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
+    --port "$WIZ_PORT" "$@" \
+    --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
+    --form-fragment    "$WIZ_REPO_ROOT/lib/wizard-form.html" \
+    --backups-fragment "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
+    --backup-fragment  "$WIZ_REPO_ROOT/lib/wizard-backup.html" \
+    --restore-fragment "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
+    --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
+    --runs-fragment    "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
+    --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
+    --vault-fragment   "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
+    --storage-fragment "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
+    --scrub-fragment   "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --analyze-fragment "$WIZ_REPO_ROOT/lib/wizard-analyze.html" \
+    --config-path      "$WIZ_SCRATCH/config.json" \
+    --data-dir         "$WIZ_SCRATCH/data" \
+    --audit-dir        "$WIZ_AUDIT_DIR" \
+    --dbx-bin          "$WIZ_SCRATCH/dbx" \
+    --lib-dir          "$WIZ_REPO_ROOT/lib" \
+    --done-marker      "$WIZ_DONE" \
+    >"$WIZ_SCRATCH/server.log" 2>&1 &
+  WIZ_PID=$!
+  for _ in $(seq 1 20); do
+    if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/"; then break; fi
+    sleep 0.1
+  done
+}
+
 @test "GET / with valid token serves composed HTML" {
   run curl -s "$(api /)"
   [ "$status" -eq 0 ]
@@ -1309,6 +1343,28 @@ JSONL
   run curl -s -o /dev/null -w "%{http_code}" "$(api /api/vault/get)&key=bad;rm"
   [ "$status" -eq 0 ]
   [ "$output" = "400" ]
+}
+
+# #124: vault/get returns a cleartext secret, so it must refuse whenever the
+# token gate is disabled (--no-auth / `dbx serve --no-token`) — otherwise anyone
+# reaching the port exfiltrates every stored secret with one curl. The loopback
+# requirement is exercised by the existing token-mode success test above (the
+# setup server binds 127.0.0.1); the no-auth refusal needs a relaunch.
+@test "GET /api/vault/get is refused under --no-auth (403)" {
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql","value":"hunter2"}' "$(api /api/vault/set)" >/dev/null
+  restart_wiz --no-auth
+  # Sanity: --no-auth otherwise serves vault endpoints (list works, no token).
+  run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/vault/list"
+  [ "$output" = "200" ]
+  # But the cleartext-secret endpoint is refused.
+  run curl -s -o /tmp/wiz_vget_body -w "%{http_code}" \
+    "http://127.0.0.1:$WIZ_PORT/api/vault/get?key=prod-mysql"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+  run cat /tmp/wiz_vget_body
+  [[ "$output" != *"hunter2"* ]]
+  rm -f /tmp/wiz_vget_body
 }
 
 @test "POST /api/vault/set rejects bad key shape with 400" {
