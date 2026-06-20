@@ -31,6 +31,9 @@ dbx vault init-age                # generate the age recipient/identity (alias: 
 ## Notes
 
 - `password_cmd` in `config.json` is a stdout-producing shell command — handy for short-lived credentials from `aws sts get-session-token`, `vault read`, or similar. dbx invokes it once per operation.
+
+!!! warning "`config.json` is a trust boundary"
+    `password_cmd` and the other `_cmd` / notification `command.*` fields are run as shell commands on the dbx host, so **write access to `config.json` is equivalent to code execution.** These fields are CLI/operator-managed only: the wizard refuses to set or change them from a browser client (it restores the on-disk value on every save). Set them by editing `config.json` directly or via the CLI, and treat the file's permissions accordingly.
 - The plaintext `password` field is a last-resort fallback. dbx warns when it's set.
 - For non-DB credentials (Slack webhook URLs, S3 secret keys), store them in the vault under any name and reference via `_cmd` keys in config:
   ```json

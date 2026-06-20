@@ -57,6 +57,11 @@ control. Use it only when something trustworthy sits in front:
     `--bind 0.0.0.0`. Only run that mode behind a trusted proxy or on a private
     network — never on a public interface.
 
+Note that the wizard can write `config.json`, and the shell-executed `_cmd`
+credential fields are CLI-managed for exactly this reason — the server strips
+them from client saves so reaching the wizard never becomes code execution on
+the host (see [Credential storage](credentials.md#notes)).
+
 ## Running under systemd
 
 `dbx serve` `exec`s the Python server into the foreground, so a supervisor tracks
