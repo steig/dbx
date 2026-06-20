@@ -4,6 +4,33 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-06-20
+
+### Added
+
+- **`--schema-only` / `--data-only` for `dbx backup`.** Postgres uses `pg_dump --section`; MySQL runs only the relevant pass of its two-pass dumper. The mode is recorded in `.meta.json`. (#129)
+- **PostgreSQL roles / grants / globals.** Opt-in `dbx backup --globals` (or `backup_globals` config) captures cluster-wide roles, grants, and tablespaces via `pg_dumpall --globals-only --no-role-passwords` into a `<backup>.globals.sql` sidecar; apply them on restore with `dbx restore --with-globals`. Refused for `--transform`/`--into` (cluster globals must not hit an unmanaged container). Postgres-only. (#130)
+- **MariaDB is now a first-class engine** — surfaced in the host-add wizard, config validation, and docs (it already worked through the MySQL path). (#132)
+- **Restore verifies backup integrity before importing.** The backup's SHA-256 is checked against its `.meta.json` (after download for `--from-remote`); a mismatch aborts the restore. `--skip-verify` bypasses it; a missing/checksum-less `.meta.json` warns rather than fails. (#116)
+
+### Changed
+
+- **Backups are written atomically.** The dump streams to a sibling temp file and is `mv`d into place only after its `.meta.json` is written, so an interrupted or disk-full backup never leaves a truncated file under the canonical name (which `latest` would otherwise select). (#117)
+
+### Fixed
+
+- Host-alias validation is now consistent between the CLI and the web wizard — an alias the wizard accepts is no longer rejected by `dbx host add`. (#118)
+- `install.sh` now fetches the `dbx-build-image` man page (it existed but was never installed). (#122)
+- Removed a dead `pg_dump --jobs` config read that implied a parallel-dump feature that did not run. (#121)
+
+### Security & CI
+
+- Least-privilege `GITHUB_TOKEN` permissions and a SHA-pinned shellcheck action in CI; `ruff` lint on the wizard server; added `SECURITY.md`. (#119, #120, #139)
+
+### Docs & tooling
+
+- README brought current (multi-backend storage, `DBX_ALLOW_PROD_RESTORE`, `--skip-verify`, accurate badges). Added cloud-Postgres/CockroachDB connection recipes, a restore-test verification drill, uninstall instructions, `CONTRIBUTING.md` + issue/PR templates, and a `justfile` for local dev. (#131, #133, #134, #135, #136, #141)
+
 ## [0.33.0] - 2026-06-17
 
 ### Added
