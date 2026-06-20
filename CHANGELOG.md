@@ -4,6 +4,12 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-06-20
+
+### Added
+
+- **`dbx containers` — manage the auto-managed containers as a group.** `dbx containers list | restart | start | stop | down [-y]` controls the `postgres-dbx` / `mysql-dbx` containers (and anything labeled `com.dbx.managed`) without raw `docker`. Managed containers are now labeled `com.dbx.managed=true` + `com.dbx.engine=<postgres|mysql>` at creation; `down` confirms before removing (restored DBs are lost; on-disk backups are unaffected). Includes shell completion and a man page. (#177)
+
 ## [0.34.0] - 2026-06-20
 
 ### Added
