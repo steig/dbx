@@ -3091,6 +3091,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}storage${NC}                       S3/MinIO upload, download, sync
   ${CYAN}storage add${NC}                   Interactively configure remote storage
   ${CYAN}scrub${NC}                         Manage PII scrub manifests
+  ${CYAN}containers${NC}                    List/restart/stop/start/remove the managed containers
   ${CYAN}config${NC}                        Manage configuration
   ${CYAN}host add${NC}                      Interactively add a backup host
   ${CYAN}wizard${NC}                        Browser-based config wizard
@@ -3106,6 +3107,106 @@ ${BOLD}QUICK START${NC}
 ${BOLD}DOCS${NC}
   ${BLUE}https://steig.github.io/dbx/${NC}
 EOF
+}
+
+# ============================================================================
+# Managed containers (group control)
+# ============================================================================
+# dbx auto-manages postgres-dbx / mysql-dbx and labels them com.dbx.managed.
+# `dbx containers` lets you see and control that group without raw docker.
+
+# Echo dbx-managed container names that actually exist, one per line. The set
+# is the union of the known managed names ($POSTGRES_CONTAINER / $MYSQL_CONTAINER)
+# and anything labeled com.dbx.managed=true (covers recreated / custom-named
+# containers, and pre-label containers via the known names).
+_dbx_managed_containers() {
+  local existing candidate
+  existing=$(docker ps -a --format '{{.Names}}' 2>/dev/null)
+  {
+    docker ps -a --filter "label=com.dbx.managed=true" --format '{{.Names}}' 2>/dev/null
+    printf '%s\n%s\n' "$POSTGRES_CONTAINER" "$MYSQL_CONTAINER"
+  } | awk 'NF' | sort -u | while IFS= read -r candidate; do
+    grep -qx "$candidate" <<<"$existing" && printf '%s\n' "$candidate"
+  done
+}
+
+_containers_list() {
+  local names; names=$(_dbx_managed_containers)
+  if [[ -z "$names" ]]; then
+    log_info "No dbx-managed containers exist yet — they're created on first backup/restore."
+    return 0
+  fi
+  printf '%-20s %-26s %s\n' "NAME" "STATUS" "IMAGE"
+  local n line nm st im
+  while IFS= read -r n; do
+    line=$(docker ps -a --filter "name=^/${n}$" --format '{{.Names}}|{{.Status}}|{{.Image}}' 2>/dev/null)
+    IFS='|' read -r nm st im <<<"$line"
+    printf '%-20s %-26s %s\n' "$nm" "$st" "$im"
+  done <<< "$names"
+}
+
+# Apply a plain docker verb (restart/start/stop) to each managed container.
+_containers_apply() {
+  local op="$1"; local names n
+  names=$(_dbx_managed_containers)
+  [[ -z "$names" ]] && { log_info "No dbx-managed containers to $op."; return 0; }
+  while IFS= read -r n; do
+    if docker "$op" "$n" >/dev/null 2>&1; then
+      log_success "$op: $n"
+    else
+      log_warn "could not $op $n"
+    fi
+  done <<< "$names"
+}
+
+_containers_down() {
+  local assume_yes=false n names reply
+  [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]] && assume_yes=true
+  names=$(_dbx_managed_containers)
+  [[ -z "$names" ]] && { log_info "No dbx-managed containers to remove."; return 0; }
+  log_warn "Removing these containers — any restored DBs inside them are lost"
+  log_warn "(on-disk backups in \$DBX_DATA_DIR are unaffected):"
+  while IFS= read -r n; do printf '  %s\n' "$n"; done <<< "$names"
+  if [[ "$assume_yes" != "true" ]]; then
+    printf 'Remove them? [y/N] '
+    read -r reply
+    [[ "$reply" =~ ^[Yy] ]] || { log_info "Aborted."; return 0; }
+  fi
+  while IFS= read -r n; do
+    docker rm -f "$n" >/dev/null 2>&1 && log_success "removed $n" || log_warn "could not remove $n"
+  done <<< "$names"
+}
+
+# Manage the dbx-managed container group: list / restart / start / stop / down.
+cmd_containers() {
+  local action="${1:-list}"
+  shift || true
+  case "$action" in
+    -h|--help|help)
+      cat <<EOF
+Usage: dbx containers [list|restart|start|stop|down]
+
+  list            Show dbx-managed containers and their status (default)
+  restart         Restart the managed containers (restored data preserved)
+  start           Start any stopped managed containers
+  stop            Stop the running managed containers
+  down [-y]       Remove the managed containers. Destroys any restored DBs
+                  inside them; on-disk backups in \$DBX_DATA_DIR are unaffected.
+
+Managed = ${POSTGRES_CONTAINER} / ${MYSQL_CONTAINER} (override via
+\$DBX_POSTGRES_CONTAINER / \$DBX_MYSQL_CONTAINER) plus any container labeled
+com.dbx.managed=true.
+EOF
+      return 0
+      ;;
+  esac
+  require_docker
+  case "$action" in
+    list|ls)        _containers_list ;;
+    restart|start|stop) _containers_apply "$action" ;;
+    down|rm|remove) _containers_down "$@" ;;
+    *) die "Unknown containers action: $action (use: list, restart, start, stop, down)" ;;
+  esac
 }
 
 # ============================================================================
@@ -3167,6 +3268,9 @@ main() {
       ;;
     scrub)
       cmd_scrub "$@"
+      ;;
+    containers|container)
+      cmd_containers "$@"
       ;;
     help|--help|-h)
       cmd_help

@@ -128,6 +128,7 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 | `dbx config` (alias `cfg`) `init\|edit\|show\|validate` | Manage configuration |
 | `dbx schedule` (alias `cron`) `add\|list\|remove\|run` | Manage scheduled backups |
 | `dbx storage` (alias `s3`) `upload\|download\|list\|sync\|info` | Cloud storage |
+| `dbx containers list\|restart\|start\|stop\|down` | Manage the auto-managed `postgres-dbx` / `mysql-dbx` containers as a group |
 | `dbx completion <bash\|zsh\|fish>` | Print a shell completion script |
 | `dbx update` | Re-run install.sh to upgrade to the latest release |
 | `dbx version` | Print version |
