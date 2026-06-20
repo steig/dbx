@@ -114,15 +114,21 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 | `dbx backup [-v] [--upload] [--schema-only \| --data-only] <host> [database]` | Back up one DB or every DB on a host; `--schema-only` dumps structure with no rows, `--data-only` dumps rows with no DDL (mutually exclusive) |
 | `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download] [--no-post-restore \| --hooks-only] [--transform PATH] [--into NAME]` | Restore to a local container; `--from-remote` (or `s3://...`) pulls straight from cloud storage; `--no-post-restore` skips configured hooks; `--hooks-only --name X` re-runs hooks against an existing DB; `--transform PATH` pipes the restore stream through a host script (streaming sanitize, atomic on postgres); `--into NAME` targets a named running container instead of the managed postgres-dbx (postgres only) |
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
-| `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
-| `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
-| `dbx analyze <host> <database>` | Pick tables to exclude from data dumps |
-| `dbx list [host] [database]` | List local backups |
-| `dbx clean [--keep N] [--dry-run] [--older-than D]` | Retention sweep |
+| `dbx test` (alias `ping`) `<host>` | End-to-end connectivity check (SSH, container, creds, query) |
+| `dbx query` (aliases `q`, `shell`) `<host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
+| `dbx analyze` (alias `stats`) `<host> <database>` | Pick tables to exclude from data dumps |
+| `dbx list` (alias `ls`) `[host] [database]` | List local backups |
+| `dbx clean` (alias `prune`) `[--keep N] [--dry-run] [--older-than D]` | Retention sweep |
+| `dbx scrub init\|check\|validate <host/database>` | Manage PII scrub manifests and the restore-time gate |
+| `dbx host add` | Interactively add a backup host to `config.json` |
+| `dbx wizard` | Browser-based config builder |
+| `dbx serve [--bind ADDR] [--port N] [--token T \| --no-token]` | Run the wizard GUI as a persistent, network-reachable service |
+| `dbx build-image [--from-backup F] \| pg <MAJOR> --extensions ext1,ext2,...` | Pre-build a custom Postgres image for third-party extensions |
 | `dbx vault set\|get\|delete\|list\|info` | Manage host credentials |
-| `dbx config init\|edit\|show\|validate` | Manage configuration |
-| `dbx schedule add\|list\|remove\|run` | Manage scheduled backups |
-| `dbx storage upload\|download\|list\|sync\|info` | Cloud storage |
+| `dbx config` (alias `cfg`) `init\|edit\|show\|validate` | Manage configuration |
+| `dbx schedule` (alias `cron`) `add\|list\|remove\|run` | Manage scheduled backups |
+| `dbx storage` (alias `s3`) `upload\|download\|list\|sync\|info` | Cloud storage |
+| `dbx completion <bash\|zsh\|fish>` | Print a shell completion script |
 | `dbx update` | Re-run install.sh to upgrade to the latest release |
 | `dbx version` | Print version |
 | `dbx help` | One-screen reference (full docs: https://steig.github.io/dbx/) |
