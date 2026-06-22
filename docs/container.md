@@ -104,6 +104,13 @@ Bridge networking (`-p 8080:8080`) works **only** if every source is a local
 managed container or a direct-connect cloud DB — SSH-tunnelled sources are
 unreachable from the managed containers in that mode.
 
+!!! note "`--no-token` under host networking needs `--allow-host`"
+    The image pins `DBX_SERVE_BIND=0.0.0.0` so it's reachable in its namespace,
+    but the server validates the `Host` header (DNS-rebinding defence, #126). If
+    you also set `DBX_SERVE_NO_TOKEN=true`, a non-loopback `Host` is refused with
+    `403 bad host` unless allow-listed — set `DBX_SERVE_ALLOW_HOST` to the name
+    you reach the box by (e.g. its tailnet name). Token mode needs no allowlist.
+
 ## Updating
 
 Pull a newer tag and recreate:
