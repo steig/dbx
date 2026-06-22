@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Security
+
+- **SSH tunnel reuse is no longer spoofable via `ps` (#128).** `create_ssh_tunnel` found and adopted existing tunnels by grepping the system-wide process list for an `ssh … -L …` pattern, so another local user could run a process with a matching argv and make dbx "reuse" — and route prod DB traffic through — a tunnel they control. Reuse and teardown now go through an ssh `ControlMaster` socket kept in a per-user `0700` directory (under `$XDG_RUNTIME_DIR`/`$DBX_RUNTIME_DIR`, falling back to the data dir): the socket is self-authenticating (only its owner could have created it), reuse is gated on `ssh -O check` **plus** a re-verification that the forwarded port is still listening, and teardown uses `ssh -O exit` instead of `kill`-by-PID. The local-port TOCTOU is closed too — `ssh -o ExitOnForwardFailure=yes` makes ssh's own bind authoritative, with a retry across ports — and `ControlPersist=60` lets a follow-up dbx command reuse a still-live tunnel. The control dir is refused if it isn't owned by the current user and mode `0700`.
+
 ## [0.37.0] - 2026-06-20
 
 ### Added
