@@ -41,6 +41,24 @@ cat >/dev/null   # drain the data stream so the upstream pipe doesn't SIGPIPE
 if [ -n "$out" ]; then printf 'FAKEGPG\n' > "$out"; else printf 'FAKEGPG\n'; fi
 STUB
   chmod +x "$stubdir/gpg"
+
+  # Fake docker: log argv, and separately log any PGPASSWORD/MYSQL_PWD seen in
+  # the environment (proving the secret is delivered via env, not argv). Emit a
+  # numeric count so *_container_has_user_dbs is happy.
+  DOCKER_ARGV_LOG="$BATS_TEST_TMPDIR/docker-argv.log"
+  DOCKER_ENV_LOG="$BATS_TEST_TMPDIR/docker-env.log"
+  export DOCKER_ARGV_LOG DOCKER_ENV_LOG
+  : >"$DOCKER_ARGV_LOG"
+  : >"$DOCKER_ENV_LOG"
+  cat >"$stubdir/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCKER_ARGV_LOG"
+[ -n "${PGPASSWORD:-}" ] && printf 'PGPASSWORD=%s\n' "$PGPASSWORD" >> "$DOCKER_ENV_LOG"
+[ -n "${MYSQL_PWD:-}" ] && printf 'MYSQL_PWD=%s\n' "$MYSQL_PWD" >> "$DOCKER_ENV_LOG"
+echo 1
+STUB
+  chmod +x "$stubdir/docker"
+
   PATH="$stubdir:$PATH"
 
   SENTINEL="S3CRET-PASS-$$"
@@ -77,4 +95,29 @@ assert_no_argv_leak() {
   gpg_file_write '{"k":"v"}'
   assert_no_argv_leak
   [ -f "$VAULT_GPG_FILE" ]
+}
+
+# Assert a DB password reached docker via the environment but not via argv.
+# $1 = env var name (PGPASSWORD|MYSQL_PWD)
+assert_no_docker_argv_leak() {
+  local var="$1"
+  grep -q -- "-e $var" "$DOCKER_ARGV_LOG" || {
+    echo "expected name-only '-e $var' in docker argv; got:"; cat "$DOCKER_ARGV_LOG"; return 1
+  }
+  if grep -q "$SENTINEL" "$DOCKER_ARGV_LOG"; then
+    echo "LEAK: password found in docker argv:"; cat "$DOCKER_ARGV_LOG"; return 1
+  fi
+  grep -q "$var=$SENTINEL" "$DOCKER_ENV_LOG" || {
+    echo "password did not reach docker via env; env log:"; cat "$DOCKER_ENV_LOG"; return 1
+  }
+}
+
+@test "pg_container_has_user_dbs: password via env, not docker argv (#127)" {
+  pg_container_has_user_dbs some-pg-container "$SENTINEL"
+  assert_no_docker_argv_leak PGPASSWORD
+}
+
+@test "mysql_container_has_user_dbs: password via env, not docker argv (#127)" {
+  mysql_container_has_user_dbs some-my-container "$SENTINEL"
+  assert_no_docker_argv_leak MYSQL_PWD
 }

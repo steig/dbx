@@ -656,7 +656,7 @@ scrub_schema_query_pg() {
     WHERE table_schema = 'public'
     ORDER BY table_name, ordinal_position;
   "
-  docker exec -i -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+  PGPASSWORD="$db_pass" docker exec -i -e PGPASSWORD "$POSTGRES_CONTAINER" \
     psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$db" \
     -tA -F $'\t' -c "$query"
 }
@@ -694,7 +694,7 @@ scrub_schema_query_mysql() {
     WHERE table_schema = '$db'
     ORDER BY table_name, ordinal_position;
   "
-  docker exec -i -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+  MYSQL_PWD="$db_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -h "$db_host" -P "$db_port" -u "$db_user" -B -N -e "$query"
 }
 
@@ -1120,7 +1120,7 @@ scrub_schema_query_mysql_local() {
     WHERE table_schema = '$target'
     ORDER BY table_name, ordinal_position;
   "
-  docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+  MYSQL_PWD="$root_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -u root -B -N -e "$query"
 }
 
@@ -1144,7 +1144,7 @@ scrub_run_count_query() {
     mysql|mariadb)
       local root_pass
       root_pass=$(docker exec "${MYSQL_CONTAINER:-mysql-dbx}" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
-      docker exec -e MYSQL_PWD="$root_pass" "${MYSQL_CONTAINER:-mysql-dbx}" \
+      MYSQL_PWD="$root_pass" docker exec -e MYSQL_PWD "${MYSQL_CONTAINER:-mysql-dbx}" \
         mysql -u root "$target" -B -N -e "$sql" 2>/dev/null | tr -d '[:space:]'
       ;;
     *)
@@ -1184,7 +1184,7 @@ scrub_local_db_engine() {
     local pg_root_pass
     pg_root_pass=$(docker exec "${POSTGRES_CONTAINER:-postgres-dbx}" \
       printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
-    pg_match=$(docker exec -e PGPASSWORD="$pg_root_pass" \
+    pg_match=$(PGPASSWORD="$pg_root_pass" docker exec -e PGPASSWORD \
       "${POSTGRES_CONTAINER:-postgres-dbx}" \
       psql -U postgres -tA -c \
       "SELECT 1 FROM pg_database WHERE datname='$db' LIMIT 1" \
@@ -1201,7 +1201,7 @@ scrub_local_db_engine() {
     local my_root_pass
     my_root_pass=$(docker exec "${MYSQL_CONTAINER:-mysql-dbx}" \
       printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
-    my_match=$(docker exec -e MYSQL_PWD="$my_root_pass" \
+    my_match=$(MYSQL_PWD="$my_root_pass" docker exec -e MYSQL_PWD \
       "${MYSQL_CONTAINER:-mysql-dbx}" \
       mysql -u root -B -N -e \
       "SELECT 1 FROM information_schema.schemata WHERE schema_name='$db' LIMIT 1" \
@@ -1396,7 +1396,7 @@ scrub_drop_local_db() {
       local root_pass
       root_pass=$(docker exec "${MYSQL_CONTAINER:-mysql-dbx}" \
         printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
-      if ! docker exec -e MYSQL_PWD="$root_pass" "${MYSQL_CONTAINER:-mysql-dbx}" \
+      if ! MYSQL_PWD="$root_pass" docker exec -e MYSQL_PWD "${MYSQL_CONTAINER:-mysql-dbx}" \
           mysql -u root -e "DROP DATABASE IF EXISTS \`$target\`" >/dev/null 2>&1; then
         log_error "scrub_drop_local_db: failed to drop '$target' from $MYSQL_CONTAINER — INVESTIGATE, unscrubbed clone may persist"
       fi

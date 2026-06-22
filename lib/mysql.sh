@@ -341,7 +341,7 @@ mysql_backup() {
   # completes (the restore-time gate will then do its own post-restore
   # check as a fallback for legacy/empty meta).
   local scrub_schema_tsv scrub_schema_json="{}"
-  scrub_schema_tsv=$(docker exec -i -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+  scrub_schema_tsv=$(MYSQL_PWD="$db_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -h "$db_host" -P "$db_port" -u "$db_user" -B -N \
     -e "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = '$database' ORDER BY table_name, ordinal_position" 2>/dev/null < /dev/null || true)
   if [[ -n "$scrub_schema_tsv" ]]; then
@@ -616,7 +616,7 @@ mysql_restore_backup_streaming() {
   root_pass=$(docker exec "$MYSQL_CONTAINER" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
 
   # Pre-create target DB outside the streamed import.
-  docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+  MYSQL_PWD="$root_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" >/dev/null
 
   # filter_sql is defined inline as a function-scoped here so the streaming
@@ -639,20 +639,20 @@ mysql_restore_backup_streaming() {
     { decompress_backup "$backup_file" \
         | bash -c "$filter_sql_cmd" \
         | "${transform_argv[@]}" \
-        | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+        | MYSQL_PWD="$root_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
           mysql -u root "$target_db"
     } || rc=$?
   else
     { decompress_backup "$backup_file" \
         | bash -c "$filter_sql_cmd" \
-        | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+        | MYSQL_PWD="$root_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
           mysql -u root "$target_db"
     } || rc=$?
   fi
 
   if [[ "$rc" -ne 0 ]]; then
     log_error "Streaming restore FAILED (exit $rc). Dropping target '$target_db' for cleanliness."
-    docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+    MYSQL_PWD="$root_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
       mysql -u root -e "DROP DATABASE IF EXISTS \`$target_db\`" >/dev/null 2>&1 || true
     return $rc
   fi
@@ -957,7 +957,7 @@ mysql_detect_server_version() {
   local stderr_file
   stderr_file=$(mktemp -t dbx-mysql-detect-stderr.XXXXXX)
   local raw rc
-  raw=$(docker exec -i -e MYSQL_PWD="$password" \
+  raw=$(MYSQL_PWD="$password" docker exec -i -e MYSQL_PWD \
     "$container" \
     mysql -h "$host" -P "$port" -u "$user" -N -e 'SELECT VERSION()' \
     2>"$stderr_file")
