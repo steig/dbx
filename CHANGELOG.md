@@ -4,10 +4,21 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-06-23
+
 ### Security
 
+- **GPG passphrase no longer passed via process argv (#127).** `encrypt_stream`, `decrypt_stream`, and symmetric `gpg_file_write` passed the vault passphrase as `gpg --passphrase "$x"`, leaving it visible in `ps` / `/proc/PID/cmdline` for the duration of the call on a multi-user host. The passphrase is now fed on a file descriptor (`--passphrase-fd`); the data stream stays on stdin. Behaviour-preserving. (First slice — covers GPG; the `docker exec` `PGPASSWORD`/`MYSQL_PWD` sites are a follow-up.)
 - **`dbx serve` defaults to loopback and validates the `Host` header (#126).** `dbx serve` now binds `127.0.0.1` by default (matching `dbx wizard`); exposing it on other interfaces is opt-in via `--bind 0.0.0.0` / `DBX_SERVE_BIND`. The server also validates the request `Host` against an allowlist (loopback + `--allow-host` / `DBX_SERVE_ALLOW_HOST`) as a DNS-rebinding defence. Under `--no-token` — the only mode with no per-request credential — a non-loopback `Host` is refused (`403 bad host`) unless allow-listed; in token mode a wildcard bind stays permissive (token + `SameSite` already cover rebinding) with a startup nudge to set `--allow-host`. **Breaking:** a host (non-container) `dbx serve` that relied on the implicit `0.0.0.0` default must now pass `--bind 0.0.0.0`; under `--no-token` also set `--allow-host` to the hostname you reach it by. The official container image is unaffected (it pins `DBX_SERVE_BIND=0.0.0.0`).
 - **SSH tunnel reuse is no longer spoofable via `ps` (#128).** `create_ssh_tunnel` found and adopted existing tunnels by grepping the system-wide process list for an `ssh … -L …` pattern, so another local user could run a process with a matching argv and make dbx "reuse" — and route prod DB traffic through — a tunnel they control. Reuse and teardown now go through an ssh `ControlMaster` socket kept in a per-user `0700` directory (under `$XDG_RUNTIME_DIR`/`$DBX_RUNTIME_DIR`, falling back to the data dir): the socket is self-authenticating (only its owner could have created it), reuse is gated on `ssh -O check` **plus** a re-verification that the forwarded port is still listening, and teardown uses `ssh -O exit` instead of `kill`-by-PID. The local-port TOCTOU is closed too — `ssh -o ExitOnForwardFailure=yes` makes ssh's own bind authoritative, with a retry across ports — and `ControlPersist=60` lets a follow-up dbx command reuse a still-live tunnel. The control dir is refused if it isn't owned by the current user and mode `0700`.
+
+### Changed
+
+- **Wizard tables are sortable and render readable timestamps (#191, #192).** Every data table in the `dbx wizard` / `dbx serve` UI (Backups, Restore, Runs, Vault, Storage, Schedule, Dashboard, Analyze) now shares one set of formatters: timestamps render as compact **local** time (full UTC on hover) instead of raw ISO strings that wrapped across lines, sizes use consistent human-readable units, and most tables support click-to-sort with ▲/▼ indicators (default newest-first). Long backup filenames truncate to one line with the full name on hover, and backup tag chips flow inline instead of stacking.
+
+### Fixed
+
+- **`dbx update` resolves the latest release reliably (#190).** It no longer silently falls back to installing bleeding-edge `main` when the GitHub REST `releases/latest` lookup is rate-limited (60 req/hr/IP unauthenticated). The latest released tag is now resolved through a chain — gh CLI (authenticated) → REST API (now honoring `GH_TOKEN`/`GITHUB_TOKEN`) → `git ls-remote` (git protocol, not REST-rate-limited) — and only falls back to `main` if all three fail.
 
 ## [0.37.0] - 2026-06-20
 
