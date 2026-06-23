@@ -2690,7 +2690,13 @@ cmd_update() {
   # minutes, so `dbx update` right after a release would re-install the previous
   # version. Tag refs are immutable and served fresh, sidestepping the race.
   local ver ref
-  ver=$(fetch_latest_release 2>/dev/null || true)   # e.g. "0.19.1" (no leading v)
+  # Resolve the latest released tag, most-reliable source first:
+  #   gh CLI (authenticated, 5000/hr) → REST API (honors GH_TOKEN, else 60/hr)
+  #   → git ls-remote (git protocol, no REST rate limit). Only if all three
+  #   fail do we fall back to bleeding-edge main below.
+  ver=$(fetch_latest_release_gh 2>/dev/null || true)
+  [[ -z "$ver" ]] && ver=$(fetch_latest_release 2>/dev/null || true)
+  [[ -z "$ver" ]] && ver=$(fetch_latest_tag_git 2>/dev/null || true)
   if [[ -n "$ver" ]]; then
     ref="v$ver"
     log_info "Installing $ref from ${DBX_REPO_SLUG}"
