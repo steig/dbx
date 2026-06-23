@@ -68,14 +68,49 @@ write_update_cache() {
 # Fetch the latest release tag from the GitHub Releases API and strip a
 # leading "v" so callers can compare directly with $VERSION. Aggressive
 # timeouts so dbx never feels slow when the user is offline. Returns 1
-# (silently) on any network or parse failure.
+# (silently) on any network or parse failure. Sends GH_TOKEN/GITHUB_TOKEN
+# as a bearer when present, lifting the 60 req/hr/IP unauthenticated cap
+# to 5000/hr — the cap that makes this fall over on busy shared IPs.
 fetch_latest_release() {
-  local url resp tag
+  local url resp tag token
   url="https://api.github.com/repos/${DBX_REPO_SLUG}/releases/latest"
+  token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  local -a auth=()
+  [[ -n "$token" ]] && auth=(-H "Authorization: Bearer $token")
   resp=$(curl -fsSL --connect-timeout 2 --max-time 5 \
     -H 'Accept: application/vnd.github+json' \
+    "${auth[@]+"${auth[@]}"}" \
     "$url" 2>/dev/null) || return 1
   tag=$(printf '%s' "$resp" | jq -r '.tag_name // empty' 2>/dev/null) || return 1
+  [[ -n "$tag" ]] || return 1
+  printf '%s' "${tag#v}"
+}
+
+# Resolve the latest release tag via the gh CLI when it's installed and
+# authenticated. gh carries the user's own credentials (5000 req/hr), so it's
+# the most reliable resolver when present — callers try it before the
+# unauthenticated REST path. Strips the leading "v"; returns 1 if gh is absent
+# or the call fails (not installed, not logged in, offline).
+fetch_latest_release_gh() {
+  command -v gh >/dev/null 2>&1 || return 1
+  local tag
+  tag=$(gh release view --repo "${DBX_REPO_SLUG}" --json tagName -q '.tagName' 2>/dev/null) || return 1
+  [[ -n "$tag" ]] || return 1
+  printf '%s' "${tag#v}"
+}
+
+# Resolve the highest vX.Y.Z release tag over the git protocol instead of the
+# REST API. git ls-remote isn't subject to the REST rate limit, so this keeps
+# working when fetch_latest_release gets a 403 — letting `dbx update` land on a
+# released tag rather than bleeding-edge main. Strips the leading "v"; returns 1
+# when git is missing or no semver tag is found.
+fetch_latest_tag_git() {
+  command -v git >/dev/null 2>&1 || return 1
+  local tag
+  tag=$(git ls-remote --tags --refs "https://github.com/${DBX_REPO_SLUG}.git" 2>/dev/null \
+        | awk -F/ '{print $NF}' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -V | tail -n 1) || return 1
   [[ -n "$tag" ]] || return 1
   printf '%s' "${tag#v}"
 }
