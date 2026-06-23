@@ -420,13 +420,7 @@
       },
 
       formatBytes(n) {
-        if (n === undefined || n === null) return '—';
-        const v = Number(n);
-        if (!Number.isFinite(v) || v < 0) return '—';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        let i = 0; let x = v;
-        while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
-        return `${x.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+        return dbxFmt.size(n);
       },
     };
   }

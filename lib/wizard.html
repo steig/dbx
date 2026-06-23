@@ -179,6 +179,9 @@
     .tbl .grow { width: 100%; }
     .tbl td.ellip { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tbl td.mono, .tbl td .mono { overflow-wrap: anywhere; }
+    /* Tag/chip cells flow inline and wrap as a group instead of stacking one
+       chip per line; min-width gives them room to pack a couple across. */
+    .tbl td.chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 132px; }
     .tbl__actions { display: flex; gap: 6px; justify-content: flex-end; }
 
     /* ---- Toolbar / search / segmented ---- */
