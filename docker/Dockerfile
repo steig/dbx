@@ -49,8 +49,9 @@ RUN chmod +x /opt/dbx/dbx
 ENV PATH="/opt/dbx:${PATH}"
 
 # State lives on mounted volumes; point dbx at stable in-container paths instead
-# of $HOME so the operator only has to bind three dirs. Serve binds all
-# interfaces by default (the container's own network namespace).
+# of $HOME so the operator only has to bind three dirs. `dbx serve` defaults to
+# loopback; the container forces 0.0.0.0 via DBX_SERVE_BIND below so it is
+# reachable in its own network namespace.
 ENV DBX_CONFIG_DIR=/config \
     DBX_DATA_DIR=/data \
     DBX_AUDIT_DIR=/audit \

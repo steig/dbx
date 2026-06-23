@@ -302,10 +302,11 @@ EOF
 # are the --host bind and the omitted --done-marker (which is what makes the
 # server stay up after a config save).
 cmd_serve() {
-  local bind="${DBX_SERVE_BIND:-0.0.0.0}"
+  local bind="${DBX_SERVE_BIND:-127.0.0.1}"
   local port="${DBX_SERVE_PORT:-8080}"
   local token="${DBX_SERVE_TOKEN:-}"
   local no_token="${DBX_SERVE_NO_TOKEN:-false}"
+  local allow_host="${DBX_SERVE_ALLOW_HOST:-}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --bind)    bind="${2:?--bind needs a value}"; shift 2 ;;
@@ -315,28 +316,36 @@ cmd_serve() {
       --token)   token="${2:?--token needs a value}"; shift 2 ;;
       --token=*) token="${1#--token=}"; shift ;;
       --no-token) no_token=true; shift ;;
+      --allow-host)   allow_host="${2:?--allow-host needs a value}"; shift 2 ;;
+      --allow-host=*) allow_host="${1#--allow-host=}"; shift ;;
       -h|--help)
         cat <<EOF
 Usage: dbx serve [--bind ADDR] [--port N] [--token TOKEN | --no-token]
+                 [--allow-host HOST]
 
 Runs the wizard GUI as a persistent, network-reachable service (it does NOT
 exit after a config save). Intended to run under a process manager such as
 systemd on an always-on host.
 
 Flags:
-  --bind ADDR   Bind address (default: 0.0.0.0 — reachable on all interfaces).
+  --bind ADDR   Bind address (default: 127.0.0.1 — loopback only). Pass
+                --bind 0.0.0.0 (or DBX_SERVE_BIND) to expose on other interfaces.
   --port N      Listen port (default: 8080).
   --token TOKEN Fixed access token (default: a random one, printed at startup).
   --no-token    Disable dbx's URL-token gate entirely. Use ONLY when a trusted
                 identity proxy (e.g. Cloudflare Access) or a private network
                 (e.g. a tailnet) is providing access control.
+  --allow-host HOST  Hostname(s) permitted in the Host header (comma-separated;
+                loopback always allowed). Hardens against DNS rebinding.
+                REQUIRED to reach a non-loopback Host under --no-token.
 
 Env equivalents: DBX_SERVE_BIND, DBX_SERVE_PORT, DBX_SERVE_TOKEN,
-DBX_SERVE_NO_TOKEN (set to "true").
+DBX_SERVE_NO_TOKEN (set to "true"), DBX_SERVE_ALLOW_HOST.
 
-By default access is gated by the URL token plus your network. With --no-token
-the fronting proxy / private network is the ONLY gate, so do not expose the
-port publicly in that mode.
+The default bind is loopback: pass --bind to expose. Access is then gated by the
+URL token plus your network. With --no-token the fronting proxy / private
+network is the ONLY auth gate, so set --allow-host to your reachable hostname
+and never expose the port publicly in that mode.
 EOF
         return 0
         ;;
@@ -388,11 +397,21 @@ EOF
   fi
   log_info "  Config: $CONFIG_FILE"
   log_info "  Stays up after saves; stop with Ctrl-C or 'systemctl stop'."
-  if [[ "$no_token" == "true" && "$bind" == "0.0.0.0" ]]; then
-    log_warn "AUTH DISABLED (--no-token) + bound to 0.0.0.0: anyone who can reach this port has full access. Only run this behind a trusted identity proxy (e.g. Cloudflare Access) or on a private network (e.g. a tailnet) — never on a public interface."
-  elif [[ "$bind" == "0.0.0.0" ]]; then
-    log_warn "Binding 0.0.0.0 — reachable on all interfaces; rely on your network (e.g. tailnet) + the token for access control."
+  if [[ "$bind" == "127.0.0.1" || "$bind" == "::1" || "$bind" == "localhost" ]]; then
+    log_info "  Loopback only (default) — pass --bind 0.0.0.0 to expose on other interfaces."
   fi
+  if [[ "$no_token" == "true" && "$bind" != "127.0.0.1" && "$bind" != "::1" ]]; then
+    log_warn "AUTH DISABLED (--no-token) + bound to ${bind}: anyone who can reach this port has full access. Only run this behind a trusted identity proxy (e.g. Cloudflare Access) or a private network (e.g. a tailnet) — never on a public interface."
+    if [[ -z "$allow_host" ]]; then
+      log_warn "Under --no-token, non-loopback requests are REFUSED unless their Host is allow-listed. Set --allow-host (or DBX_SERVE_ALLOW_HOST) to your reachable hostname, or clients will get 403 'bad host'."
+    fi
+  elif [[ "$bind" != "127.0.0.1" && "$bind" != "::1" ]]; then
+    log_warn "Binding ${bind} — reachable on other interfaces; rely on your network (e.g. tailnet) + the token for access control."
+  fi
+
+  # Host-header allowlist (DNS-rebinding hardening, #126). Spliced into the exec.
+  local -a allow_host_args=()
+  [[ -n "$allow_host" ]] && allow_host_args=(--allow-host "$allow_host")
 
   # exec: the python server becomes the foreground process so systemd (or any
   # supervisor) tracks and signals it directly. No --done-marker => persistent.
@@ -400,6 +419,7 @@ EOF
     --host "$bind" \
     --port "$port" \
     "${auth_args[@]}" \
+    ${allow_host_args[@]+"${allow_host_args[@]}"} \
     --html "$html" \
     "${frag_args[@]}" \
     --config-path "$CONFIG_FILE" \

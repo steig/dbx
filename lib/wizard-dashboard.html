@@ -468,13 +468,7 @@
         return `in ${Math.floor(deltaSec / 86400)}d`;
       },
 
-      formatSize(n) {
-        if (n == null) return '—';
-        if (n < 1024) return n + ' B';
-        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
-        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
-        return (n / 1024 ** 3).toFixed(2) + ' GB';
-      },
+      formatSize(n) { return dbxFmt.size(n); },
 
       // Hero badge: map test status → shared .badge variant.
       testBadgeClass(c) {

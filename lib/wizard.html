@@ -166,7 +166,22 @@
     .tbl td { padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
     .tbl tbody tr:last-child td { border-bottom: none; }
     .tbl tbody tr:hover { background: var(--surface-2); }
-    .tbl .num { font-variant-numeric: tabular-nums; text-align: right; }
+    .tbl .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+    .tbl th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    .tbl th.sortable:hover { color: var(--text-2); }
+    .tbl th .sort-ind { font-size: 10px; opacity: .8; }
+    .tbl td.when, .tbl .nowrap { white-space: nowrap; }
+    .tbl td.when .when-rel { color: var(--text-3); font-size: 11.5px; margin-left: 6px; }
+    /* Short columns stay on one line (.nowrap / .num). The long filename
+       column is the greedy one (.grow) and truncates to a single line with an
+       ellipsis (.ellip) — full name on hover — so it never stacks into a
+       cramped multi-line block however narrow the viewport gets. */
+    .tbl .grow { width: 100%; }
+    .tbl td.ellip { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tbl td.mono, .tbl td .mono { overflow-wrap: anywhere; }
+    /* Tag/chip cells flow inline and wrap as a group instead of stacking one
+       chip per line; min-width gives them room to pack a couple across. */
+    .tbl td.chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 132px; }
     .tbl__actions { display: flex; gap: 6px; justify-content: flex-end; }
 
     /* ---- Toolbar / search / segmented ---- */
@@ -239,6 +254,107 @@
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script>
+    // ---- Shared table helpers ------------------------------------------------
+    // One source of truth for date/size formatting and click-to-sort, so every
+    // view's table renders consistently instead of hand-rolling (and drifting
+    // on) its own copy. Exposed on window so Alpine x-text/@click expressions
+    // (which fall through to globals) can call them directly.
+    window.dbxFmt = {
+      // Accepts epoch seconds, epoch ms, or an ISO 8601 string → Date | null.
+      _toDate(v) {
+        if (v === null || v === undefined || v === '') return null;
+        let d;
+        if (typeof v === 'number') {
+          d = new Date(v < 1e12 ? v * 1000 : v);          // seconds vs ms
+        } else if (/^\d+$/.test(String(v).trim())) {
+          const n = Number(v);
+          d = new Date(n < 1e12 ? n * 1000 : n);
+        } else {
+          d = new Date(v);                                 // ISO 8601, etc.
+        }
+        return isNaN(d.getTime()) ? null : d;
+      },
+      _p(n) { return String(n).padStart(2, '0'); },
+      // Compact LOCAL datetime, e.g. "2026-06-23 03:48". Local (not UTC) so it
+      // agrees with the local timestamp baked into backup filenames.
+      date(v) {
+        const d = this._toDate(v);
+        if (!d) return '—';
+        return `${d.getFullYear()}-${this._p(d.getMonth() + 1)}-${this._p(d.getDate())} `
+             + `${this._p(d.getHours())}:${this._p(d.getMinutes())}`;
+      },
+      // Same, with seconds — for the audit log where precision matters.
+      dateTime(v) {
+        const d = this._toDate(v);
+        return d ? `${this.date(v)}:${this._p(d.getSeconds())}` : '—';
+      },
+      // Full ISO (UTC) for tooltips, so the exact instant is one hover away.
+      iso(v) { const d = this._toDate(v); return d ? d.toISOString() : ''; },
+      // Relative time, e.g. "5d ago" / "in 3h" / "just now".
+      relative(v) {
+        const d = this._toDate(v);
+        if (!d) return '';
+        const ms = d.getTime() - Date.now(), abs = Math.abs(ms);
+        const units = [['y', 31536e6], ['mo', 2592e6], ['d', 864e5], ['h', 36e5], ['m', 6e4]];
+        for (const [u, span] of units) {
+          if (abs >= span) { const n = Math.round(abs / span); return ms < 0 ? `${n}${u} ago` : `in ${n}${u}`; }
+        }
+        return 'just now';
+      },
+      // Human-readable bytes, e.g. 1536 → "1.5 KB", 2.05e9 → "1.9 GB".
+      size(bytes) {
+        if (bytes === null || bytes === undefined || bytes === '' || isNaN(bytes)) return '—';
+        let n = Number(bytes);
+        if (n < 1024) return `${n} B`;
+        const units = ['KB', 'MB', 'GB', 'TB', 'PB']; let i = -1;
+        do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+        return `${n.toFixed(n >= 100 ? 0 : 1)} ${units[i]}`;
+      },
+    };
+
+    // Type-aware comparator: numbers numerically, ISO/epoch chronologically,
+    // everything else case-insensitively. Empty values always sink to the end.
+    window.dbxSort = {
+      compare(a, b, key, dir) {
+        const mul = dir === 'asc' ? 1 : -1;
+        const av = a == null ? null : a[key], bv = b == null ? null : b[key];
+        const ae = av === null || av === undefined || av === '';
+        const be = bv === null || bv === undefined || bv === '';
+        if (ae && be) return 0;
+        if (ae) return 1;
+        if (be) return -1;
+        const an = Number(av), bn = Number(bv);
+        if (typeof av !== 'boolean' && typeof bv !== 'boolean' && !isNaN(an) && !isNaN(bn)) return (an - bn) * mul;
+        const ad = Date.parse(av), bd = Date.parse(bv);
+        if (!isNaN(ad) && !isNaN(bd)) return (ad - bd) * mul;
+        return String(av).localeCompare(String(bv)) * mul;
+      },
+      rows(list, key, dir) {
+        return key ? list.slice().sort((a, b) => this.compare(a, b, key, dir)) : list;
+      },
+    };
+
+    // Mixin a view spreads into its x-data to gain click-to-sort with ▲/▼
+    // indicators (the pattern the Analyze view proved out). Usage:
+    //   x-data="Object.assign(dbxSortable('mtime','desc'), { ...component })"
+    // Header: <th class="sortable" @click="setSort('mtime')">Created<span
+    //           class="sort-ind" x-text="sortInd('mtime')"></span></th>
+    // Rows:   applySort(filteredList)
+    window.dbxSortable = (defaultKey = '', defaultDir = 'desc') => ({
+      sortKey: defaultKey,
+      sortDir: defaultDir,
+      setSort(key, firstDir) {
+        if (this.sortKey === key) {
+          this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          this.sortKey = key;
+          this.sortDir = firstDir || 'asc';
+        }
+      },
+      sortInd(key) { return this.sortKey === key ? (this.sortDir === 'asc' ? ' ▲' : ' ▼') : ''; },
+      applySort(list) { return window.dbxSort.rows(list, this.sortKey, this.sortDir); },
+    });
+
     // Shared app state lives here so child views (Backups / Restore) can
     // coordinate without prop-drilling. Read by every view via $store.dbx.
     document.addEventListener('alpine:init', () => {

@@ -68,7 +68,7 @@ get_exclude_dependents() {
 # psql. Echoes "child<TAB>parent" lines. Requires POSTGRES_CONTAINER running.
 pg_fk_edges() {
   local db_host="$1" db_port="$2" db_user="$3" db_pass="$4" database="$5"
-  docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+  PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
     psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" -tA -F $'\t' -c \
     "SELECT src.relname, tgt.relname
        FROM pg_constraint c
@@ -217,7 +217,7 @@ pg_backup() {
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "pg_dump started"
   if [[ "$enc_type" != "none" && -n "$enc_type" ]]; then
     # With encryption
-    if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+    if ! PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
       pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" | encrypt_backup_stream > "$partial_file"; then
       log_error "pg_dump failed"
       audit_backup "$host" "$database" "failure"
@@ -225,7 +225,7 @@ pg_backup() {
     fi
   else
     # Without encryption
-    if ! docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+    if ! PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
       pg_dump "${pg_opts[@]}" "$database" 2> >(tee "$err_file" >&2) | zstd -T0 -"$comp_level" > "$partial_file"; then
       log_error "pg_dump failed"
       audit_backup "$host" "$database" "failure"
@@ -275,7 +275,7 @@ pg_backup() {
   # post-restore check. The stream is the same TSV → JSON pipeline
   # used by `dbx scrub init`/`check`.
   local scrub_schema_tsv scrub_schema_json="{}"
-  scrub_schema_tsv=$(docker exec -i -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+  scrub_schema_tsv=$(PGPASSWORD="$db_pass" docker exec -i -e PGPASSWORD "$POSTGRES_CONTAINER" \
     psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
     -tA -F $'\t' -c "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position;" 2>/dev/null < /dev/null || true)
   if [[ -n "$scrub_schema_tsv" ]]; then
@@ -291,7 +291,7 @@ pg_backup() {
   local globals_captured="false"
   if [[ "$(pg_globals_backup_enabled "$host" "$globals_flag")" == "true" ]]; then
     log_info "Capturing globals (roles/grants/tablespaces) via pg_dumpall --globals-only..."
-    if docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+    if PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
         pg_dumpall --host="$db_host" --port="$db_port" --username="$db_user" \
         --globals-only --no-role-passwords 2>"$err_file" < /dev/null > "$partial_globals" \
         && [[ -s "$partial_globals" ]]; then
@@ -749,7 +749,7 @@ pg_apply_globals() {
 pg_detect_server_version() {
   local host="$1" port="$2" user="$3" password="$4" db="${5:-postgres}"
   local raw
-  raw=$(docker exec -i -e PGPASSWORD="$password" \
+  raw=$(PGPASSWORD="$password" docker exec -i -e PGPASSWORD \
     "${POSTGRES_CONTAINER:-postgres-dbx}" \
     psql -h "$host" -p "$port" -U "$user" -d "$db" -tA -c \
     "SELECT current_setting('server_version_num')" 2>/dev/null \
@@ -787,7 +787,7 @@ pg_resolve_into_container() {
   # response; die after exhausting all attempts.
   local i max_wait=30 ready=false
   for ((i=1; i<=max_wait; i++)); do
-    if docker exec -e PGPASSWORD="$pass" "$container" \
+    if PGPASSWORD="$pass" docker exec -e PGPASSWORD "$container" \
         pg_isready -U "$user" -d "$db" >/dev/null 2>&1; then
       ready=true
       break
@@ -847,10 +847,10 @@ pg_restore_backup_streaming() {
   # (e.g. `sidecaruser`), which may not exist.
   log_info "Ensuring target database '$target_db' exists in $target_container..."
   if [[ -n "$target_pass" ]]; then
-    docker exec -e PGPASSWORD="$target_pass" "$target_container" \
+    PGPASSWORD="$target_pass" docker exec -e PGPASSWORD "$target_container" \
       psql -U "$target_user" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$target_db'" \
       | grep -q 1 || \
-    docker exec -e PGPASSWORD="$target_pass" "$target_container" \
+    PGPASSWORD="$target_pass" docker exec -e PGPASSWORD "$target_container" \
       psql -U "$target_user" -d postgres -c "CREATE DATABASE \"$target_db\"" >/dev/null
   else
     docker exec "$target_container" \
@@ -866,7 +866,9 @@ pg_restore_backup_streaming() {
   # pipe step; we capture via `|| rc=$?` so cleanup can run after.
   log_info "Streaming restore → transform → target..."
   local target_psql=(docker exec -i)
-  [[ -n "$target_pass" ]] && target_psql+=(-e PGPASSWORD="$target_pass")
+  # Name-only -e PGPASSWORD (value supplied via the env-assignment prefix on the
+  # pipe invocations below) keeps the password out of argv / `ps` (#127).
+  [[ -n "$target_pass" ]] && target_psql+=(-e PGPASSWORD)
   target_psql+=("$target_container" psql -U "$target_user" -d "$target_db"
                 -v ON_ERROR_STOP=1 -1 -q)
 
@@ -879,12 +881,12 @@ pg_restore_backup_streaming() {
     { docker exec "$POSTGRES_CONTAINER" \
         pg_restore --no-owner --no-privileges -f - "$in_container_dump" \
         | "${transform_argv[@]}" \
-        | "${target_psql[@]}"
+        | PGPASSWORD="$target_pass" "${target_psql[@]}"
     } || rc=$?
   else
     { docker exec "$POSTGRES_CONTAINER" \
         pg_restore --no-owner --no-privileges -f - "$in_container_dump" \
-        | "${target_psql[@]}"
+        | PGPASSWORD="$target_pass" "${target_psql[@]}"
     } || rc=$?
   fi
 
@@ -894,7 +896,7 @@ pg_restore_backup_streaming() {
     # one. Drop it so nothing partial remains.
     log_error "Streaming restore FAILED (exit $rc). Dropping target '$target_db' for cleanliness."
     if [[ -n "$target_pass" ]]; then
-      docker exec -e PGPASSWORD="$target_pass" "$target_container" \
+      PGPASSWORD="$target_pass" docker exec -e PGPASSWORD "$target_container" \
         psql -U "$target_user" -d postgres -c "DROP DATABASE IF EXISTS \"$target_db\"" >/dev/null 2>&1 || true
     else
       docker exec "$target_container" \
@@ -911,7 +913,7 @@ pg_restore_backup_streaming() {
 # Args: $1=host $2=port $3=user $4=password $5=database
 pg_detect_extensions() {
   local host="$1" port="$2" user="$3" password="$4" db="$5"
-  docker exec -i -e PGPASSWORD="$password" \
+  PGPASSWORD="$password" docker exec -i -e PGPASSWORD \
     "${POSTGRES_CONTAINER:-postgres-dbx}" \
     psql -h "$host" -p "$port" -U "$user" -d "$db" -tA -c \
     "SELECT extname FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname" \
@@ -949,7 +951,7 @@ analyze_postgres() {
   local tmpfile
   tmpfile=$(mktemp)
 
-  docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+  PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
     psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
     -t -A -F $'\t' -c "$stats_query" 2>/dev/null > "$tmpfile"
 
@@ -1052,7 +1054,7 @@ Common exclusions:
   while IFS= read -r tbl; do
     [[ -z "$tbl" ]] && continue
     local tbl_size
-    tbl_size=$(docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+    tbl_size=$(PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
       psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
       -t -A -c "SELECT ROUND(pg_total_relation_size('$tbl') / 1024.0 / 1024.0, 2)" 2>/dev/null)
     excluded_size=$(awk "BEGIN {print $excluded_size + ${tbl_size:-0}}")

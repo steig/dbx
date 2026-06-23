@@ -16,7 +16,7 @@ jobs:
     name: Shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run ShellCheck
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
@@ -32,7 +32,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
@@ -70,7 +70,7 @@ jobs:
     name: Bash Syntax Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check bash syntax
         run: |
           bash -n dbx
@@ -78,13 +78,24 @@ jobs:
             bash -n "$f"
           done
 
+  release-consistency:
+    name: Release consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fails the PR if install.sh's MAN_PAGES / lib lists drift from the files
+      # on disk, or if any man-page .TH version != VERSION in dbx. Catches the
+      # desync class that shipped dbx-build-image.1 broken (#122, #147).
+      - name: Check release-synchronized files are in sync
+        run: bash scripts/check-release-consistency.sh
+
   ruff:
     name: Lint Python (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -104,7 +115,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
@@ -121,7 +132,7 @@ jobs:
     name: Integration tests (docker)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y bats jq zstd age
@@ -133,7 +144,7 @@ jobs:
     name: Build container image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Build-only (no push) so a broken Dockerfile fails the PR. The release
       # publish (multi-arch → GHCR) lives in release-image.yml, on tags.

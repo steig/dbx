@@ -447,7 +447,9 @@ gpg_file_write() {
     if [[ -z "$passphrase" ]]; then
       die "No GPG key or encryption passphrase set for vault. Set DBX_GPG_KEY or run: dbx vault set-encryption-key"
     fi
-    echo "$data" | gpg --batch --yes --passphrase "$passphrase" --symmetric --cipher-algo AES256 -o "$VAULT_GPG_FILE"
+    # Passphrase via fd 3 (here-string), not argv, so it isn't visible in `ps`
+    # on a multi-user host (#127). Data is on stdin via the pipe.
+    echo "$data" | gpg --batch --yes --passphrase-fd 3 --symmetric --cipher-algo AES256 -o "$VAULT_GPG_FILE" 3<<<"$passphrase"
   fi
   chmod 600 "$VAULT_GPG_FILE"
 }
@@ -670,7 +672,9 @@ encrypt_stream() {
   passphrase=$(get_encryption_key)
   [[ -z "$passphrase" ]] && die "No encryption key set. Run: dbx vault set-encryption-key"
 
-  gpg --batch --yes --passphrase "$passphrase" --symmetric --cipher-algo AES256 -
+  # Passphrase via fd 3 (here-string), not argv (#127); the data stream stays
+  # on stdin (the trailing `-`).
+  gpg --batch --yes --passphrase-fd 3 --symmetric --cipher-algo AES256 - 3<<<"$passphrase"
 }
 
 # Decrypt stdin to stdout
@@ -679,7 +683,8 @@ decrypt_stream() {
   passphrase=$(get_encryption_key)
   [[ -z "$passphrase" ]] && die "No encryption key set. Run: dbx vault set-encryption-key"
 
-  gpg --batch --yes --passphrase "$passphrase" --decrypt -
+  # Passphrase via fd 3 (here-string), not argv (#127).
+  gpg --batch --yes --passphrase-fd 3 --decrypt - 3<<<"$passphrase"
 }
 
 # ============================================================================
@@ -1434,7 +1439,7 @@ pg_container_has_user_dbs() {
   local container="$1"
   local password="${2:-${DBX_PG_PASSWORD:-devpassword}}"
   local count
-  count=$(docker exec -e PGPASSWORD="$password" "$container" \
+  count=$(PGPASSWORD="$password" docker exec -e PGPASSWORD "$container" \
     psql -U postgres -tA -c \
     "SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')" \
     2>/dev/null || echo 0)
@@ -1446,7 +1451,7 @@ mysql_container_has_user_dbs() {
   local container="$1"
   local password="${2:-${DBX_MYSQL_PASSWORD:-devpassword}}"
   local count
-  count=$(docker exec -e MYSQL_PWD="$password" "$container" \
+  count=$(MYSQL_PWD="$password" docker exec -e MYSQL_PWD "$container" \
     mysql -u root -N -e \
     "SELECT count(*) FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys')" \
     2>/dev/null || echo 0)
@@ -1658,13 +1663,13 @@ list_remote_databases() {
 
   case "$db_type" in
     postgres|postgresql)
-      docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+      PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
         psql -h "$db_host" -p "$db_port" -U "$db_user" -t -A -c \
         "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname" \
         2>/dev/null
       ;;
     mysql|mariadb)
-      docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+      MYSQL_PWD="$db_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
         mysql -h "$db_host" -P "$db_port" -u "$db_user" -N -e "SHOW DATABASES" \
         2>/dev/null \
         | grep -v -E "^(information_schema|performance_schema|mysql|sys)$" || true

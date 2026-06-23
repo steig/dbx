@@ -8,6 +8,21 @@ load '../helpers/common'
 
 WIZ_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 
+# The server is launched with --port 0 (OS-assigned) and prints the real bound
+# port on startup; poll the server log for it and set WIZ_PORT. This avoids the
+# old bind-a-port/close-it/respawn-on-it TOCTOU that flaked under CI load (#176).
+_wiz_wait_for_port() {
+  local _
+  for _ in $(seq 1 50); do
+    WIZ_PORT="$(grep -m1 '^DBX_WIZARD_PORT=' "$WIZ_SCRATCH/server.log" 2>/dev/null | cut -d= -f2)"
+    [[ -n "$WIZ_PORT" ]] && return 0
+    sleep 0.1
+  done
+  echo "wizard server never reported its port. server.log:" >&2
+  cat "$WIZ_SCRATCH/server.log" >&2 || true
+  return 1
+}
+
 setup() {
   setup_dbx_env
 
@@ -184,7 +199,6 @@ SH
   export WIZ_SCRATCH
 
   WIZ_TOKEN="testtoken1234567890abcdef00000000"
-  WIZ_PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
   WIZ_DONE="$WIZ_SCRATCH/done"
 
   # Sandbox the audit dir under the scratch tree so /api/audit-log doesn't
@@ -193,7 +207,7 @@ SH
   WIZ_AUDIT_DIR="$WIZ_SCRATCH/audit"
 
   python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
-    --port "$WIZ_PORT" \
+    --port 0 \
     --token "$WIZ_TOKEN" \
     --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
     --form-fragment     "$WIZ_REPO_ROOT/lib/wizard-form.html" \
@@ -215,6 +229,8 @@ SH
     --done-marker       "$WIZ_DONE" \
     >"$WIZ_SCRATCH/server.log" 2>&1 &
   WIZ_PID=$!
+
+  _wiz_wait_for_port
 
   # Wait for the server to bind (max ~2s).
   for _ in $(seq 1 20); do
@@ -239,7 +255,7 @@ restart_wiz() {
   kill "$WIZ_PID" 2>/dev/null
   wait "$WIZ_PID" 2>/dev/null || true
   python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
-    --port "$WIZ_PORT" "$@" \
+    --port 0 "$@" \
     --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
     --form-fragment    "$WIZ_REPO_ROOT/lib/wizard-form.html" \
     --backups-fragment "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
@@ -260,6 +276,9 @@ restart_wiz() {
     --done-marker      "$WIZ_DONE" \
     >"$WIZ_SCRATCH/server.log" 2>&1 &
   WIZ_PID=$!
+  # The `>` above truncated server.log, so this reads the NEW server's port,
+  # not the one setup() started.
+  _wiz_wait_for_port
   for _ in $(seq 1 20); do
     if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/"; then break; fi
     sleep 0.1
@@ -2281,4 +2300,50 @@ JSON
   # Nothing was written — the bad name aborted before the config patch.
   run python3 -c "import json;print('exclude_data' in json.load(open('$WIZ_SCRATCH/config.json'))['hosts']['prod']['databases']['myapp'])"
   [ "$output" = "False" ]
+}
+
+# ---------------------------------------------------------------------------
+# #126: Host-header validation (DNS-rebinding hardening). setup() binds the
+# default 127.0.0.1 (concrete) in token mode; restart_wiz relaunches with the
+# flags under test. curl overrides the Host header with -H.
+# ---------------------------------------------------------------------------
+
+@test "Host: concrete bind refuses a foreign Host even with a valid token (#126)" {
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "$(api /)"
+  [ "$output" = "403" ]
+}
+
+@test "Host: loopback Host is always allowed (#126)" {
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: 127.0.0.1" "$(api /)"
+  [ "$output" = "200" ]
+}
+
+@test "Host: --no-auth refuses a non-allow-listed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "403" ]
+}
+
+@test "Host: --no-auth allows an --allow-list-ed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth --allow-host good.example
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: good.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
+
+@test "Host: --no-auth still allows a loopback Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: 127.0.0.1" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
+
+@test "Host: token-mode wildcard bind is permissive for a foreign Host (#126)" {
+  restart_wiz --host 0.0.0.0 --token "$WIZ_TOKEN"
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"
+  [ "$output" = "200" ]
+}
+
+@test "Host: comma-separated --allow-host accepts each listed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth --allow-host "a.example,b.example"
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: b.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
 }

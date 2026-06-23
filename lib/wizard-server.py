@@ -143,6 +143,12 @@ def parse_args():
                    help="Disable the URL-token gate entirely. Only safe behind a "
                         "trusted identity proxy (e.g. Cloudflare Access) or on a "
                         "private network (e.g. a tailnet).")
+    p.add_argument("--allow-host", action="append", default=None,
+                   help="Hostname allowed in the Host header (repeatable; "
+                        "comma-separated also accepted). Loopback and 'localhost' "
+                        "are always allowed. Under --no-auth, a non-loopback Host "
+                        "must be allow-listed or it is refused (DNS-rebinding "
+                        "hardening, #126).")
     p.add_argument("--html", required=True, help="Path to wizard.html shell")
     p.add_argument("--form-fragment", required=True, help="Path to wizard-form.html")
     p.add_argument("--backups-fragment", required=True, help="Path to wizard-backups.html")
@@ -2175,6 +2181,66 @@ def is_loopback_client(client_host):
     return ip.is_loopback
 
 
+def _host_only(host_header):
+    """The hostname from a Host header, port stripped, lowercased. Handles
+    bracketed IPv6 (`[::1]:8080` -> `::1`). Empty string when absent."""
+    if not host_header:
+        return ""
+    h = host_header.strip()
+    if h.startswith("["):                 # [::1] or [::1]:8080
+        end = h.find("]")
+        if end != -1:
+            return h[1:end].lower()
+    if h.count(":") == 1:                  # host:port (bare IPv6 has many colons)
+        h = h.split(":", 1)[0]
+    return h.lower()
+
+
+def host_header_allowed(handler, args):
+    """Validate the request's Host header against an allowlist — DNS-rebinding
+    defence (#126). This is the ONLY per-request gate under --no-auth, where the
+    token/SameSite cookie give no protection.
+
+    Always allowed: loopback IPs and 'localhost'. Also allowed: any --allow-host
+    entry and, for a concrete (non-wildcard) bind, the bind address itself.
+    Otherwise the policy splits:
+      - wildcard bind + no --allow-host + token auth  -> permissive (allow;
+        a one-time startup warning nudges the operator to set --allow-host)
+      - wildcard bind + no --allow-host + --no-auth   -> strict (refuse)
+      - explicit --allow-host, or a concrete bind     -> strict (refuse)
+    """
+    host = _host_only(handler.headers.get("Host"))
+    try:
+        ip = ipaddress.ip_address(host)
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if mapped is not None:
+            ip = mapped
+        if ip.is_loopback:
+            return True
+    except ValueError:
+        pass
+    if host == "localhost":
+        return True
+
+    allow = set()
+    for entry in (args.allow_host or []):
+        for part in entry.split(","):
+            part = part.strip().lower()
+            if part:
+                allow.add(part)
+    wildcard = args.host in ("0.0.0.0", "::", "")
+    if not wildcard:
+        allow.add(args.host.lower())
+    if host in allow:
+        return True
+
+    # Nothing matched: permissive only in token mode on a wildcard bind with no
+    # explicit allowlist; strict everywhere else.
+    if wildcard and not args.allow_host and not args.no_auth:
+        return True
+    return False
+
+
 # #123: name of the HttpOnly session cookie that carries the auth token after
 # the first page load, so it no longer has to ride in the URL.
 COOKIE_NAME = "dbx_token"
@@ -2451,6 +2517,9 @@ def make_handler(args):
 
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
+            if not host_header_allowed(self, args):
+                self._send(403, "bad host")
+                return
             if not valid_token(self):
                 self._send(403, "missing or bad token")
                 return
@@ -2772,6 +2841,9 @@ def make_handler(args):
 
         def do_POST(self):
             path = urllib.parse.urlparse(self.path).path
+            if not host_header_allowed(self, args):
+                self._send(403, "bad host")
+                return
             if not valid_token(self):
                 self._send(403, "forbidden")
                 return
@@ -3400,7 +3472,19 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main():
     args = parse_args()
+    if args.host in ("0.0.0.0", "::", "") and not args.allow_host and not args.no_auth:
+        # Token mode on a wildcard bind with no allowlist: the Host check is
+        # permissive (see host_header_allowed). Nudge the operator. (#126)
+        print("dbx serve: Host-header validation is permissive (token mode, no "
+              "--allow-host). Pass --allow-host <hostname> to restrict and harden "
+              "against DNS rebinding.", file=sys.stderr, flush=True)
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(args))
+    if args.port == 0:
+        # --port 0 lets the OS assign a free port; report the actual bound port
+        # so the parent can discover it without binding-then-closing a port and
+        # racing another process for it (TOCTOU). flush=True because stdout is a
+        # block-buffered pipe here, not a tty. See #176.
+        print(f"DBX_WIZARD_PORT={httpd.server_port}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

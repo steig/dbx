@@ -62,10 +62,10 @@
       <table class="tbl">
         <thead>
           <tr>
-            <th>Host / DB</th>
-            <th>File</th>
-            <th class="num">Created</th>
-            <th class="num">Size</th>
+            <th class="sortable" @click="setSort('host')">Host / DB<span class="sort-ind" x-text="sortInd('host')"></span></th>
+            <th class="sortable grow" @click="setSort('filename')">File<span class="sort-ind" x-text="sortInd('filename')"></span></th>
+            <th class="num sortable" @click="setSort('mtime', 'desc')">Created<span class="sort-ind" x-text="sortInd('mtime')"></span></th>
+            <th class="num sortable" @click="setSort('size', 'desc')">Size<span class="sort-ind" x-text="sortInd('size')"></span></th>
             <th>Tags</th>
             <th></th>
           </tr>
@@ -73,14 +73,14 @@
         <tbody>
           <template x-for="b in filtered()" :key="b.path">
             <tr :class="{ 'is-incomplete': !b.complete }">
-              <td>
+              <td class="nowrap">
                 <span x-text="b.host"></span>
                 <span class="muted">/ <span x-text="b.database"></span></span>
               </td>
-              <td class="mono" :class="{ muted: !b.complete }" x-text="b.filename"></td>
-              <td class="num" x-text="formatWhen(b)"></td>
+              <td class="mono grow ellip" :class="{ muted: !b.complete }" :title="b.filename" x-text="b.filename"></td>
+              <td class="num when" :title="dbxFmt.iso(b.timestamp || b.mtime)" x-text="formatWhen(b)"></td>
               <td class="num" x-text="formatSize(b.size)"></td>
-              <td>
+              <td class="chips">
                 <span class="chip"
                       :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
                       x-text="b.encryption"></span>
@@ -125,7 +125,7 @@
 
 <script>
   function dbxBackups() {
-    return {
+    return Object.assign(dbxSortable('mtime', 'desc'), {
       rows: [],
       loading: true,
       filter: '',
@@ -185,7 +185,7 @@
         if (this.freshFilter !== 'all') {
           rows = rows.filter(b => this.freshness(b) === this.freshFilter);
         }
-        return rows;
+        return this.applySort(rows);
       },
 
       // Freshness bucket from the file's mtime, mirroring the server's
@@ -230,19 +230,11 @@
         return null;   // server doesn't expose DATA_DIR yet; default subtitle copy
       },
 
-      formatSize(n) {
-        if (n == null) return '—';
-        if (n < 1024) return n + ' B';
-        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
-        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
-        return (n / 1024 ** 3).toFixed(2) + ' GB';
-      },
+      formatSize(n) { return dbxFmt.size(n); },
 
-      formatWhen(b) {
-        if (b.timestamp) return b.timestamp;
-        if (b.mtime) return new Date(b.mtime * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
-        return '—';
-      },
+      // Prefer the meta timestamp (true backup instant); fall back to the
+      // file's mtime. Rendered as compact local time by the shared formatter.
+      formatWhen(b) { return dbxFmt.date(b.timestamp || b.mtime); },
 
       sourceLabel(b) {
         // mysql_detect_server_version / pg_detect_server_version return the
@@ -293,6 +285,6 @@
           window.alert(`Network error: ${e}`);
         }
       },
-    };
+    });
   }
 </script>
