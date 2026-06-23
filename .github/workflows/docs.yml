@@ -47,7 +47,7 @@ jobs:
           POSTHOG_API_KEY: ${{ vars.POSTHOG_API_KEY }}
         run: mkdocs build --strict --site-dir _site
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v3
         with:
