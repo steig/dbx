@@ -93,8 +93,8 @@
                 <input type="text" class="sched-cell-input" x-model.trim="row.when" placeholder="daily@2" maxlength="128">
                 <div class="muted" style="font-size: 12px; margin-top: 4px;" x-text="fmtFrequency(row.when)"></div>
               </td>
-              <td><span :class="row.next_at ? '' : 'muted'" x-text="fmtNextAt(row.next_at)"></span></td>
-              <td>
+              <td class="when" :title="dbxFmt.iso(row.next_at)"><span :class="row.next_at ? '' : 'muted'" x-text="fmtNextAt(row.next_at)"></span></td>
+              <td class="when" :title="row.last_run ? dbxFmt.iso(row.last_run.timestamp) : ''">
                 <template x-if="row.last_run">
                   <span>
                     <span class="badge" :class="row.last_run.outcome === 'success' ? 'badge--ok' : 'badge--fail'"
@@ -347,25 +347,13 @@
       // Relative "Next run" label from the server-computed next_at ISO.
       fmtNextAt(iso) {
         if (!iso) return '—';
-        const d = new Date(iso);
-        if (isNaN(d.getTime())) return '—';
-        const sec = Math.floor((d.getTime() - Date.now()) / 1000);
-        if (sec < 0) return 'overdue';
-        if (sec < 3600) return 'in ' + Math.floor(sec / 60) + 'm';
-        if (sec < 86400) return 'in ' + Math.floor(sec / 3600) + 'h';
-        return 'in ' + Math.floor(sec / 86400) + 'd';
+        return dbxFmt.relative(iso);
       },
 
       // Relative "x ago" label for the Last run timestamp.
       fmtAgo(iso) {
         if (!iso) return '';
-        const d = new Date(iso);
-        if (isNaN(d.getTime())) return '';
-        const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-        if (sec < 60) return sec + 's ago';
-        if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
-        if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
-        return Math.floor(sec / 86400) + 'd ago';
+        return dbxFmt.relative(iso);
       },
 
       // Human-readable rendering of a `when` expression for the Frequency

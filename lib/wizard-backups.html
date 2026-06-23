@@ -80,7 +80,7 @@
               <td class="mono grow ellip" :class="{ muted: !b.complete }" :title="b.filename" x-text="b.filename"></td>
               <td class="num when" :title="dbxFmt.iso(b.timestamp || b.mtime)" x-text="formatWhen(b)"></td>
               <td class="num" x-text="formatSize(b.size)"></td>
-              <td>
+              <td class="chips">
                 <span class="chip"
                       :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
                       x-text="b.encryption"></span>

@@ -173,19 +173,19 @@
           <table class="tbl">
             <thead>
               <tr>
-                <th>File</th>
-                <th>Host / DB</th>
-                <th>Age</th>
-                <th class="num">Size</th>
+                <th class="sortable" @click="setSort('path')">File<span class="sort-ind" x-text="sortInd('path')"></span></th>
+                <th class="sortable" @click="setSort('host')">Host / DB<span class="sort-ind" x-text="sortInd('host')"></span></th>
+                <th class="sortable when" @click="setSort('timestamp', 'asc')">Age<span class="sort-ind" x-text="sortInd('timestamp')"></span></th>
+                <th class="num sortable" @click="setSort('bytes', 'desc')">Size<span class="sort-ind" x-text="sortInd('bytes')"></span></th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              <template x-for="f in preview.would_delete" :key="f.path">
+              <template x-for="f in applySort(preview.would_delete)" :key="f.path">
                 <tr>
                   <td class="mono" x-text="fileName(f.path)"></td>
                   <td x-text="f.host + ' / ' + f.database"></td>
-                  <td x-text="ageLabel(f.timestamp)"></td>
+                  <td class="when" :title="dbxFmt.iso(f.timestamp)" x-text="ageLabel(f.timestamp)"></td>
                   <td class="num" x-text="formatSize(f.bytes)"></td>
                   <td><span class="chip chip--stale">remove</span></td>
                 </tr>
@@ -234,7 +234,7 @@
 
 <script>
   function dbxStorage() {
-    return {
+    return Object.assign(dbxSortable('timestamp', 'asc'), {
       usage: { total_bytes: 0, total_files: 0, free_bytes: null, by_pair: [] },
       loading: true,
 
@@ -476,13 +476,7 @@
       },
 
       // Whole-day age relative to now, derived from the file timestamp.
-      ageLabel(iso) {
-        if (!iso) return '—';
-        const then = new Date(iso);
-        if (isNaN(then.getTime())) return '—';
-        const days = Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
-        return `${days}d`;
-      },
+      ageLabel(v) { return dbxFmt.relative(v); },
 
       // Used / free presentation helpers.
       usedBytesOnFs() {
@@ -530,22 +524,9 @@
 
       // Shared formatters — kept in lockstep with Backups + Dashboard so
       // table cells render uniformly across the wizard.
-      formatSize(n) {
-        if (n == null) return '—';
-        if (n < 1024) return n + ' B';
-        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
-        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
-        if (n < 1024 ** 4) return (n / 1024 ** 3).toFixed(2) + ' GB';
-        return (n / 1024 ** 4).toFixed(2) + ' TB';
-      },
+      formatSize(n) { return dbxFmt.size(n); },
 
-      formatDate(iso) {
-        if (!iso) return '—';
-        // Show "YYYY-MM-DD" only — full timestamp is overkill in a table.
-        const d = new Date(iso);
-        if (isNaN(d.getTime())) return iso;
-        return d.toISOString().slice(0, 10);
-      },
-    };
+      formatDate(iso) { return dbxFmt.date(iso); },
+    });
   }
 </script>
