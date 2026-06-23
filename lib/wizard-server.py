@@ -3479,6 +3479,12 @@ def main():
               "--allow-host). Pass --allow-host <hostname> to restrict and harden "
               "against DNS rebinding.", file=sys.stderr, flush=True)
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(args))
+    if args.port == 0:
+        # --port 0 lets the OS assign a free port; report the actual bound port
+        # so the parent can discover it without binding-then-closing a port and
+        # racing another process for it (TOCTOU). flush=True because stdout is a
+        # block-buffered pipe here, not a tty. See #176.
+        print(f"DBX_WIZARD_PORT={httpd.server_port}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
