@@ -1,18 +1,20 @@
 # Persistent wizard (`dbx serve`)
 
-`dbx serve` runs the [wizard GUI](wizards.md) as a **persistent, network-reachable
-service**. Unlike `dbx wizard` — which binds to `127.0.0.1`, opens your browser once,
-and exits when you save — `dbx serve` stays up after saves and listens on all
-interfaces, so it's meant to run under a process manager (systemd) on an always-on
-host and be reached from anywhere on your network.
+`dbx serve` runs the [wizard GUI](wizards.md) as a **persistent service**. Unlike
+`dbx wizard` — which opens your browser once and exits when you save — `dbx serve`
+stays up after saves, so it's meant to run under a process manager (systemd) on an
+always-on host. Like `dbx wizard`, it binds to `127.0.0.1` (loopback) by default;
+pass `--bind 0.0.0.0` (or `DBX_SERVE_BIND`) to expose it on other interfaces and
+reach it from across your network.
 
 It's the same UI either way: not just the config form but the full dashboard —
 backups, restore, schedule, run history, vault, storage, scrub, and analyze views —
 all acting on `~/.config/dbx/config.json` and your backups directly.
 
 ```bash
-dbx serve                         # bind 0.0.0.0:8080, random URL token (printed)
-dbx serve --port 9000             # different port
+dbx serve                         # bind 127.0.0.1:8080 (loopback), random URL token
+dbx serve --bind 0.0.0.0          # expose on all interfaces
+dbx serve --bind 0.0.0.0 --allow-host dbx.tailnet.ts.net   # + Host allowlist
 dbx serve --no-token              # disable the token gate (proxy/tailnet only)
 ```
 
@@ -20,22 +22,25 @@ On startup it prints the URL to open:
 
 ```
 dbx serve — persistent wizard
-  URL:    http://0.0.0.0:8080/?token=ab12cd…
+  URL:    http://127.0.0.1:8080/?token=ab12cd…
   Config: /home/you/.config/dbx/config.json
   Stays up after saves; stop with Ctrl-C or 'systemctl stop'.
+  Loopback only (default) — pass --bind 0.0.0.0 to expose on other interfaces.
 ```
 
 ## Flags
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--bind ADDR` | `0.0.0.0` | Bind address. `0.0.0.0` is reachable on all interfaces. |
+| `--bind ADDR` | `127.0.0.1` | Bind address. Loopback by default; pass `0.0.0.0` to reach it on other interfaces. |
 | `--port N` | `8080` | Listen port. |
 | `--token TOKEN` | random | Fixed access token. Omit to get a random one printed at startup. |
 | `--no-token` | off | Disable dbx's URL-token gate entirely (see [Authentication](#authentication)). |
+| `--allow-host HOST` | _(none)_ | Hostname(s) permitted in the `Host` header (comma-separated). Loopback is always allowed. Hardens against DNS rebinding; **required** to reach a non-loopback `Host` under `--no-token` (see [Authentication](#authentication)). |
 
 Each flag has an environment equivalent, handy for systemd unit files:
-`DBX_SERVE_BIND`, `DBX_SERVE_PORT`, `DBX_SERVE_TOKEN`, and `DBX_SERVE_NO_TOKEN=true`.
+`DBX_SERVE_BIND`, `DBX_SERVE_PORT`, `DBX_SERVE_TOKEN`, `DBX_SERVE_NO_TOKEN=true`,
+and `DBX_SERVE_ALLOW_HOST`.
 
 ## Authentication
 
@@ -61,9 +66,37 @@ control. Use it only when something trustworthy sits in front:
 
 !!! danger "Never expose `--no-token` publicly"
     With `--no-token`, anyone who can reach the port has full access to your backups,
-    restores, and config. dbx warns loudly when you combine `--no-token` with
-    `--bind 0.0.0.0`. Only run that mode behind a trusted proxy or on a private
+    restores, and config. dbx warns loudly when you combine `--no-token` with a
+    non-loopback bind. Only run that mode behind a trusted proxy or on a private
     network — never on a public interface.
+
+### Host-header allowlist (DNS-rebinding)
+
+The server validates the `Host` header on every request — a defence against
+[DNS rebinding](https://en.wikipedia.org/wiki/DNS_rebinding), where a victim's
+browser is lured to an attacker page that re-points a hostname at your bind
+address. Loopback (`127.0.0.1`, `::1`) and `localhost` are always accepted;
+beyond that the policy depends on the mode:
+
+- **Token mode, wildcard bind, no `--allow-host`** — permissive (any `Host` is
+  served). The token + `SameSite=Strict` cookie already block the rebinding
+  attack, so this preserves the out-of-box experience; a startup line nudges you
+  to set `--allow-host` to tighten it.
+- **`--no-token`** — strict. A non-loopback `Host` is **refused with `403 bad
+  host`** unless it is in `--allow-host`. This is the *only* per-request gate in
+  `--no-token` mode (there is no cookie, so `SameSite` gives no protection), so
+  set `--allow-host` (or `DBX_SERVE_ALLOW_HOST`) to the hostname you reach the
+  box by — e.g. its tailnet name or the public hostname your proxy presents.
+- **Concrete (non-wildcard) bind** — strict, with the bind address auto-allowed.
+
+```bash
+# Reachable as dbx.tailnet.ts.net behind a tailnet, no token:
+dbx serve --bind 0.0.0.0 --no-token --allow-host dbx.tailnet.ts.net
+```
+
+A fronting reverse proxy (Cloudflare Access, nginx) usually sets `Host` to the
+public hostname — add that name to `--allow-host` or the proxied request is
+refused.
 
 Note that the wizard can write `config.json`, and the shell-executed `_cmd`
 credential fields are CLI-managed for exactly this reason — the server strips
@@ -92,8 +125,12 @@ Wants=network-online.target
 
 [Service]
 Environment=DBX_SERVE_PORT=8080
-# Behind a tailnet or Cloudflare Access? Drop the token gate:
+# Loopback is the default — expose on other interfaces to be reachable:
+Environment=DBX_SERVE_BIND=0.0.0.0
+# Behind a tailnet or Cloudflare Access? Drop the token gate — and then you MUST
+# allow-list the hostname you reach the box by, or non-loopback requests get 403:
 Environment=DBX_SERVE_NO_TOKEN=true
+Environment=DBX_SERVE_ALLOW_HOST=dbx.tailnet.ts.net
 ExecStart=/usr/local/bin/dbx serve
 Restart=on-failure
 

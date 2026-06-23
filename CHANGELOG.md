@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Security
+
+- **`dbx serve` defaults to loopback and validates the `Host` header (#126).** `dbx serve` now binds `127.0.0.1` by default (matching `dbx wizard`); exposing it on other interfaces is opt-in via `--bind 0.0.0.0` / `DBX_SERVE_BIND`. The server also validates the request `Host` against an allowlist (loopback + `--allow-host` / `DBX_SERVE_ALLOW_HOST`) as a DNS-rebinding defence. Under `--no-token` — the only mode with no per-request credential — a non-loopback `Host` is refused (`403 bad host`) unless allow-listed; in token mode a wildcard bind stays permissive (token + `SameSite` already cover rebinding) with a startup nudge to set `--allow-host`. **Breaking:** a host (non-container) `dbx serve` that relied on the implicit `0.0.0.0` default must now pass `--bind 0.0.0.0`; under `--no-token` also set `--allow-host` to the hostname you reach it by. The official container image is unaffected (it pins `DBX_SERVE_BIND=0.0.0.0`).
+
 ## [0.37.0] - 2026-06-20
 
 ### Added

@@ -2282,3 +2282,49 @@ JSON
   run python3 -c "import json;print('exclude_data' in json.load(open('$WIZ_SCRATCH/config.json'))['hosts']['prod']['databases']['myapp'])"
   [ "$output" = "False" ]
 }
+
+# ---------------------------------------------------------------------------
+# #126: Host-header validation (DNS-rebinding hardening). setup() binds the
+# default 127.0.0.1 (concrete) in token mode; restart_wiz relaunches with the
+# flags under test. curl overrides the Host header with -H.
+# ---------------------------------------------------------------------------
+
+@test "Host: concrete bind refuses a foreign Host even with a valid token (#126)" {
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "$(api /)"
+  [ "$output" = "403" ]
+}
+
+@test "Host: loopback Host is always allowed (#126)" {
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: 127.0.0.1" "$(api /)"
+  [ "$output" = "200" ]
+}
+
+@test "Host: --no-auth refuses a non-allow-listed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "403" ]
+}
+
+@test "Host: --no-auth allows an --allow-list-ed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth --allow-host good.example
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: good.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
+
+@test "Host: --no-auth still allows a loopback Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: 127.0.0.1" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
+
+@test "Host: token-mode wildcard bind is permissive for a foreign Host (#126)" {
+  restart_wiz --host 0.0.0.0 --token "$WIZ_TOKEN"
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"
+  [ "$output" = "200" ]
+}
+
+@test "Host: comma-separated --allow-host accepts each listed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth --allow-host "a.example,b.example"
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: b.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
