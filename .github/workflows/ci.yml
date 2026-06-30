@@ -82,7 +82,7 @@ jobs:
     name: Release consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Fails the PR if install.sh's MAN_PAGES / lib lists drift from the files
       # on disk, or if any man-page .TH version != VERSION in dbx. Catches the
       # desync class that shipped dbx-build-image.1 broken (#122, #147).
