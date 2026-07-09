@@ -2600,10 +2600,15 @@ cmd_test() {
 
   # Test 4: Database connectivity
   log_info "Testing database connection..."
+  # Connect to a configured database — without -d, psql defaults the
+  # database name to the user, which usually doesn't exist as a database.
+  local test_db
+  test_db=$(jq -r ".hosts[\"$host\"].databases // {} | keys[]" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
+  [[ -z "$test_db" ]] && test_db="postgres"
   case "$db_type" in
     postgres|postgresql)
       if docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-        psql -h "$db_host" -p "$db_port" -U "$db_user" -c "SELECT 1" >/dev/null 2>&1; then
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$test_db" -c "SELECT 1" >/dev/null 2>&1; then
         log_success "PostgreSQL connection successful"
       else
         log_error "PostgreSQL connection failed"

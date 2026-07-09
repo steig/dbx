@@ -1647,10 +1647,16 @@ list_remote_databases() {
   db_user=$(get_config_value ".hosts[\"$host\"].user")
   db_pass=$(get_password "$host")
 
+  # Connect to a configured database — without -d, psql defaults the
+  # database name to the user, which usually doesn't exist as a database.
+  local conn_db
+  conn_db=$(jq -r ".hosts[\"$host\"].databases // {} | keys[]" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
+  [[ -z "$conn_db" ]] && conn_db="postgres"
+
   case "$db_type" in
     postgres|postgresql)
       docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
-        psql -h "$db_host" -p "$db_port" -U "$db_user" -t -A -c \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$conn_db" -t -A -c \
         "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname" \
         2>/dev/null
       ;;
