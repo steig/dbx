@@ -159,3 +159,49 @@ teardown() {
   # source_extensions must be an array (possibly empty)
   [ "$(jq -r '.source_extensions | type' "$meta")" = "array" ]
 }
+
+@test "postgres: --schema-only restores tables with zero rows (#129)" {
+  seed_postgres_db "$TEST_DB" "CREATE TABLE widgets(id int PRIMARY KEY, name text);
+  INSERT INTO widgets VALUES (1,'a'),(2,'b'),(3,'c');"
+
+  dbx_run backup local-pg "$TEST_DB" --schema-only
+  [ "$status" -eq 0 ]
+
+  local meta
+  meta=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst.meta.json | head -1)
+  [ "$(jq -r .backup_mode "$meta")" = "schema" ]
+
+  dbx_run restore "local-pg/$TEST_DB/latest" --name "$RESTORE_DB"
+  [ "$status" -eq 0 ]
+
+  # Table exists but holds no rows.
+  local rows
+  rows=$(pg_row_count "$RESTORE_DB" "widgets")
+  [ "$rows" = "0" ]
+}
+
+@test "postgres: --data-only artifact carries table data, no DDL (#129)" {
+  seed_postgres_db "$TEST_DB" "CREATE TABLE widgets(id int PRIMARY KEY, name text);
+  INSERT INTO widgets VALUES (1,'a'),(2,'b'),(3,'c');"
+
+  dbx_run backup local-pg "$TEST_DB" --data-only
+  [ "$status" -eq 0 ]
+
+  local backup_file meta
+  backup_file=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst | head -1)
+  meta="${backup_file}.meta.json"
+  [ "$(jq -r .backup_mode "$meta")" = "data" ]
+
+  # Inspect the custom-format archive's table of contents. A data-only dump
+  # has TABLE DATA entries but no CREATE TABLE / TABLE definition entries.
+  local toc
+  toc=$(zstd -dc "$backup_file" | docker exec -i postgres-dbx pg_restore -l 2>/dev/null)
+  echo "$toc" | grep -q "TABLE DATA"
+  ! echo "$toc" | grep -qE "TABLE public widgets|CREATE TABLE"
+}
+
+@test "postgres: --schema-only and --data-only are mutually exclusive (#129)" {
+  dbx_run backup local-pg "$TEST_DB" --schema-only --data-only
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -qi "mutually exclusive"
+}

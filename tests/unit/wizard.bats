@@ -160,3 +160,21 @@ time.sleep(5)
   [ "$status" -ne 0 ]
   [[ "$output" == *"out of range"* ]]
 }
+
+# ----------------------------------------------------------------------------
+# cmd_serve — #126: loopback-by-default + --allow-host
+# ----------------------------------------------------------------------------
+
+@test "dbx serve --help: loopback is the default, expose is opt-in (#126)" {
+  run "$DBX_BIN" serve --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"127.0.0.1"* ]]
+  [[ "$output" == *"--bind"* ]]
+}
+
+@test "dbx serve --help advertises --allow-host + DBX_SERVE_ALLOW_HOST (#126)" {
+  run "$DBX_BIN" serve --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--allow-host"* ]]
+  [[ "$output" == *"DBX_SERVE_ALLOW_HOST"* ]]
+}

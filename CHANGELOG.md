@@ -4,6 +4,69 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-06-23
+
+### Security
+
+- **GPG passphrase no longer passed via process argv (#127).** `encrypt_stream`, `decrypt_stream`, and symmetric `gpg_file_write` passed the vault passphrase as `gpg --passphrase "$x"`, leaving it visible in `ps` / `/proc/PID/cmdline` for the duration of the call on a multi-user host. The passphrase is now fed on a file descriptor (`--passphrase-fd`); the data stream stays on stdin. Behaviour-preserving. (First slice — covers GPG; the `docker exec` `PGPASSWORD`/`MYSQL_PWD` sites are a follow-up.)
+- **`dbx serve` defaults to loopback and validates the `Host` header (#126).** `dbx serve` now binds `127.0.0.1` by default (matching `dbx wizard`); exposing it on other interfaces is opt-in via `--bind 0.0.0.0` / `DBX_SERVE_BIND`. The server also validates the request `Host` against an allowlist (loopback + `--allow-host` / `DBX_SERVE_ALLOW_HOST`) as a DNS-rebinding defence. Under `--no-token` — the only mode with no per-request credential — a non-loopback `Host` is refused (`403 bad host`) unless allow-listed; in token mode a wildcard bind stays permissive (token + `SameSite` already cover rebinding) with a startup nudge to set `--allow-host`. **Breaking:** a host (non-container) `dbx serve` that relied on the implicit `0.0.0.0` default must now pass `--bind 0.0.0.0`; under `--no-token` also set `--allow-host` to the hostname you reach it by. The official container image is unaffected (it pins `DBX_SERVE_BIND=0.0.0.0`).
+- **SSH tunnel reuse is no longer spoofable via `ps` (#128).** `create_ssh_tunnel` found and adopted existing tunnels by grepping the system-wide process list for an `ssh … -L …` pattern, so another local user could run a process with a matching argv and make dbx "reuse" — and route prod DB traffic through — a tunnel they control. Reuse and teardown now go through an ssh `ControlMaster` socket kept in a per-user `0700` directory (under `$XDG_RUNTIME_DIR`/`$DBX_RUNTIME_DIR`, falling back to the data dir): the socket is self-authenticating (only its owner could have created it), reuse is gated on `ssh -O check` **plus** a re-verification that the forwarded port is still listening, and teardown uses `ssh -O exit` instead of `kill`-by-PID. The local-port TOCTOU is closed too — `ssh -o ExitOnForwardFailure=yes` makes ssh's own bind authoritative, with a retry across ports — and `ControlPersist=60` lets a follow-up dbx command reuse a still-live tunnel. The control dir is refused if it isn't owned by the current user and mode `0700`.
+
+### Changed
+
+- **Wizard tables are sortable and render readable timestamps (#191, #192).** Every data table in the `dbx wizard` / `dbx serve` UI (Backups, Restore, Runs, Vault, Storage, Schedule, Dashboard, Analyze) now shares one set of formatters: timestamps render as compact **local** time (full UTC on hover) instead of raw ISO strings that wrapped across lines, sizes use consistent human-readable units, and most tables support click-to-sort with ▲/▼ indicators (default newest-first). Long backup filenames truncate to one line with the full name on hover, and backup tag chips flow inline instead of stacking.
+
+### Fixed
+
+- **`dbx update` resolves the latest release reliably (#190).** It no longer silently falls back to installing bleeding-edge `main` when the GitHub REST `releases/latest` lookup is rate-limited (60 req/hr/IP unauthenticated). The latest released tag is now resolved through a chain — gh CLI (authenticated) → REST API (now honoring `GH_TOKEN`/`GITHUB_TOKEN`) → `git ls-remote` (git protocol, not REST-rate-limited) — and only falls back to `main` if all three fail.
+
+## [0.37.0] - 2026-06-20
+
+### Added
+
+- **Official `dbx serve` container image.** `ghcr.io/steig/dbx` packages the wizard/`serve` appliance for team / headless deployments — a multi-arch (amd64/arm64) image published on each release, plus a `docker/Dockerfile` and `docker/docker-compose.yml` recipe. It drives the host Docker daemon through a bind-mounted socket (database engines stay in the managed `postgres-dbx`/`mysql-dbx` containers), runs the wizard on `:8080`, and persists state in `/config`, `/data`, `/audit` volumes. Host networking is recommended so SSH tunnels and `docker exec` behave as on a host. New `DBX_VAULT_BACKEND` env var forces a keychain-free credential backend (`pass`/`gpg-file`) in a container. Local single-user setups should keep `dbx wizard` as a host process. See [Containerized serve](https://steig.github.io/dbx/container/). (#180)
+
+## [0.36.0] - 2026-06-20
+
+### Security
+
+- **Wizard config-save can no longer plant a shell command (RCE fix).** `config.json` is a trust boundary — the CLI shell-executes several config fields on the host (`hosts[*].password_cmd`, the notification `webhook_url_cmd` / `smtp_password_cmd` / `command.*` templates, and storage `s3.secret_key_cmd`). The wizard writes `config.json`, so a client reaching `/save` could otherwise inject one and get code execution on the next host operation. These fields are now server-owned on save: their value always comes from the trusted on-disk config, never the client. (This also fixes a latent bug where a form re-save wiped a CLI-set `password_cmd`.) Set them via the CLI / direct config edit only. (#125)
+- **`GET /api/vault/get` no longer leaks secrets over the network.** The endpoint returns a cleartext credential, so it is now served only to a loopback client with the token gate enabled — refused under `--no-token` / `--no-auth` and to any non-loopback client. Reveal a secret on a remote `dbx serve` over an SSH tunnel (which reads as loopback). (#124)
+- **The auth token no longer rides in the URL.** It bootstraps an `HttpOnly`, `SameSite=Strict` session cookie on first load; the page then strips `?token=` from the address bar and authenticates by cookie. Token comparison is constant-time (`hmac.compare_digest`), all responses send `Referrer-Policy: no-referrer`, and the served HTML no longer embeds the token — closing leaks via browser/shell history, `Referer`, and embedded URLs. (#123)
+
+## [0.35.0] - 2026-06-20
+
+### Added
+
+- **`dbx containers` — manage the auto-managed containers as a group.** `dbx containers list | restart | start | stop | down [-y]` controls the `postgres-dbx` / `mysql-dbx` containers (and anything labeled `com.dbx.managed`) without raw `docker`. Managed containers are now labeled `com.dbx.managed=true` + `com.dbx.engine=<postgres|mysql>` at creation; `down` confirms before removing (restored DBs are lost; on-disk backups are unaffected). Includes shell completion and a man page. (#177)
+
+## [0.34.0] - 2026-06-20
+
+### Added
+
+- **`--schema-only` / `--data-only` for `dbx backup`.** Postgres uses `pg_dump --section`; MySQL runs only the relevant pass of its two-pass dumper. The mode is recorded in `.meta.json`. (#129)
+- **PostgreSQL roles / grants / globals.** Opt-in `dbx backup --globals` (or `backup_globals` config) captures cluster-wide roles, grants, and tablespaces via `pg_dumpall --globals-only --no-role-passwords` into a `<backup>.globals.sql` sidecar; apply them on restore with `dbx restore --with-globals`. Refused for `--transform`/`--into` (cluster globals must not hit an unmanaged container). Postgres-only. (#130)
+- **MariaDB is now a first-class engine** — surfaced in the host-add wizard, config validation, and docs (it already worked through the MySQL path). (#132)
+- **Restore verifies backup integrity before importing.** The backup's SHA-256 is checked against its `.meta.json` (after download for `--from-remote`); a mismatch aborts the restore. `--skip-verify` bypasses it; a missing/checksum-less `.meta.json` warns rather than fails. (#116)
+
+### Changed
+
+- **Backups are written atomically.** The dump streams to a sibling temp file and is `mv`d into place only after its `.meta.json` is written, so an interrupted or disk-full backup never leaves a truncated file under the canonical name (which `latest` would otherwise select). (#117)
+
+### Fixed
+
+- Host-alias validation is now consistent between the CLI and the web wizard — an alias the wizard accepts is no longer rejected by `dbx host add`. (#118)
+- `install.sh` now fetches the `dbx-build-image` man page (it existed but was never installed). (#122)
+- Removed a dead `pg_dump --jobs` config read that implied a parallel-dump feature that did not run. (#121)
+
+### Security & CI
+
+- Least-privilege `GITHUB_TOKEN` permissions and a SHA-pinned shellcheck action in CI; `ruff` lint on the wizard server; added `SECURITY.md`. (#119, #120, #139)
+
+### Docs & tooling
+
+- README brought current (multi-backend storage, `DBX_ALLOW_PROD_RESTORE`, `--skip-verify`, accurate badges). Added cloud-Postgres/CockroachDB connection recipes, a restore-test verification drill, uninstall instructions, `CONTRIBUTING.md` + issue/PR templates, and a `justfile` for local dev. (#131, #133, #134, #135, #136, #141)
+
 ## [0.33.0] - 2026-06-17
 
 ### Added

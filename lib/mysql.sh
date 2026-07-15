@@ -38,12 +38,15 @@ mysql_stderr_filter() {
 # sibling .meta.json with size, checksum, dbx_version, and
 # `type: "mysql"`.
 # Args: $1=host alias, $2=database name, $3=output base path,
-#       $4=verbose ("true"/"false")
+#       $4=verbose ("true"/"false"), $5=backup mode
+#       ("" full, "schema" schema-only, "data" data-only)
 mysql_backup() {
   local host="$1"
   local database="$2"
   local output_file="$3"
   local verbose="${4:-false}"
+  # "" (full = both passes), "schema" (pass 1 only), or "data" (pass 2 only).
+  local backup_mode="${5:-}"
 
   local start_time
   start_time=$(date +%s)
@@ -154,7 +157,10 @@ mysql_backup() {
   docker cp "$cred_file" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
   docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
 
-  # Pass 1: Schema for ALL tables (including excluded ones)
+  # Pass 1: Schema for ALL tables (including excluded ones).
+  # Skipped entirely for --data-only (leaves an empty schema.sql).
+  : > "$tmpdir/schema.sql"
+  if [[ "$backup_mode" != "data" ]]; then
   log_info "Dumping schema (tables, views, routines, triggers)..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (schema pass) started"
   # When verbose, tee mysqldump's stderr live to the user's terminal in
@@ -201,6 +207,7 @@ mysql_backup() {
       die "Schema dump failed"
     fi
   fi
+  fi
 
   # ALWAYS surface mysqldump's stderr (even on exit 0), filtering only the
   # cosmetic password warning. mysqldump SILENTLY SKIPS tables the backup
@@ -229,16 +236,21 @@ mysql_backup() {
       | sed 's/^/  /' \
       >&2 || true
   }
-  _dbx_mysqldump_surface_warnings "schema pass" "$err_file"
+  if [[ "$backup_mode" != "data" ]]; then
+    _dbx_mysqldump_surface_warnings "schema pass" "$err_file"
 
-  if [[ ! -s "$tmpdir/schema.sql" ]]; then
-    cat "$err_file" >&2
-    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
-    audit_backup "$host" "$database" "failure"
-    die "Schema dump produced empty output - check connection and permissions"
+    if [[ ! -s "$tmpdir/schema.sql" ]]; then
+      cat "$err_file" >&2
+      docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
+      audit_backup "$host" "$database" "failure"
+      die "Schema dump produced empty output - check connection and permissions"
+    fi
   fi
 
-  # Pass 2: Data for non-excluded tables
+  # Pass 2: Data for non-excluded tables.
+  # Skipped entirely for --schema-only (leaves an empty data.sql).
+  : > "$tmpdir/data.sql"
+  if [[ "$backup_mode" != "schema" ]]; then
   log_info "Dumping data..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (data pass) started"
   local ignore_opts=()
@@ -282,6 +294,7 @@ mysql_backup() {
     fi
   fi
   _dbx_mysqldump_surface_warnings "data pass" "$err_file"
+  fi
 
   # Clean up credential file in container
   docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
@@ -328,7 +341,7 @@ mysql_backup() {
   # completes (the restore-time gate will then do its own post-restore
   # check as a fallback for legacy/empty meta).
   local scrub_schema_tsv scrub_schema_json="{}"
-  scrub_schema_tsv=$(docker exec -i -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+  scrub_schema_tsv=$(MYSQL_PWD="$db_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -h "$db_host" -P "$db_port" -u "$db_user" -B -N \
     -e "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = '$database' ORDER BY table_name, ordinal_position" 2>/dev/null < /dev/null || true)
   if [[ -n "$scrub_schema_tsv" ]]; then
@@ -349,6 +362,7 @@ mysql_backup() {
     --arg src_flavor "$flavor" \
     --arg src_major "$src_major" \
     --arg src_minor "$src_minor" \
+    --arg backup_mode "${backup_mode:-full}" \
     --argjson scrub_schema "$scrub_schema_json" \
     '{
       host: $host,
@@ -362,6 +376,7 @@ mysql_backup() {
       source_flavor: $src_flavor,
       source_major_version: $src_major,
       source_minor_version: $src_minor,
+      backup_mode: $backup_mode,
       source_extensions: [],
       scrub_schema: $scrub_schema
     }' > "$meta_file"
@@ -601,7 +616,7 @@ mysql_restore_backup_streaming() {
   root_pass=$(docker exec "$MYSQL_CONTAINER" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
 
   # Pre-create target DB outside the streamed import.
-  docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+  MYSQL_PWD="$root_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -u root -e "CREATE DATABASE IF NOT EXISTS \`$target_db\`" >/dev/null
 
   # filter_sql is defined inline as a function-scoped here so the streaming
@@ -624,20 +639,20 @@ mysql_restore_backup_streaming() {
     { decompress_backup "$backup_file" \
         | bash -c "$filter_sql_cmd" \
         | "${transform_argv[@]}" \
-        | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+        | MYSQL_PWD="$root_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
           mysql -u root "$target_db"
     } || rc=$?
   else
     { decompress_backup "$backup_file" \
         | bash -c "$filter_sql_cmd" \
-        | docker exec -i -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+        | MYSQL_PWD="$root_pass" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
           mysql -u root "$target_db"
     } || rc=$?
   fi
 
   if [[ "$rc" -ne 0 ]]; then
     log_error "Streaming restore FAILED (exit $rc). Dropping target '$target_db' for cleanliness."
-    docker exec -e MYSQL_PWD="$root_pass" "$MYSQL_CONTAINER" \
+    MYSQL_PWD="$root_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
       mysql -u root -e "DROP DATABASE IF EXISTS \`$target_db\`" >/dev/null 2>&1 || true
     return $rc
   fi
@@ -942,7 +957,7 @@ mysql_detect_server_version() {
   local stderr_file
   stderr_file=$(mktemp -t dbx-mysql-detect-stderr.XXXXXX)
   local raw rc
-  raw=$(docker exec -i -e MYSQL_PWD="$password" \
+  raw=$(MYSQL_PWD="$password" docker exec -i -e MYSQL_PWD \
     "$container" \
     mysql -h "$host" -P "$port" -u "$user" -N -e 'SELECT VERSION()' \
     2>"$stderr_file")

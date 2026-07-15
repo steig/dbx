@@ -133,12 +133,15 @@ nav:
       - Install: install.md
       - Quick start: quick-start.md
       - Configuration: configuration.md
+      - Cloud-hosted Postgres: cloud-postgres.md
       - Config builder: config-builder.md
       - Interactive wizards: wizards.md
       - Persistent wizard (serve): serve.md
+      - Containerized serve: container.md
   - Using dbx:
       - Backup: backup.md
       - Restore: restore.md
+      - Verifying backups: verifying-backups.md
       - Post-restore hooks: post-restore-hooks.md
       - PII scrub: scrub.md
       - AI restore prep: restore-prep.md

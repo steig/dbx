@@ -133,13 +133,13 @@
         <table class="tbl">
           <thead>
             <tr>
-              <th>Host</th>
-              <th>Safety</th>
-              <th>Database</th>
-              <th>Backup</th>
-              <th>Size</th>
+              <th class="sortable" @click="setSort('host')">Host<span class="sort-ind" x-text="sortInd('host')"></span></th>
+              <th class="sortable" @click="setSort('safety')">Safety<span class="sort-ind" x-text="sortInd('safety')"></span></th>
+              <th class="sortable" @click="setSort('database')">Database<span class="sort-ind" x-text="sortInd('database')"></span></th>
+              <th class="sortable grow" @click="setSort('filename')">Backup<span class="sort-ind" x-text="sortInd('filename')"></span></th>
+              <th class="num sortable" @click="setSort('size', 'desc')">Size<span class="sort-ind" x-text="sortInd('size')"></span></th>
               <th>Encryption</th>
-              <th>When</th>
+              <th class="sortable" @click="setSort('mtime', 'desc')">When<span class="sort-ind" x-text="sortInd('mtime')"></span></th>
               <th>Status</th>
               <th></th>
             </tr>
@@ -147,7 +147,7 @@
           <tbody>
             <template x-for="b in pickerFiltered()" :key="b.path">
               <tr :class="{ 'is-incomplete': !b.complete }">
-                <td x-text="b.host"></td>
+                <td class="nowrap" x-text="b.host"></td>
                 <td>
                   <template x-if="b.safety === 'prod'">
                     <span class="chip chip--prod">PROD</span>
@@ -160,14 +160,14 @@
                   </template>
                 </td>
                 <td x-text="b.database"></td>
-                <td><code class="mono" x-text="b.filename"></code></td>
-                <td x-text="formatSize(b.size)"></td>
+                <td class="grow ellip" :title="b.filename"><code class="mono" x-text="b.filename"></code></td>
+                <td class="num" x-text="formatSize(b.size)"></td>
                 <td>
                   <span class="chip"
                         :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
                         x-text="b.encryption"></span>
                 </td>
-                <td x-text="formatWhen(b)"></td>
+                <td class="when" :title="dbxFmt.iso(b.timestamp || b.mtime)" x-text="formatWhen(b)"></td>
                 <td>
                   <template x-if="b.complete">
                     <span class="chip chip--complete"
@@ -382,13 +382,13 @@
             <table class="tbl">
               <thead>
                 <tr>
-                  <th>Host</th>
-                  <th>Safety</th>
-                  <th>Database</th>
-                  <th>Backup</th>
-                  <th>Size</th>
+                  <th class="sortable" @click="setSort('host')">Host<span class="sort-ind" x-text="sortInd('host')"></span></th>
+                  <th class="sortable" @click="setSort('safety')">Safety<span class="sort-ind" x-text="sortInd('safety')"></span></th>
+                  <th class="sortable" @click="setSort('database')">Database<span class="sort-ind" x-text="sortInd('database')"></span></th>
+                  <th class="sortable grow" @click="setSort('filename')">Backup<span class="sort-ind" x-text="sortInd('filename')"></span></th>
+                  <th class="num sortable" @click="setSort('size', 'desc')">Size<span class="sort-ind" x-text="sortInd('size')"></span></th>
                   <th>Encryption</th>
-                  <th>When</th>
+                  <th class="sortable" @click="setSort('mtime', 'desc')">When<span class="sort-ind" x-text="sortInd('mtime')"></span></th>
                   <th>Status</th>
                   <th></th>
                 </tr>
@@ -396,7 +396,7 @@
               <tbody>
                 <template x-for="b in pickerFiltered()" :key="b.path">
                   <tr :class="{ 'is-incomplete': !b.complete }">
-                    <td x-text="b.host"></td>
+                    <td class="nowrap" x-text="b.host"></td>
                     <td>
                       <template x-if="b.safety === 'prod'">
                         <span class="chip chip--prod">PROD</span>
@@ -409,14 +409,14 @@
                       </template>
                     </td>
                     <td x-text="b.database"></td>
-                    <td><code class="mono" x-text="b.filename"></code></td>
-                    <td x-text="formatSize(b.size)"></td>
+                    <td class="grow ellip" :title="b.filename"><code class="mono" x-text="b.filename"></code></td>
+                    <td class="num" x-text="formatSize(b.size)"></td>
                     <td>
                       <span class="chip"
                             :class="{ 'chip--enc': b.encryption === 'age' || b.encryption === 'gpg' }"
                             x-text="b.encryption"></span>
                     </td>
-                    <td x-text="formatWhen(b)"></td>
+                    <td class="when" :title="dbxFmt.iso(b.timestamp || b.mtime)" x-text="formatWhen(b)"></td>
                     <td>
                       <template x-if="b.complete">
                         <span class="chip chip--complete">✓ complete</span>
@@ -608,7 +608,7 @@
 
 <script>
   function dbxRestore() {
-    return {
+    return Object.assign(dbxSortable('mtime', 'desc'), {
       source: null,
       containers: [],
       form: { name: '', into: '', no_post_restore: false, hooks_only: false, no_scrub: false, keep_download: false },
@@ -854,10 +854,11 @@
       // dbxBackups().filtered() — host or database substring, lowercased.
       pickerFiltered() {
         const f = this.pickerFilter.trim().toLowerCase();
-        if (!f) return this.pickerRows;
-        return this.pickerRows.filter(b =>
-          b.host.toLowerCase().includes(f) || b.database.toLowerCase().includes(f)
-        );
+        const rows = f
+          ? this.pickerRows.filter(b =>
+              b.host.toLowerCase().includes(f) || b.database.toLowerCase().includes(f))
+          : this.pickerRows;
+        return this.applySort(rows);
       },
 
       // PR-K: stage a row as the selected backup. Same effect as clicking
@@ -871,19 +872,9 @@
 
       // PR-K helpers, kept in sync with dbxBackups()'s formatters so the
       // picker renders the same columns the user sees on the Backups tab.
-      formatSize(n) {
-        if (n == null) return '—';
-        if (n < 1024) return n + ' B';
-        if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
-        if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + ' MB';
-        return (n / 1024 ** 3).toFixed(2) + ' GB';
-      },
+      formatSize(n) { return dbxFmt.size(n); },
 
-      formatWhen(b) {
-        if (b.timestamp) return b.timestamp;
-        if (b.mtime) return new Date(b.mtime * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
-        return '—';
-      },
+      formatWhen(b) { return dbxFmt.date(b.timestamp || b.mtime); },
 
       buildBody() {
         const body = { source: this.source.path };
@@ -1143,6 +1134,6 @@
         const f = (this.source.source_flavor || '').toLowerCase();
         return f === 'mysql' || f === 'mariadb';
       },
-    };
+    });
   }
 </script>

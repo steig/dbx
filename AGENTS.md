@@ -206,6 +206,8 @@ done
 3. Add to `cmd_help()` output
 4. Update usage comment block at top of `dbx`
 5. If it needs a new library, create `lib/<name>.sh` and source it at top of `dbx`
+6. Add a `man/man1/dbx-<name>.1` page and add its filename to the `MAN_PAGES`
+   list in `install.sh` (the `release-consistency` CI job fails if these drift)
 
 ### Adding a New Library Module
 

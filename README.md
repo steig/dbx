@@ -1,12 +1,12 @@
 # dbx
 
-> A pragmatic database backup and restore CLI for PostgreSQL and MySQL. No local DB install. SSH tunnels for remote production. Encryption at rest. S3-compatible cloud storage. Scheduled backups via launchd or systemd. macOS and Linux.
+> A pragmatic database backup and restore CLI for PostgreSQL, MySQL, and MariaDB. No local DB install. SSH tunnels for remote production. Encryption at rest. S3-compatible cloud storage. Scheduled backups via launchd or systemd. macOS and Linux.
 
 [![CI](https://github.com/steig/dbx/actions/workflows/ci.yml/badge.svg)](https://github.com/steig/dbx/actions/workflows/ci.yml)
 [![Docs](https://github.com/steig/dbx/actions/workflows/docs.yml/badge.svg)](https://steig.github.io/dbx/)
 [![Release](https://img.shields.io/github/v/release/steig/dbx)](https://github.com/steig/dbx/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-220%2B%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-bats-brightgreen)](tests/)
 
 > 📖 **Full documentation:** **<https://steig.github.io/dbx>**
 
@@ -55,7 +55,7 @@ git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
 ```
 
-Once installed, `dbx update` upgrades in place when a new release is out.
+Once installed, `dbx update` upgrades in place when a new release is out. To remove dbx, see [Uninstall](docs/install.md#uninstall).
 
 > 💡 Prefer a browser-driven setup? After install, `dbx wizard` opens a form in your default browser. Or **try the form first without installing** at <https://steig.github.io/dbx/config-builder>.
 
@@ -111,21 +111,30 @@ Restore creates a versioned database (e.g. `myapp_v1_20260508`) inside the auto-
 
 | Command | Description |
 |---------|-------------|
-| `dbx backup [-v] [--upload] <host> [database]` | Back up one DB or every DB on a host |
-| `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download] [--no-post-restore \| --hooks-only] [--transform PATH] [--into NAME]` | Restore to a local container; `--from-remote` (or `s3://...`) pulls straight from cloud storage; `--no-post-restore` skips configured hooks; `--hooks-only --name X` re-runs hooks against an existing DB; `--transform PATH` pipes the restore stream through a host script (streaming sanitize, atomic on postgres); `--into NAME` targets a named running container instead of the managed postgres-dbx (postgres only) |
+| `dbx backup [-v] [--upload] [--schema-only \| --data-only] <host> [database]` | Back up one DB or every DB on a host; `--schema-only` dumps structure with no rows, `--data-only` dumps rows with no DDL (mutually exclusive) |
+| `dbx restore <source> [--name N] [--recreate-container] [--from-remote PATH] [--keep-download] [--skip-verify] [--no-post-restore \| --hooks-only] [--transform PATH] [--into NAME]` | Restore to a local container; the backup's SHA-256 is verified against its `.meta.json` before import (`--skip-verify` bypasses); `--from-remote` (or `s3://...`) pulls straight from cloud storage; `--no-post-restore` skips configured hooks; `--hooks-only --name X` re-runs hooks against an existing DB; `--transform PATH` pipes the restore stream through a host script (streaming sanitize, atomic on postgres); `--into NAME` targets a named running container instead of the managed postgres-dbx (postgres only) |
 | `dbx verify [backup-file]` | Verify SHA-256 checksum (interactive if `fzf` is installed) |
-| `dbx test <host>` | End-to-end connectivity check (SSH, container, creds, query) |
-| `dbx query <host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
-| `dbx analyze <host> <database>` | Pick tables to exclude from data dumps |
-| `dbx list [host] [database]` | List local backups |
-| `dbx clean [--keep N] [--dry-run] [--older-than D]` | Retention sweep |
+| `dbx test` (alias `ping`) `<host>` | End-to-end connectivity check (SSH, container, creds, query) |
+| `dbx query` (aliases `q`, `shell`) `<host> [database]` | Open a `psql` / `mysql` shell to a remote DB |
+| `dbx analyze` (alias `stats`) `<host> <database>` | Pick tables to exclude from data dumps |
+| `dbx list` (alias `ls`) `[host] [database]` | List local backups |
+| `dbx clean` (alias `prune`) `[--keep N] [--dry-run] [--older-than D]` | Retention sweep |
+| `dbx scrub init\|check\|validate <host/database>` | Manage PII scrub manifests and the restore-time gate |
+| `dbx host add` | Interactively add a backup host to `config.json` |
+| `dbx wizard` | Browser-based config builder |
+| `dbx serve [--bind ADDR] [--port N] [--token T \| --no-token]` | Run the wizard GUI as a persistent, network-reachable service |
+| `dbx build-image [--from-backup F] \| pg <MAJOR> --extensions ext1,ext2,...` | Pre-build a custom Postgres image for third-party extensions |
 | `dbx vault set\|get\|delete\|list\|info` | Manage host credentials |
-| `dbx config init\|edit\|show\|validate` | Manage configuration |
-| `dbx schedule add\|list\|remove\|run` | Manage scheduled backups |
-| `dbx storage upload\|download\|list\|sync\|info` | Cloud storage |
+| `dbx config` (alias `cfg`) `init\|edit\|show\|validate` | Manage configuration |
+| `dbx schedule` (alias `cron`) `add\|list\|remove\|run` | Manage scheduled backups |
+| `dbx storage` (alias `s3`) `upload\|download\|list\|sync\|info` | Cloud storage |
+| `dbx containers list\|restart\|start\|stop\|down` | Manage the auto-managed `postgres-dbx` / `mysql-dbx` containers as a group |
+| `dbx completion <bash\|zsh\|fish>` | Print a shell completion script |
 | `dbx update` | Re-run install.sh to upgrade to the latest release |
 | `dbx version` | Print version |
 | `dbx help` | One-screen reference (full docs: https://steig.github.io/dbx/) |
+
+> 🐳 Running a team / always-on server? `dbx serve` ships as an official container image — `ghcr.io/steig/dbx`. See [Containerized serve](docs/container.md) for the compose / `docker run` recipe. (Local single-user setups should keep `dbx wizard` as a host process.)
 
 ## Configuration
 
@@ -189,16 +198,30 @@ Config lives at `~/.config/dbx/config.json`. Minimal example:
     "backend": "auto",
     "gpg_key": "your-gpg-key-id"
   },
-  "storage": {
-    "type": "s3",
-    "s3": {
-      "bucket": "backups",
-      "endpoint": "http://minio:9000",
-      "prefix": "dbx/",
-      "access_key": "minioadmin",
-      "secret_key_cmd": "dbx vault get s3-secret-key"
+  "storages": {
+    "minio": {
+      "type": "s3",
+      "s3": {
+        "bucket": "backups",
+        "endpoint": "http://minio:9000",
+        "prefix": "dbx/",
+        "access_key": "minioadmin",
+        "secret_key_cmd": "dbx vault get s3-secret-key-minio"
+      }
+    },
+    "r2": {
+      "type": "s3",
+      "s3": {
+        "bucket": "backups",
+        "endpoint": "https://<acct>.r2.cloudflarestorage.com",
+        "region": "auto",
+        "prefix": "dbx/",
+        "access_key": "...",
+        "secret_key_cmd": "dbx vault get s3-secret-key-r2"
+      }
     }
   },
+  "defaults": { "storage": "minio" },
   "notifications": {
     "enabled": true,
     "on": "failure",
@@ -209,6 +232,13 @@ Config lives at `~/.config/dbx/config.json`. Minimal example:
   }
 }
 ```
+
+The `storages` map holds any number of named backends; `defaults.storage`
+names the one used when you don't pass `--upload=<name>` (backup) or
+`--storage <name>` (restore and `dbx storage` subcommands), and a host can
+pin its own with `"upload_storage": "<name>"`. A legacy single `storage`
+block (no `storages` map) still works and is treated as the default — no
+migration needed. See [docs/storage.md](docs/storage.md) for the full model.
 
 Validate after edits with `dbx config validate`.
 </details>
@@ -228,6 +258,12 @@ wizard offers to set that up too; if it is, it offers to flip
 auto-upload on for the new host.
 
 Requires `gum`.
+
+Backing up managed Postgres (RDS, Aurora, Cloud SQL, Neon, Supabase) or
+CockroachDB? They all speak the Postgres wire protocol, so the existing
+`type: postgres` path covers them — see
+[Cloud-hosted Postgres](docs/cloud-postgres.md) for per-provider
+connection recipes.
 
 ### Adding remote storage
 
@@ -347,6 +383,18 @@ dbx restore production/myapp/latest
 # → connect:    psql -h 127.0.0.1 -p 5432 -U postgres myapp_v1_20260508
 #               (default password: devpassword — see env vars below)
 ```
+
+Before importing, dbx re-computes the backup's SHA-256 and checks it against the
+checksum recorded in its `.meta.json` (for `--from-remote` restores this runs
+after the download). A mismatch aborts the restore; pass `--skip-verify` to
+bypass the check. When no `.meta.json` or no recorded checksum is found,
+verification is skipped with a warning rather than failing.
+
+Restoring a backup from a `safety=prod` host into a named container with
+`--into` is refused by default, so raw production data can't land in a local
+sidecar. Set `DBX_ALLOW_PROD_RESTORE=1` to opt in for acknowledged dev
+workflows; it bypasses only that gate and leaves every other prod protection
+in place.
 
 ### Restoring directly from S3 / MinIO
 
@@ -480,10 +528,12 @@ Every operation appends a JSON line to `~/.local/share/dbx/audit.log`:
 | `DBX_POSTGRES_IMAGE` | unset | Override the auto-managed PG container image. Supports `{major}` / `{version}` template substitution. |
 | `DBX_MYSQL_IMAGE` | unset | Override the auto-managed MySQL container image. Supports `{major}`, `{minor}`, `{version}` template substitution. |
 | `DBX_RECREATE_CONTAINER` | unset | Set to `true` (or pass `--recreate-container`) to allow destroying user DBs when the container's version doesn't match the backup. |
+| `DBX_ALLOW_PROD_RESTORE` | unset | Set to `1` to allow `restore --into` when the source backup comes from a `safety=prod` host. Off by default to keep raw production data out of local containers; only this gate is bypassed, every other prod protection stays in force. |
 | `DBX_NO_UPDATE_CHECK` | unset | Set to `1` to suppress update notices |
 | `DBX_REPO_SLUG` | `steig/dbx` | Override for forks |
 | `DBX_UPDATE_CHECK_INTERVAL` | `86400` | Seconds between update API hits |
 | `DBX_GPG_KEY` | unset | GPG key id for vault encryption |
+| `DBX_VAULT_BACKEND` | unset | Force the credential backend (`keychain`/`secret-tool`/`pass`/`gpg-file`), overriding config + auto-detection. For headless/container use with no host keychain. |
 
 ## Update Notifications
 
@@ -491,13 +541,15 @@ dbx checks GitHub Releases at the end of each interactive command and prints a o
 
 ```bash
 $ dbx version
-dbx 0.7.0
-[INFO] dbx 0.7.1 is available (you have 0.7.0). Run 'dbx update' to upgrade.
+dbx 0.33.0
+[INFO] dbx 0.33.1 is available (you have 0.33.0). Run 'dbx update' to upgrade.
 ```
 
 Opt out with `DBX_NO_UPDATE_CHECK=1`.
 
 ## Development
+
+A [`justfile`](justfile) wraps the commands CI runs — `just test` (unit + integration), `just lint`, `just syntax`. Run `just` (or `just help`) to list targets.
 
 ```bash
 # Lint

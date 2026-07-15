@@ -1,0 +1,48 @@
+# `dbx serve` as a headless appliance. See docs/container.md for the full guide.
+#
+#   docker compose up -d        # start the persistent wizard
+#   docker compose logs -f      # watch it (the startup URL/token is printed here)
+#
+# This is for the TEAM / always-on server. Local single-user setups should keep
+# running `dbx wizard` as a host process (keeps the OS-keychain credential story).
+services:
+  dbx:
+    image: ghcr.io/steig/dbx:latest
+    # build: { context: .., dockerfile: docker/Dockerfile }   # uncomment to build locally
+
+    # Host networking is recommended: SSH tunnels to remote sources, `docker exec`
+    # into the managed postgres-dbx/mysql-dbx containers, and the wizard port all
+    # then behave exactly as they do for a host process. The wizard listens on
+    # :8080 (DBX_SERVE_PORT). Trade-off: no network isolation from the host.
+    network_mode: host
+
+    environment:
+      # --- auth (pick ONE) ---
+      # Token mode (default, recommended): set a fixed token, or omit for a random
+      # one printed in the logs at startup.
+      DBX_SERVE_TOKEN: "${DBX_SERVE_TOKEN:-}"
+      # No-token mode: only behind a trusted identity proxy or a private tailnet.
+      # DBX_SERVE_NO_TOKEN: "true"
+
+      # --- credential vault (no host keychain in a container) ---
+      # Force a keychain-free backend. "gpg-file" reads $DBX_CONFIG_DIR/vault.gpg;
+      # "pass" reads a mounted password-store. Backups can also be encrypted with
+      # age (mount the identity + set DBX_AGE_IDENTITY), or use per-host
+      # password_cmd. See docs/container.md.
+      DBX_VAULT_BACKEND: "${DBX_VAULT_BACKEND:-gpg-file}"
+      # DBX_AGE_IDENTITY: /config/age-key.txt
+
+    volumes:
+      # The host Docker daemon — dbx drives pg_dump/mysqldump inside the managed
+      # containers through this. Mounting it grants host-root-equivalent access;
+      # only run this behind the auth/network controls described in the docs.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent dbx state.
+      - ./config:/config   # config.json, vault.gpg, age recipients
+      - ./data:/data       # backup files
+      - ./audit:/audit     # audit.log
+      # SSH keys/config for tunnelling to remote source DBs (read-only). Omit if
+      # all your sources are local containers or direct-connect cloud DBs.
+      - ${HOME}/.ssh:/root/.ssh:ro
+
+    restart: unless-stopped

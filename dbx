@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.33.0"
+VERSION="0.38.0"
 #
 # Usage:
 #   dbx backup [-v] [--upload] <host> [database]
@@ -64,12 +64,26 @@ cmd_backup() {
   local verbose=false
   local upload=false
   local upload_storage=""
+  # Backup section selector: "" (full), "schema" (--schema-only),
+  # or "data" (--data-only). Threaded into pg_backup/mysql_backup.
+  local backup_mode=""
+  # "" = defer to config (.hosts.<h>.backup_globals / .defaults.backup_globals).
+  # --globals / --no-globals force it on/off for this run (postgres only).
+  local globals=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -v|--verbose)
         verbose=true
+        shift
+        ;;
+      --globals)
+        globals=true
+        shift
+        ;;
+      --no-globals)
+        globals=false
         shift
         ;;
       --upload)
@@ -79,6 +93,16 @@ cmd_backup() {
       --upload=*)
         upload=true
         upload_storage="${1#--upload=}"
+        shift
+        ;;
+      --schema-only)
+        [[ "$backup_mode" == "data" ]] && die "--schema-only and --data-only are mutually exclusive"
+        backup_mode="schema"
+        shift
+        ;;
+      --data-only)
+        [[ "$backup_mode" == "schema" ]] && die "--schema-only and --data-only are mutually exclusive"
+        backup_mode="data"
         shift
         ;;
       -*)
@@ -95,7 +119,7 @@ cmd_backup() {
     esac
   done
 
-  [[ -z "$host" ]] && die "Usage: dbx backup [-v] [--upload] <host> [database]"
+  [[ -z "$host" ]] && die "Usage: dbx backup [-v] [--upload] [--schema-only|--data-only] <host> [database]"
 
   require_config
   require_jq
@@ -125,6 +149,10 @@ cmd_backup() {
       log_info "--- $db ---"
       local backup_args=("$host" "$db")
       [[ "$verbose" == "true" ]] && backup_args+=("-v")
+      [[ "$backup_mode" == "schema" ]] && backup_args+=("--schema-only")
+      [[ "$backup_mode" == "data" ]] && backup_args+=("--data-only")
+      [[ "$globals" == "true" ]] && backup_args+=("--globals")
+      [[ "$globals" == "false" ]] && backup_args+=("--no-globals")
       if [[ "$upload" == "true" ]]; then
         if [[ -n "$upload_storage" ]]; then backup_args+=("--upload=$upload_storage"); else backup_args+=("--upload"); fi
       fi
@@ -182,10 +210,11 @@ cmd_backup() {
   local backup_rc=0
   case "$db_type" in
     postgres|postgresql)
-      pg_backup "$host" "$database" "$backup_file" "$verbose" || backup_rc=$?
+      pg_backup "$host" "$database" "$backup_file" "$verbose" "$backup_mode" "$globals" || backup_rc=$?
       ;;
     mysql|mariadb)
-      mysql_backup "$host" "$database" "$backup_file" "$verbose" || backup_rc=$?
+      [[ -n "$globals" ]] && log_warn "--globals/--no-globals is postgres-only; ignored for $db_type"
+      mysql_backup "$host" "$database" "$backup_file" "$verbose" "$backup_mode" || backup_rc=$?
       ;;
     *)
       die "Unknown database type: $db_type"
@@ -250,6 +279,7 @@ cmd_restore() {
   local transform_script=""
   local transform_inherit_env=false
   local into_container=""
+  local with_globals=false
   local verbose=false
 
   # Mixed flag/positional parse: `source` is the only positional and
@@ -332,6 +362,12 @@ cmd_restore() {
         into_container="${1#--into=}"
         shift
         ;;
+      --with-globals|--globals)
+        # Apply the backup's globals sidecar (roles/grants/tablespaces)
+        # before the database restore. Postgres-only; no-op if no sidecar.
+        with_globals=true
+        shift
+        ;;
       --*|-*)
         die "Unknown option: $1"
         ;;
@@ -364,6 +400,13 @@ cmd_restore() {
   fi
   if [[ "$transform_inherit_env" == "true" && -z "$transform_script" ]]; then
     die "--transform-inherit-env requires --transform=PATH"
+  fi
+  # Globals are cluster-scoped role/grant changes. The streaming path
+  # (--transform / --into) targets a database in a container dbx does not
+  # manage; applying cluster globals there would mutate that cluster's roles.
+  # Refuse rather than silently skip.
+  if [[ "$with_globals" == "true" && (-n "$transform_script" || -n "$into_container") ]]; then
+    die "--with-globals is incompatible with --transform / --into (globals are cluster-scoped; the streaming path targets a single DB in an unmanaged container). Apply the .globals.sql sidecar manually."
   fi
 
   # Validate --transform target is an executable.
@@ -511,7 +554,10 @@ cmd_restore() {
 
     # Find all backup files (including encrypted)
     local backups
-    backups=$(find "$search_dir" -type f \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" -o -name "*.sql.zst.gpg" -o -name "*.sql.gz.gpg" -o -name "*.sql.zst.age" -o -name "*.sql.gz.age" \) 2>/dev/null | sort -r)
+    # `! -name "*.globals.sql"` keeps role/grant sidecars (which end in .sql)
+    # out of the restore picker — they're applied via --with-globals, not
+    # selected as a backup.
+    backups=$(find "$search_dir" -type f ! -name "*.globals.sql" \( -name "*.sql.zst" -o -name "*.sql.gz" -o -name "*.sql" -o -name "*.sql.zst.gpg" -o -name "*.sql.gz.gpg" -o -name "*.sql.zst.age" -o -name "*.sql.gz.age" \) 2>/dev/null | sort -r)
 
     if [[ -z "$backups" ]]; then
       die "No backup files found in: $search_dir"
@@ -764,9 +810,10 @@ cmd_restore() {
   else
     case "$db_type" in
       postgres|postgresql)
-        pg_restore_backup "$backup_file" "$target_name"
+        pg_restore_backup "$backup_file" "$target_name" "$with_globals"
         ;;
       mysql|mariadb)
+        [[ "$with_globals" == "true" ]] && log_warn "--with-globals is postgres-only; ignored for $db_type"
         mysql_restore_backup "$backup_file" "$target_name"
         ;;
       *)
@@ -855,9 +902,10 @@ cmd_restore() {
   # paths above all `die`, so the temp file is preserved for retry.
   if [[ -n "$remote_local_file" && "$keep_download" != "true" ]]; then
     local meta="${remote_local_file}.meta.json"
+    local globals="${remote_local_file}.globals.sql"
     local parent_dir
     parent_dir=$(dirname "$remote_local_file")
-    rm -f "$remote_local_file" "$meta"
+    rm -f "$remote_local_file" "$meta" "$globals"
     # Remove the mktemp dir if it's now empty (it's under $DATA_DIR/.remote/dl.XXXXXX).
     rmdir "$parent_dir" 2>/dev/null || true
   elif [[ -n "$remote_local_file" && "$keep_download" == "true" ]]; then
@@ -1007,14 +1055,15 @@ cmd_clean() {
             file_age_days=$(( ($(date +%s) - $(stat -c%Y "$backup")) / 86400 ))
           fi
           if [[ $file_age_days -gt $older_than_days ]]; then
-            local size meta_file
+            local size meta_file globals_file
             size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
             total_freed=$((total_freed + size))
             meta_file="${backup}.meta.json"
+            globals_file="${backup}.globals.sql"
             if [[ "$dry_run" == "true" ]]; then
               log_info "Would remove (${file_age_days}d old): $(basename "$backup")"
             else
-              rm -f "$backup" "$meta_file"
+              rm -f "$backup" "$meta_file" "$globals_file"
               log_info "Removed (${file_age_days}d old): $(basename "$backup")"
             fi
             ((total_removed++)) || true
@@ -1023,16 +1072,18 @@ cmd_clean() {
       elif [[ ${#backups[@]} -gt $effective_keep ]]; then
         local to_remove=("${backups[@]:$effective_keep}")
         for backup in "${to_remove[@]}"; do
-          local size meta_file
+          local size meta_file globals_file
           size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
           total_freed=$((total_freed + size))
           # Metadata is written at "<backup_filename>.meta.json" regardless
-          # of encryption suffix (see pg_backup / mysql_backup).
+          # of encryption suffix (see pg_backup / mysql_backup). The globals
+          # sidecar (if any) sits next to it as "<backup_filename>.globals.sql".
           meta_file="${backup}.meta.json"
+          globals_file="${backup}.globals.sql"
           if [[ "$dry_run" == "true" ]]; then
             log_info "Would remove: $(basename "$backup")"
           else
-            rm -f "$backup" "$meta_file"
+            rm -f "$backup" "$meta_file" "$globals_file"
             log_info "Removed: $(basename "$backup")"
           fi
           ((total_removed++)) || true
@@ -1308,10 +1359,10 @@ EOF
         huser=$(jq -r ".hosts[\"$h\"].user // empty" "$CONFIG_FILE")
 
         if [[ -z "$htype" ]]; then
-          log_error "Host '$h': missing 'type' (postgres or mysql)"
+          log_error "Host '$h': missing 'type' (postgres, mysql, or mariadb)"
           ((errors++)) || true
         elif [[ "$htype" != "postgres" && "$htype" != "postgresql" && "$htype" != "mysql" && "$htype" != "mariadb" ]]; then
-          log_error "Host '$h': invalid type '$htype' (use postgres or mysql)"
+          log_error "Host '$h': invalid type '$htype' (use postgres, mysql, or mariadb)"
           ((errors++)) || true
         fi
 
@@ -2644,7 +2695,13 @@ cmd_update() {
   # minutes, so `dbx update` right after a release would re-install the previous
   # version. Tag refs are immutable and served fresh, sidestepping the race.
   local ver ref
-  ver=$(fetch_latest_release 2>/dev/null || true)   # e.g. "0.19.1" (no leading v)
+  # Resolve the latest released tag, most-reliable source first:
+  #   gh CLI (authenticated, 5000/hr) → REST API (honors GH_TOKEN, else 60/hr)
+  #   → git ls-remote (git protocol, no REST rate limit). Only if all three
+  #   fail do we fall back to bleeding-edge main below.
+  ver=$(fetch_latest_release_gh 2>/dev/null || true)
+  [[ -z "$ver" ]] && ver=$(fetch_latest_release 2>/dev/null || true)
+  [[ -z "$ver" ]] && ver=$(fetch_latest_tag_git 2>/dev/null || true)
   if [[ -n "$ver" ]]; then
     ref="v$ver"
     log_info "Installing $ref from ${DBX_REPO_SLUG}"
@@ -2726,7 +2783,7 @@ host_add() {
     break
   done
 
-  new_type=$(gum choose --header "Database type:" "postgres" "mysql")
+  new_type=$(gum choose --header "Database type:" "postgres" "mysql" "mariadb")
   [[ -z "$new_type" ]] && { log_info "Aborted."; return 0; }
 
   new_user=$(gum input --header "Database user:" --placeholder "postgres")
@@ -3045,6 +3102,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}storage${NC}                       S3/MinIO upload, download, sync
   ${CYAN}storage add${NC}                   Interactively configure remote storage
   ${CYAN}scrub${NC}                         Manage PII scrub manifests
+  ${CYAN}containers${NC}                    List/restart/stop/start/remove the managed containers
   ${CYAN}config${NC}                        Manage configuration
   ${CYAN}host add${NC}                      Interactively add a backup host
   ${CYAN}wizard${NC}                        Browser-based config wizard
@@ -3060,6 +3118,106 @@ ${BOLD}QUICK START${NC}
 ${BOLD}DOCS${NC}
   ${BLUE}https://steig.github.io/dbx/${NC}
 EOF
+}
+
+# ============================================================================
+# Managed containers (group control)
+# ============================================================================
+# dbx auto-manages postgres-dbx / mysql-dbx and labels them com.dbx.managed.
+# `dbx containers` lets you see and control that group without raw docker.
+
+# Echo dbx-managed container names that actually exist, one per line. The set
+# is the union of the known managed names ($POSTGRES_CONTAINER / $MYSQL_CONTAINER)
+# and anything labeled com.dbx.managed=true (covers recreated / custom-named
+# containers, and pre-label containers via the known names).
+_dbx_managed_containers() {
+  local existing candidate
+  existing=$(docker ps -a --format '{{.Names}}' 2>/dev/null)
+  {
+    docker ps -a --filter "label=com.dbx.managed=true" --format '{{.Names}}' 2>/dev/null
+    printf '%s\n%s\n' "$POSTGRES_CONTAINER" "$MYSQL_CONTAINER"
+  } | awk 'NF' | sort -u | while IFS= read -r candidate; do
+    grep -qx "$candidate" <<<"$existing" && printf '%s\n' "$candidate"
+  done
+}
+
+_containers_list() {
+  local names; names=$(_dbx_managed_containers)
+  if [[ -z "$names" ]]; then
+    log_info "No dbx-managed containers exist yet — they're created on first backup/restore."
+    return 0
+  fi
+  printf '%-20s %-26s %s\n' "NAME" "STATUS" "IMAGE"
+  local n line nm st im
+  while IFS= read -r n; do
+    line=$(docker ps -a --filter "name=^/${n}$" --format '{{.Names}}|{{.Status}}|{{.Image}}' 2>/dev/null)
+    IFS='|' read -r nm st im <<<"$line"
+    printf '%-20s %-26s %s\n' "$nm" "$st" "$im"
+  done <<< "$names"
+}
+
+# Apply a plain docker verb (restart/start/stop) to each managed container.
+_containers_apply() {
+  local op="$1"; local names n
+  names=$(_dbx_managed_containers)
+  [[ -z "$names" ]] && { log_info "No dbx-managed containers to $op."; return 0; }
+  while IFS= read -r n; do
+    if docker "$op" "$n" >/dev/null 2>&1; then
+      log_success "$op: $n"
+    else
+      log_warn "could not $op $n"
+    fi
+  done <<< "$names"
+}
+
+_containers_down() {
+  local assume_yes=false n names reply
+  [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]] && assume_yes=true
+  names=$(_dbx_managed_containers)
+  [[ -z "$names" ]] && { log_info "No dbx-managed containers to remove."; return 0; }
+  log_warn "Removing these containers — any restored DBs inside them are lost"
+  log_warn "(on-disk backups in \$DBX_DATA_DIR are unaffected):"
+  while IFS= read -r n; do printf '  %s\n' "$n"; done <<< "$names"
+  if [[ "$assume_yes" != "true" ]]; then
+    printf 'Remove them? [y/N] '
+    read -r reply
+    [[ "$reply" =~ ^[Yy] ]] || { log_info "Aborted."; return 0; }
+  fi
+  while IFS= read -r n; do
+    docker rm -f "$n" >/dev/null 2>&1 && log_success "removed $n" || log_warn "could not remove $n"
+  done <<< "$names"
+}
+
+# Manage the dbx-managed container group: list / restart / start / stop / down.
+cmd_containers() {
+  local action="${1:-list}"
+  shift || true
+  case "$action" in
+    -h|--help|help)
+      cat <<EOF
+Usage: dbx containers [list|restart|start|stop|down]
+
+  list            Show dbx-managed containers and their status (default)
+  restart         Restart the managed containers (restored data preserved)
+  start           Start any stopped managed containers
+  stop            Stop the running managed containers
+  down [-y]       Remove the managed containers. Destroys any restored DBs
+                  inside them; on-disk backups in \$DBX_DATA_DIR are unaffected.
+
+Managed = ${POSTGRES_CONTAINER} / ${MYSQL_CONTAINER} (override via
+\$DBX_POSTGRES_CONTAINER / \$DBX_MYSQL_CONTAINER) plus any container labeled
+com.dbx.managed=true.
+EOF
+      return 0
+      ;;
+  esac
+  require_docker
+  case "$action" in
+    list|ls)        _containers_list ;;
+    restart|start|stop) _containers_apply "$action" ;;
+    down|rm|remove) _containers_down "$@" ;;
+    *) die "Unknown containers action: $action (use: list, restart, start, stop, down)" ;;
+  esac
 }
 
 # ============================================================================
@@ -3121,6 +3279,9 @@ main() {
       ;;
     scrub)
       cmd_scrub "$@"
+      ;;
+    containers|container)
+      cmd_containers "$@"
       ;;
     help|--help|-h)
       cmd_help

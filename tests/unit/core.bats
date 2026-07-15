@@ -220,3 +220,31 @@ setup() {
   run transform_exec_argv "false" "/path/to/script.sh"
   ! echo "$output" | grep -q "^TMPDIR=$"
 }
+
+# ----------------------------------------------------------------------------
+# detect_vault_backend — DBX_VAULT_BACKEND env override (#180, headless/container)
+# ----------------------------------------------------------------------------
+
+@test "detect_vault_backend: DBX_VAULT_BACKEND env forces the backend (over auto-detect)" {
+  _VAULT_BACKEND_CACHE=""
+  DBX_VAULT_BACKEND="gpg-file" run detect_vault_backend
+  [ "$status" -eq 0 ]
+  [ "$output" = "gpg-file" ]
+}
+
+@test "detect_vault_backend: DBX_VAULT_BACKEND env wins over .vault.backend config" {
+  write_config '{"vault":{"backend":"keychain"}}'
+  _VAULT_BACKEND_CACHE=""
+  DBX_VAULT_BACKEND="pass" run detect_vault_backend
+  [ "$status" -eq 0 ]
+  [ "$output" = "pass" ]
+}
+
+@test "detect_vault_backend: unset env falls back to .vault.backend config" {
+  write_config '{"vault":{"backend":"pass"}}'
+  _VAULT_BACKEND_CACHE=""
+  unset DBX_VAULT_BACKEND
+  run detect_vault_backend
+  [ "$status" -eq 0 ]
+  [ "$output" = "pass" ]
+}

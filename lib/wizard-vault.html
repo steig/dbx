@@ -145,18 +145,18 @@
       <table class="tbl">
         <thead>
           <tr>
-            <th>Key</th>
-            <th>Backend</th>
-            <th>Last set</th>
+            <th class="sortable" @click="setSort('key')">Key<span class="sort-ind" x-text="sortInd('key')"></span></th>
+            <th class="sortable" @click="setSort('backend')">Backend<span class="sort-ind" x-text="sortInd('backend')"></span></th>
+            <th class="num sortable" @click="setSort('last_set', 'desc')">Last set<span class="sort-ind" x-text="sortInd('last_set')"></span></th>
             <th></th>
           </tr>
         </thead>
         <tbody>
-          <template x-for="row in rows" :key="row.key">
+          <template x-for="row in sortedKeys()" :key="row.key">
             <tr>
               <td><span class="mono" x-text="row.key"></span></td>
               <td><span class="mono muted" x-text="row.backend || '—'"></span></td>
-              <td class="muted" x-text="formatTimestamp(row.last_set)"></td>
+              <td class="when muted" :title="dbxFmt.iso(row.last_set)" x-text="formatTimestamp(row.last_set)"></td>
               <td>
                 <div class="vault-actions">
                   <template x-if="revealed.key !== row.key">
@@ -214,7 +214,7 @@
 
 <script>
   function dbxVault() {
-    return {
+    return Object.assign(dbxSortable('key', 'asc'), {
       rows: [],
       loading: true,
       form: { key: '', value: '' },
@@ -364,15 +364,9 @@
         this._statusTimer = setTimeout(() => { this.saveStatus = { text: '', kind: '' }; }, 3000);
       },
 
-      formatTimestamp(ts) {
-        if (!ts) return 'unknown';
-        try {
-          const d = new Date(ts);
-          return d.toLocaleString();
-        } catch (e) {
-          return ts;
-        }
-      },
+      formatTimestamp(ts) { return dbxFmt.dateTime(ts); },
+
+      sortedKeys() { return this.applySort(this.rows); },
 
       // ----- age recipients -----
 
@@ -447,6 +441,6 @@
           this.recipientStatus = { text: '', kind: '' };
         }, 3000);
       },
-    };
+    });
   }
 </script>

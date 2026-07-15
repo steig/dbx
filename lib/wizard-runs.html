@@ -91,11 +91,11 @@
         <thead>
           <tr>
             <th></th>
-            <th>Action</th>
-            <th>Host / DB</th>
-            <th>When</th>
+            <th class="sortable" @click="setSort('action')">Action<span class="sort-ind" x-text="sortInd('action')"></span></th>
+            <th class="sortable" @click="setSort('_hostDb')">Host / DB<span class="sort-ind" x-text="sortInd('_hostDb')"></span></th>
+            <th class="num sortable" @click="setSort('timestamp', 'desc')">When<span class="sort-ind" x-text="sortInd('timestamp')"></span></th>
             <th class="num">Duration</th>
-            <th>Result</th>
+            <th class="sortable" @click="setSort('outcome')">Result<span class="sort-ind" x-text="sortInd('outcome')"></span></th>
           </tr>
         </thead>
         <tbody>
@@ -107,7 +107,7 @@
               </td>
               <td x-text="r.action || '—'"></td>
               <td x-text="hostDbLabel(r)"></td>
-              <td class="muted" x-text="formatTimestamp(r.timestamp)"></td>
+              <td class="muted when" :title="dbxFmt.iso(r.timestamp)" x-text="formatTimestamp(r.timestamp)"></td>
               <td class="num" x-text="formatDuration(r.duration_sec)"></td>
               <td>
                 <div class="runs-result">
@@ -135,7 +135,7 @@
 
 <script>
   function dbxRuns() {
-    return {
+    return Object.assign(dbxSortable('timestamp', 'desc'), {
       rows: [],
       loading: true,
       filter: '',
@@ -200,11 +200,11 @@
           // Envelope shape from format=v2. Defensive: also tolerate the
           // legacy bare-array shape in case something downstream changes.
           if (Array.isArray(body)) {
-            this.rows = body;
+            this.rows = body.map(r => this.decorate(r));
             this.total = body.length;
             this.filteredCount = body.length;
           } else {
-            this.rows = body.entries || [];
+            this.rows = (body.entries || []).map(r => this.decorate(r));
             this.total = body.total || 0;
             this.filteredCount = body.filtered || 0;
           }
@@ -231,7 +231,7 @@
           const f = this.filter.toLowerCase();
           rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(f));
         }
-        return rows;
+        return this.applySort(rows);
       },
 
       reset() {
@@ -268,6 +268,14 @@
         return `Showing ${shown} of ${this.total} ${this.total === 1 ? 'entry' : 'entries'}`;
       },
 
+      // Stamp a flat `_hostDb` sort key onto each row so the Host/DB column
+      // (otherwise composed on the fly by hostDbLabel) is sortable through
+      // the shared comparator, which only reads plain row properties.
+      decorate(r) {
+        r._hostDb = this.hostDbLabel(r);
+        return r;
+      },
+
       hostDbLabel(r) {
         // Backup audit rows: db_host + database. Restore: target_db.
         // Vault: account. Show what's available without inventing fields.
@@ -285,13 +293,9 @@
       },
 
       formatTimestamp(ts) {
-        if (!ts) return '—';
-        // audit_log emits ISO 8601 Z timestamps. Display in the user's local
-        // timezone for human readability; fall back to raw string if Date
-        // can't parse (don't drop information when the timestamp is weird).
-        const d = new Date(ts);
-        if (isNaN(d.getTime())) return ts;
-        return d.toISOString().replace('T', ' ').replace(/\..+/, '') + ' UTC';
+        // Audit rows carry second-precision ISO timestamps; dateTime keeps
+        // the seconds so distinct runs in the same minute stay distinguishable.
+        return dbxFmt.dateTime(ts);
       },
 
       formatDuration(secs) {
@@ -304,6 +308,6 @@
         const rem = n % 3600;
         return `${h}h ${Math.floor(rem / 60)}m ${rem % 60}s`;
       },
-    };
+    });
   }
 </script>

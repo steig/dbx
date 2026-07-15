@@ -16,7 +16,9 @@ import argparse
 import collections
 import datetime
 import functools
+import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -24,6 +26,7 @@ import secrets
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import urllib.parse
 
@@ -140,6 +143,12 @@ def parse_args():
                    help="Disable the URL-token gate entirely. Only safe behind a "
                         "trusted identity proxy (e.g. Cloudflare Access) or on a "
                         "private network (e.g. a tailnet).")
+    p.add_argument("--allow-host", action="append", default=None,
+                   help="Hostname allowed in the Host header (repeatable; "
+                        "comma-separated also accepted). Loopback and 'localhost' "
+                        "are always allowed. Under --no-auth, a non-loopback Host "
+                        "must be allow-listed or it is refused (DNS-rebinding "
+                        "hardening, #126).")
     p.add_argument("--html", required=True, help="Path to wizard.html shell")
     p.add_argument("--form-fragment", required=True, help="Path to wizard-form.html")
     p.add_argument("--backups-fragment", required=True, help="Path to wizard-backups.html")
@@ -2086,16 +2095,182 @@ def _remove_age_recipient(path, recipient):
     return _write_age_recipients_atomic(path, new_lines)
 
 
+# config.json is a trust boundary: several fields are eval'd / shell-executed
+# by the dbx CLI on the host — host `password_cmd` (core.sh), the notification
+# `webhook_url_cmd` / `smtp_password_cmd` / `command.*` templates (notify.sh),
+# and storage `s3.secret_key_cmd` (storage.sh). A wizard client that can POST
+# /save must NOT be able to plant one, or the next host operation runs it (#125,
+# config-write -> RCE). On every save we neutralize these: the value may come
+# only from the on-disk (operator/CLI-written) config, never from the client
+# payload. Renamed/new targets have no trusted value and so fail closed (the
+# client field is dropped). These fields stay settable via the CLI.
+def scrub_eval_fields(merged, existing):
+    """Mutate `merged` in place so every eval-bearing field equals its on-disk
+    `existing` value, or is removed when `existing` has none. Returns the list
+    of dotted paths whose client-supplied value was overridden or dropped."""
+    if not isinstance(existing, dict):
+        existing = {}
+    stripped = []
+
+    def preserve(dst, src, key, label):
+        # The eval-bearing field is server-owned: its saved value is always the
+        # trusted on-disk one, never the client's. dst/src may be None when the
+        # enclosing block is absent — nothing to enforce then.
+        if not isinstance(dst, dict):
+            return
+        trusted = src.get(key) if isinstance(src, dict) else None
+        client_sent = key in dst
+        if trusted is None:
+            # No trusted value to restore — drop whatever the client supplied.
+            if client_sent:
+                del dst[key]
+                stripped.append(label)
+        else:
+            # Force the trusted value (restores a CLI-set cmd the form omitted,
+            # and overrides any value the client tried to inject).
+            if client_sent and dst[key] != trusted:
+                stripped.append(label)
+            dst[key] = trusted
+
+    def sub(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else None
+
+    # hosts[alias].password_cmd
+    m_hosts, e_hosts = merged.get("hosts"), existing.get("hosts")
+    if isinstance(m_hosts, dict):
+        for alias, host in m_hosts.items():
+            preserve(host, sub(e_hosts, alias), "password_cmd",
+                     f"hosts.{alias}.password_cmd")
+
+    # notifications.{slack.webhook_url_cmd, email.smtp_password_cmd, command.*}
+    m_n, e_n = merged.get("notifications"), existing.get("notifications")
+    if isinstance(m_n, dict):
+        preserve(sub(m_n, "slack"), sub(e_n, "slack"), "webhook_url_cmd",
+                 "notifications.slack.webhook_url_cmd")
+        preserve(sub(m_n, "email"), sub(e_n, "email"), "smtp_password_cmd",
+                 "notifications.email.smtp_password_cmd")
+        m_cmd, e_cmd = sub(m_n, "command"), sub(e_n, "command")
+        for key in ("on_success", "on_failure", "default"):
+            preserve(m_cmd, e_cmd, key, f"notifications.command.{key}")
+
+    # storage.s3.secret_key_cmd (single-backend) + storages[name].s3.secret_key_cmd
+    preserve(sub(merged.get("storage"), "s3"), sub(existing.get("storage"), "s3"),
+             "secret_key_cmd", "storage.s3.secret_key_cmd")
+    m_ss, e_ss = merged.get("storages"), existing.get("storages")
+    if isinstance(m_ss, dict):
+        for name, backend in m_ss.items():
+            preserve(sub(backend, "s3"), sub(sub(e_ss, name), "s3"),
+                     "secret_key_cmd", f"storages.{name}.s3.secret_key_cmd")
+
+    return stripped
+
+
+def is_loopback_client(client_host):
+    """True if the request came from the local host. Handles 127.0.0.0/8, ::1,
+    and IPv4-mapped IPv6 (::ffff:127.0.0.1, seen when the server binds `::`).
+    An SSH tunnel terminates locally, so a tunnelled client also reads as
+    loopback — which is intended (that path is how you reach a remote wizard
+    safely)."""
+    try:
+        ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return ip.is_loopback
+
+
+def _host_only(host_header):
+    """The hostname from a Host header, port stripped, lowercased. Handles
+    bracketed IPv6 (`[::1]:8080` -> `::1`). Empty string when absent."""
+    if not host_header:
+        return ""
+    h = host_header.strip()
+    if h.startswith("["):                 # [::1] or [::1]:8080
+        end = h.find("]")
+        if end != -1:
+            return h[1:end].lower()
+    if h.count(":") == 1:                  # host:port (bare IPv6 has many colons)
+        h = h.split(":", 1)[0]
+    return h.lower()
+
+
+def host_header_allowed(handler, args):
+    """Validate the request's Host header against an allowlist — DNS-rebinding
+    defence (#126). This is the ONLY per-request gate under --no-auth, where the
+    token/SameSite cookie give no protection.
+
+    Always allowed: loopback IPs and 'localhost'. Also allowed: any --allow-host
+    entry and, for a concrete (non-wildcard) bind, the bind address itself.
+    Otherwise the policy splits:
+      - wildcard bind + no --allow-host + token auth  -> permissive (allow;
+        a one-time startup warning nudges the operator to set --allow-host)
+      - wildcard bind + no --allow-host + --no-auth   -> strict (refuse)
+      - explicit --allow-host, or a concrete bind     -> strict (refuse)
+    """
+    host = _host_only(handler.headers.get("Host"))
+    try:
+        ip = ipaddress.ip_address(host)
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if mapped is not None:
+            ip = mapped
+        if ip.is_loopback:
+            return True
+    except ValueError:
+        pass
+    if host == "localhost":
+        return True
+
+    allow = set()
+    for entry in (args.allow_host or []):
+        for part in entry.split(","):
+            part = part.strip().lower()
+            if part:
+                allow.add(part)
+    wildcard = args.host in ("0.0.0.0", "::", "")
+    if not wildcard:
+        allow.add(args.host.lower())
+    if host in allow:
+        return True
+
+    # Nothing matched: permissive only in token mode on a wildcard bind with no
+    # explicit allowlist; strict everywhere else.
+    if wildcard and not args.allow_host and not args.no_auth:
+        return True
+    return False
+
+
+# #123: name of the HttpOnly session cookie that carries the auth token after
+# the first page load, so it no longer has to ride in the URL.
+COOKIE_NAME = "dbx_token"
+
+
 def make_handler(args):
     def parse_query(path):
         return urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
 
-    def valid_token(path):
+    def cookie_token(handler):
+        # Pull the session token out of the Cookie header, if present. Kept
+        # deliberately small — the value is a hex token, no quoting to worry
+        # about. Returns None when the cookie is absent.
+        for part in (handler.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE_NAME:
+                return value
+        return None
+
+    def valid_token(handler):
+        # #123: a request authenticates by EITHER the bootstrap ?token= in the
+        # URL OR the HttpOnly session cookie minted from it on first load. The
+        # comparison is constant-time. A blank ?token= (parse_qs drops it) falls
+        # through to the cookie.
         if args.no_auth:
             return True
-        # Guard against a None configured token matching a blank ?token=
-        return args.token is not None and \
-            parse_query(path).get("token", [None])[0] == args.token
+        if args.token is None:
+            return False
+        supplied = parse_query(handler.path).get("token", [None])[0] or cookie_token(handler)
+        return supplied is not None and hmac.compare_digest(supplied, args.token)
 
     def compose_html():
         with open(args.html) as f:
@@ -2124,7 +2299,9 @@ def make_handler(args):
             analyze = f.read()
         # Relative so the browser POSTs to whatever origin served the page —
         # works for loopback, an SSH tunnel, and a non-loopback `dbx serve` bind.
-        save_url = f"/save?token={args.token}" if args.token else "/save"
+        # No token in the URL (#123): auth rides on the session cookie, so the
+        # secret is never embedded in the served HTML.
+        save_url = "/save"
         return (
             shell.replace("<!-- __DBX_FORM_FRAGMENT__ -->", form)
                  .replace("<!-- __DBX_BACKUPS_FRAGMENT__ -->", backups)
@@ -2323,6 +2500,13 @@ def make_handler(args):
         handler._send(code, json.dumps(payload), "application/json")
 
     class H(http.server.BaseHTTPRequestHandler):
+        def end_headers(self):
+            # #123: defense-in-depth against the token leaking via Referer on
+            # any navigation or subresource the wizard triggers. Applied to
+            # every response (all paths funnel through end_headers()).
+            self.send_header("Referrer-Policy", "no-referrer")
+            super().end_headers()
+
         def _send(self, code: int, body="", ctype: str = "text/plain"):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -2333,7 +2517,10 @@ def make_handler(args):
 
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
-            if not valid_token(self.path):
+            if not host_header_allowed(self, args):
+                self._send(403, "bad host")
+                return
+            if not valid_token(self):
                 self._send(403, "missing or bad token")
                 return
             if path == "/":
@@ -2342,7 +2529,20 @@ def make_handler(args):
                 except Exception as e:
                     self._send(500, f"compose failed: {e}")
                     return
-                self._send(200, html, "text/html; charset=utf-8")
+                # #123: when the token bootstrapped via the URL, mint the
+                # HttpOnly session cookie on this load. The page then scrubs
+                # ?token= from the address bar and authenticates by cookie.
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                if (not args.no_auth and args.token is not None
+                        and parse_query(self.path).get("token", [None])[0]):
+                    self.send_header(
+                        "Set-Cookie",
+                        f"{COOKIE_NAME}={args.token}; HttpOnly; SameSite=Strict; Path=/",
+                    )
+                self.end_headers()
+                self.wfile.write(html.encode())
                 return
             if path == "/api/backups":
                 send_json(self, 200, list_backups(args.data_dir, args.config_path))
@@ -2555,6 +2755,19 @@ def make_handler(args):
                 send_json(self, 200, rows)
                 return
             if path == "/api/vault/get":
+                # #124: this returns a cleartext secret in the response body.
+                # Refuse it whenever the token gate is off (--no-auth/--no-token),
+                # and to any non-loopback client — even token-authed, the value
+                # would travel over plaintext (non-TLS) HTTP. Net effect: works
+                # for a local `dbx wizard` and for an SSH-tunnelled session (both
+                # read as loopback); a remote `dbx serve` client gets 403.
+                if args.no_auth or not is_loopback_client(self.client_address[0]):
+                    send_json(self, 403, {
+                        "error": "vault/get is restricted to a loopback client with "
+                                 "auth enabled; reach it over an SSH tunnel "
+                                 "(ssh -L) rather than a remote bind"
+                    })
+                    return
                 qs = parse_query(self.path)
                 key = (qs.get("key", [""]) or [""])[0]
                 if not VAULT_KEY_RE.match(key):
@@ -2628,7 +2841,10 @@ def make_handler(args):
 
         def do_POST(self):
             path = urllib.parse.urlparse(self.path).path
-            if not valid_token(self.path):
+            if not host_header_allowed(self, args):
+                self._send(403, "bad host")
+                return
+            if not valid_token(self):
                 self._send(403, "forbidden")
                 return
 
@@ -2673,6 +2889,16 @@ def make_handler(args):
                     for k in FORM_MANAGED:
                         if k in form_cfg:
                             merged[k] = form_cfg[k]
+                    # #125: never let a wizard client set an eval-bearing field
+                    # (password_cmd, *_cmd, command templates) — restore each
+                    # from the trusted on-disk config or drop it.
+                    stripped = scrub_eval_fields(merged, existing)
+                    if stripped:
+                        print(
+                            "dbx wizard: refused client-supplied eval field(s) on "
+                            f"config-save: {', '.join(stripped)}",
+                            file=sys.stderr,
+                        )
                     try:
                         os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
                         tmp_path = f"{args.config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
@@ -3246,7 +3472,19 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main():
     args = parse_args()
+    if args.host in ("0.0.0.0", "::", "") and not args.allow_host and not args.no_auth:
+        # Token mode on a wildcard bind with no allowlist: the Host check is
+        # permissive (see host_header_allowed). Nudge the operator. (#126)
+        print("dbx serve: Host-header validation is permissive (token mode, no "
+              "--allow-host). Pass --allow-host <hostname> to restrict and harden "
+              "against DNS rebinding.", file=sys.stderr, flush=True)
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(args))
+    if args.port == 0:
+        # --port 0 lets the OS assign a free port; report the actual bound port
+        # so the parent can discover it without binding-then-closing a port and
+        # racing another process for it (TOCTOU). flush=True because stdout is a
+        # block-buffered pipe here, not a tty. See #176.
+        print(f"DBX_WIZARD_PORT={httpd.server_port}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
