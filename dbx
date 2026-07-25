@@ -1048,12 +1048,20 @@ cmd_clean() {
           ((idx++)) || true
           # Preserve the newest $effective_keep backups regardless of age.
           [[ $idx -le $effective_keep ]] && continue
-          local file_age_days
-          if is_macos; then
-            file_age_days=$(( ($(date +%s) - $(stat -f%m "$backup")) / 86400 ))
-          else
-            file_age_days=$(( ($(date +%s) - $(stat -c%Y "$backup")) / 86400 ))
+          # Probe both stat dialects rather than branching on `is_macos`: the
+          # OS does not decide the flavour. A macOS box with GNU coreutils
+          # first on PATH (nix, homebrew gnubin) took the BSD branch and died
+          # on `stat: invalid option -- '%'`, leaving an empty operand. Same
+          # idiom as the `stat -f%z || stat -c%s` size probe below.
+          local file_age_days mtime
+          mtime=$(stat -f%m "$backup" 2>/dev/null || stat -c%Y "$backup" 2>/dev/null || echo "")
+          # An unreadable mtime must never read as "infinitely old" — that
+          # would delete the backup. Keep it and warn.
+          if [[ -z "$mtime" ]]; then
+            log_warn "Cannot determine age of $(basename "$backup") — keeping it"
+            continue
           fi
+          file_age_days=$(( ($(date +%s) - mtime) / 86400 ))
           if [[ $file_age_days -gt $older_than_days ]]; then
             local size meta_file globals_file
             size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")

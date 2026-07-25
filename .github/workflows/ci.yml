@@ -164,6 +164,41 @@ jobs:
       - name: Run integration tests
         run: bats tests/integration/
 
+  # macOS counterpart to the job above. dbx runs pg_dump/psql/mysqldump *inside*
+  # the managed containers, so every round-trip test needs a Docker daemon —
+  # and GitHub's macOS runners cannot provide one: the arm64 images have no
+  # nested virtualization, so Colima/Lima cannot boot their VM, and macos-13
+  # (the last Intel image where that worked) was retired in December 2025.
+  #
+  # So this job runs the same suite and lets the Docker-dependent files skip
+  # themselves via require_docker. What executes is the host-side bash — file
+  # naming, retention, metadata, arg handling — which is exactly where the
+  # BSD-vs-GNU divergence this job exists to catch actually lives. It found
+  # two on the way in: `wc -l` padding in the tests, and a `stat` dialect
+  # branch in `dbx clean --older-than` (#142).
+  integration-tests-macos:
+    name: Integration tests (macOS, Docker-free subset)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: brew install bats-core jq zstd
+
+      - name: Run integration tests
+        run: |
+          set -o pipefail
+          bats --formatter tap tests/integration/ | tee "$RUNNER_TEMP/integration.tap"
+
+      # bats reports a run where every test skipped as a pass, so on its own
+      # the step above would go green while testing nothing — and would stay
+      # green if the Docker-free tests were deleted or gated behind Docker.
+      # This asserts a floor on tests that actually executed.
+      - name: Assert the run actually exercised something
+        if: always()
+        run: bash scripts/check-integration-coverage.sh "$RUNNER_TEMP/integration.tap" 10
+
   docker-image:
     name: Build container image
     runs-on: ubuntu-latest
