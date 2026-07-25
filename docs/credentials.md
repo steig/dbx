@@ -31,6 +31,8 @@ dbx vault list               # all stored credentials (alias: ls)
 dbx vault get <host>         # retrieve one (prints to stdout)
 dbx vault set <host>         # store / replace (prompts for password)
 dbx vault delete <host>      # remove (alias: rm)
+dbx vault set s3-secret-key-<storage>   # store / replace a storage backend's S3 secret
+dbx vault set s3-secret-key             # same, for the legacy single `storage` block
 dbx vault set-encryption-key      # store the backup encryption passphrase (prompts)
 dbx vault delete-encryption-key   # remove the stored encryption passphrase
 dbx vault init-age                # generate the age recipient/identity (alias: init-encryption)
@@ -43,7 +45,8 @@ dbx vault init-age                # generate the age recipient/identity (alias: 
 !!! warning "`config.json` is a trust boundary"
     `password_cmd` and the other `_cmd` / notification `command.*` fields are run as shell commands on the dbx host, so **write access to `config.json` is equivalent to code execution.** These fields are CLI/operator-managed only: the wizard refuses to set or change them from a browser client (it restores the on-disk value on every save). Set them by editing `config.json` directly or via the CLI, and treat the file's permissions accordingly.
 - The plaintext `password` field is a last-resort fallback. dbx warns when it's set.
-- For non-DB credentials (Slack webhook URLs, S3 secret keys), store them in the vault under any name and reference via `_cmd` keys in config:
+- `dbx vault set` only accepts a name it can recognise: a host alias from `config.json`, or a storage backend's `s3-secret-key[-<name>]` key. Anything else is refused as a typo — `dbx vault get` and `dbx vault delete` will still read and remove a key put in the vault by other means.
+- For other credentials (Slack webhook URLs, …), store them with the vault backend's own tool under the `dbx` service name — `security add-generic-password -s dbx -a slack-webhook -w`, `secret-tool store service dbx account slack-webhook`, `pass insert dbx/slack-webhook` — and reference them via `_cmd` keys in config:
   ```json
   "slack": { "webhook_url_cmd": "dbx vault get slack-webhook" }
   ```

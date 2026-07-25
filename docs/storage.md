@@ -29,6 +29,15 @@ Or hand-edit `config.json`:
 }
 ```
 
+Either way the secret itself belongs in the vault, not in `config.json`. Once the backend exists in the config, store or rotate it with:
+
+```bash
+dbx vault set s3-secret-key-<name>   # named backend under `storages`
+dbx vault set s3-secret-key          # the legacy single `storage` block
+```
+
+Storage operations read that key automatically; `secret_key_cmd` is only needed if you keep the secret somewhere else.
+
 ## Multiple named backends
 
 dbx can hold several storage backends at once — e.g. a Cloudflare R2 archive and a local MinIO — under a top-level `storages` map, with `defaults.storage` naming the one used when you don't pick explicitly. Each `dbx storage add` prompts for a name and stores its secret in the vault under `s3-secret-key-<name>`.

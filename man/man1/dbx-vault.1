@@ -3,7 +3,7 @@
 dbx-vault \- manage credentials and encryption keys
 .SH SYNOPSIS
 .B dbx vault set
-.I host
+.I name
 .PP
 .B dbx vault get
 .I host
@@ -32,9 +32,20 @@ backup encryption: the GPG passphrase or the
 identity file.
 .SH ACTIONS
 .TP
-.BI "set " host
-Prompt for and store a password for
-.IR host .
+.BI "set " name
+Prompt for and store a secret.
+.I name
+is either a host alias from
+.IR config.json ,
+in which case the secret is that host's database password, or the vault key of a
+configured storage backend
+.RI ( s3-secret-key- <storage>,
+or
+.I s3-secret-key
+for the legacy single
+.I storage
+block), in which case it is the backend's S3 secret key. A name that matches
+neither is rejected.
 .TP
 .BI "get " host
 Print the stored password for
@@ -68,6 +79,7 @@ to use it.
 .RS
 .nf
 dbx vault set production
+dbx vault set s3-secret-key-r2
 dbx vault list
 .fi
 .RE
