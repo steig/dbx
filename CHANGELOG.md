@@ -16,6 +16,7 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 ### Fixed
 
 - **`dbx wizard` / `dbx serve` no longer stall at startup on hosts with a slow resolver.** Python's `http.server` sets its `server_name` by calling `socket.getfqdn()` during bind — a reverse-DNS lookup — and only assigns the bound port afterwards. On a machine whose DNS resolver is slow or unreachable, that lookup blocks for the full resolver timeout, during which the socket is bound but nothing is being served and no port has been reported, so startup looks hung. The server now skips the lookup (`server_name` is only consulted by the CGI handlers, which dbx doesn't use). Measured with the lookup stubbed at 8s: startup went from 8.01s to 0.00s.
+- **`dbx test` shows why the connection failed (#201).** The connectivity check ran `psql` / `mysqladmin` under `>/dev/null 2>&1`, so a missing database, a rejected password, a `pg_hba.conf` rule, a TLS requirement and an unreachable host all collapsed into the same `PostgreSQL connection failed` line — in the one subcommand whose job is to isolate setup problems. The client's stderr is now printed under the error, one indented line per line (psql's second line is often the useful hint), while its stdout stays discarded. The password is not part of that output and never was: it reaches the container as an environment variable, not on the command line (#127), and a test asserts it does not appear.
 
 ## [0.38.0] - 2026-06-23
 
