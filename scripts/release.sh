@@ -4,8 +4,8 @@
 #
 # A dbx release bumps VERSION in `dbx`, the .TH line of all 19 man pages, and
 # moves CHANGELOG.md's [Unreleased] section under a dated heading — 21 files
-# that have to agree. Doing that by hand is how dbx-build-image.1 shipped
-# desynced (#122, #147).
+# that have to agree, plus SHASUMS256.txt, whose hashes 20 of them invalidate.
+# Doing that by hand is how dbx-build-image.1 shipped desynced (#122, #147).
 #
 # Which files carry the version is NOT defined here: this script sources
 # scripts/check-release-consistency.sh — the CI drift guard — and reuses its
@@ -38,7 +38,8 @@ usage() {
 Usage: scripts/release.sh [--dry-run] <X.Y.Z | major | minor | patch>
 
 Rewrites VERSION in dbx, the .TH line of every man/man1/*.1 (version + date),
-and moves CHANGELOG.md's [Unreleased] section under a dated heading. Then runs
+and moves CHANGELOG.md's [Unreleased] section under a dated heading, then
+regenerates SHASUMS256.txt over the result. Then runs
 scripts/check-release-consistency.sh as a gate.
 
 Options:
@@ -204,6 +205,10 @@ if [ "$dry_run" -eq 1 ]; then
   for rel in $changed; do
     diff -u -L "$rel" -L "$rel (after)" "$rel" "$stage/$rel" || true
   done
+  # The manifest covers dbx and every man page, so the bump rewrites it too.
+  # Hashing the staged copies shows exactly the lines the real run would write.
+  diff -u -L SHASUMS256.txt -L "SHASUMS256.txt (after)" \
+    SHASUMS256.txt <(release_shasums "$stage") || true
   info ""
   info "No files written. Re-run without --dry-run to apply."
   exit 0
@@ -213,6 +218,12 @@ fi
 for rel in $changed; do
   cat "$stage/$rel" > "$rel"
 done
+
+# Regenerate after applying, so it hashes what actually landed. The gate below
+# fails if this drifts, so the manifest cannot ship stale.
+release_shasums > SHASUMS256.txt
+changed="${changed}SHASUMS256.txt
+"
 
 info "Bumped $current -> $version across $(printf '%s' "$changed" | grep -c '') files (release date $today)."
 info ""

@@ -34,10 +34,34 @@ RUN apk add --no-cache \
 # Commander, not MinIO — so fetch the static MinIO binary for the build's target
 # architecture (buildx sets TARGETARCH to amd64 / arm64, which match min.io's
 # release path names).
-ARG TARGETARCH=amd64
-RUN curl -fsSL "https://dl.min.io/client/mc/release/linux-${TARGETARCH}/mc" \
-        -o /usr/local/bin/mc \
-    && chmod +x /usr/local/bin/mc
+#
+# Pinned to an archived release and checked against the digest min.io publishes
+# beside it (…/archive/<release>.sha256sum). The unpinned `/mc` path is a moving
+# target: it turned an unrelated PR red when dl.min.io reset the connection, and
+# it silently changes what lands in a published image. Bump deliberately — the
+# digests below come from the .sha256sum files for the same release.
+#
+# TARGETARCH is declared bare on purpose. `ARG TARGETARCH=amd64` does NOT mean
+# "amd64 unless building for something else" — the default shadows the value
+# BuildKit injects, so every arch resolved to amd64 and the published arm64
+# image carried an amd64 mc that could not execute. Without a default, a build
+# that doesn't supply it (legacy non-BuildKit builder) falls into the case
+# below and fails loudly instead.
+ARG TARGETARCH
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+ARG MC_SHA256_amd64=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+ARG MC_SHA256_arm64=14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) mc_sha="$MC_SHA256_amd64" ;; \
+      arm64) mc_sha="$MC_SHA256_arm64" ;; \
+      *) echo "no pinned mc checksum for TARGETARCH='$TARGETARCH'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+        "https://dl.min.io/client/mc/release/linux-${TARGETARCH}/archive/mc.${MC_RELEASE}" \
+        -o /usr/local/bin/mc; \
+    echo "${mc_sha}  /usr/local/bin/mc" | sha256sum -c -; \
+    chmod +x /usr/local/bin/mc
 
 # dbx resolves its libraries as `$(dirname dbx)/lib`, so the launcher and lib/
 # must live together. Keep the whole tree under /opt/dbx (on PATH) — it then runs
