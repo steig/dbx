@@ -136,12 +136,19 @@ corrupt() {
 }
 
 @test "install: leaves no staging directory behind on failure" {
-  before=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'dbx-install.*' 2>/dev/null | wc -l)
+  # Point install.sh at a private TMPDIR and assert it is empty afterwards.
+  # Counting dbx-install.* in the shared /tmp before and after cannot work:
+  # sibling tests in this file create staging dirs concurrently under
+  # `bats -j`, so the two counts differ for reasons unrelated to cleanup.
+  local stage_root="$BATS_TEST_TMPDIR/stage-root"
+  mkdir -p "$stage_root"
+
   corrupt dbx
-  install_dbx
+  install_dbx TMPDIR="$stage_root"
   [ "$status" -ne 0 ]
-  after=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'dbx-install.*' 2>/dev/null | wc -l)
-  [ "$before" -eq "$after" ]
+
+  run find "$stage_root" -maxdepth 1 -name 'dbx-install.*'
+  [ -z "$output" ]
 }
 
 # ----------------------------------------------------------------------------
