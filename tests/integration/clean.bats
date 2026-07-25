@@ -34,6 +34,50 @@ EOF
   done
 }
 
+# Put a `stat` on PATH that speaks only one dialect, so the age check is
+# exercised against each in turn regardless of which OS the suite runs on.
+# Implemented via perl (present on both runner images) because a macOS box
+# has no GNU stat to delegate to, and vice versa.
+# Args: bsd | gnu
+shim_stat() {
+  local flavor="$1"
+  local SHIM_DIR="$BATS_TEST_TMPDIR/shim"
+  mkdir -p "$SHIM_DIR"
+  cat > "$SHIM_DIR/stat" <<EOF
+#!/usr/bin/env bash
+# %m/%z are BSD's mtime/size; %Y/%s are GNU's. Reject the other dialect the
+# way a real stat does, so dbx has to fall through to the one we accept.
+case "\$1" in
+  -f%m) [[ "$flavor" == "bsd" ]] || { echo "stat: illegal option -- f" >&2; exit 1; }; idx=9 ;;
+  -f%z) [[ "$flavor" == "bsd" ]] || { echo "stat: illegal option -- f" >&2; exit 1; }; idx=7 ;;
+  -c%Y) [[ "$flavor" == "gnu" ]] || { echo "stat: invalid option -- 'c'" >&2; exit 1; }; idx=9 ;;
+  -c%s) [[ "$flavor" == "gnu" ]] || { echo "stat: invalid option -- 'c'" >&2; exit 1; }; idx=7 ;;
+  *) echo "stat: unsupported in shim: \$1" >&2; exit 1 ;;
+esac
+exec perl -e 'print((stat(\$ARGV[1]))[\$ARGV[0]])' "\$idx" "\$2"
+EOF
+  chmod +x "$SHIM_DIR/stat"
+  PATH="$SHIM_DIR:$PATH"
+}
+
+@test "clean --older-than works when only BSD stat is available" {
+  shim_stat bsd
+  make_fake_backups 3 30
+
+  dbx_run clean --older-than 7
+  [ "$status" -eq 0 ]
+  [ "$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')" = "0" ]
+}
+
+@test "clean --older-than works when only GNU stat is available" {
+  shim_stat gnu
+  make_fake_backups 3 30
+
+  dbx_run clean --older-than 7
+  [ "$status" -eq 0 ]
+  [ "$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')" = "0" ]
+}
+
 @test "clean --keep N retains exactly N newest backups" {
   make_fake_backups 7
 
@@ -41,7 +85,7 @@ EOF
   [ "$status" -eq 0 ]
 
   local remaining
-  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$remaining" = "3" ]
 }
 
@@ -67,7 +111,7 @@ EOF
   echo "$output" | grep -qi "Would remove"
 
   local remaining
-  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$remaining" = "5" ]
 }
 
@@ -79,8 +123,8 @@ EOF
 
   # Same number of .sql.zst and .meta.json files (no orphans)
   local zst meta
-  zst=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
-  meta=$(ls "$BACKUP_DIR"/*.meta.json 2>/dev/null | wc -l)
+  zst=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
+  meta=$(ls "$BACKUP_DIR"/*.meta.json 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$zst" = "1" ]
   [ "$meta" = "1" ]
 }
@@ -100,7 +144,7 @@ EOF
   [ "$status" -eq 0 ]
 
   local remaining
-  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$remaining" = "2" ]
 }
 
@@ -115,14 +159,14 @@ EOF
   make_fake_backups 7 60
 
   local before
-  before=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  before=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$before" = "12" ]
 
   dbx_run clean --keep 3 --older-than 30
   [ "$status" -eq 0 ]
 
   local remaining
-  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$remaining" = "5" ]
 }
 
@@ -137,6 +181,6 @@ EOF
   [ "$status" -eq 0 ]
 
   local remaining
-  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l)
+  remaining=$(ls "$BACKUP_DIR"/*.sql.zst 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$remaining" = "0" ]
 }
