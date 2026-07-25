@@ -3469,6 +3469,19 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def server_bind(self):
+        # http.server.HTTPServer.server_bind() sets self.server_name via
+        # socket.getfqdn(host) — a reverse-DNS lookup that blocks for however
+        # long the resolver takes to answer or time out. On a host with an
+        # unresponsive resolver that is tens of seconds during which the socket
+        # is bound but server_port is not yet set, so we have not printed the
+        # port and are not yet serving: `dbx wizard` looks hung at startup.
+        # server_name is only consulted by the CGI handlers, which we do not
+        # use, so bind directly and keep the host as given.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
+
 
 def main():
     args = parse_args()

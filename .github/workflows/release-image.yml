@@ -16,6 +16,8 @@ jobs:
   publish:
     name: Build & push to GHCR
     runs-on: ubuntu-latest
+    # Multi-arch (amd64 + arm64) under QEMU, so this is the slowest job we run.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
