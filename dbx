@@ -1713,7 +1713,7 @@ _analyze_emit_json() {
       # successful payload, which the user reads as "ran but nothing came
       # back". Now stderr flows to our stderr and a non-zero exit fails
       # the command — the wizard surfaces stderr to the UI in both cases.
-      stats_tsv=$(docker exec -i -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+      stats_tsv=$(PGPASSWORD="$db_pass" docker exec -i -e PGPASSWORD "$POSTGRES_CONTAINER" \
         psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
         -tA -F $'\t' -c "$engine_query")
       query_rc=$?
@@ -2550,10 +2550,10 @@ cmd_query() {
       local pg_opts=""
       [[ "$safety" == "prod" ]] && pg_opts="-c default_transaction_read_only=on"
       if [[ -n "$database" ]]; then
-        docker exec -it -e PGPASSWORD="$db_pass" -e PGOPTIONS="$pg_opts" "$POSTGRES_CONTAINER" \
+        PGPASSWORD="$db_pass" docker exec -it -e PGPASSWORD -e PGOPTIONS="$pg_opts" "$POSTGRES_CONTAINER" \
           psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database"
       else
-        docker exec -it -e PGPASSWORD="$db_pass" -e PGOPTIONS="$pg_opts" "$POSTGRES_CONTAINER" \
+        PGPASSWORD="$db_pass" docker exec -it -e PGPASSWORD -e PGOPTIONS="$pg_opts" "$POSTGRES_CONTAINER" \
           psql -h "$db_host" -p "$db_port" -U "$db_user"
       fi
       ;;
@@ -2564,20 +2564,20 @@ cmd_query() {
       # "Cannot execute statement in a READ ONLY transaction".
       if [[ "$safety" == "prod" ]]; then
         if [[ -n "$database" ]]; then
-          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+          MYSQL_PWD="$db_pass" docker exec -it -e MYSQL_PWD "$MYSQL_CONTAINER" \
             mysql -h "$db_host" -P "$db_port" -u "$db_user" \
             --init-command="SET SESSION TRANSACTION READ ONLY" "$database"
         else
-          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+          MYSQL_PWD="$db_pass" docker exec -it -e MYSQL_PWD "$MYSQL_CONTAINER" \
             mysql -h "$db_host" -P "$db_port" -u "$db_user" \
             --init-command="SET SESSION TRANSACTION READ ONLY"
         fi
       else
         if [[ -n "$database" ]]; then
-          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+          MYSQL_PWD="$db_pass" docker exec -it -e MYSQL_PWD "$MYSQL_CONTAINER" \
             mysql -h "$db_host" -P "$db_port" -u "$db_user" "$database"
         else
-          docker exec -it -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+          MYSQL_PWD="$db_pass" docker exec -it -e MYSQL_PWD "$MYSQL_CONTAINER" \
             mysql -h "$db_host" -P "$db_port" -u "$db_user"
         fi
       fi
@@ -2658,7 +2658,7 @@ cmd_test() {
   [[ -z "$test_db" ]] && test_db="postgres"
   case "$db_type" in
     postgres|postgresql)
-      if docker exec -e PGPASSWORD="$db_pass" "$POSTGRES_CONTAINER" \
+      if PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
         psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$test_db" -c "SELECT 1" >/dev/null 2>&1; then
         log_success "PostgreSQL connection successful"
       else
@@ -2667,7 +2667,7 @@ cmd_test() {
       fi
       ;;
     mysql|mariadb)
-      if docker exec -e MYSQL_PWD="$db_pass" "$MYSQL_CONTAINER" \
+      if MYSQL_PWD="$db_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
         mysqladmin ping -h "$db_host" -P "$db_port" -u "$db_user" >/dev/null 2>&1; then
         log_success "MySQL connection successful"
       else
