@@ -2588,6 +2588,16 @@ cmd_query() {
   esac
 }
 
+# Print a failed client's stderr under the error message. psql and mysqladmin
+# both emit multi-line diagnostics (the second line is often the useful hint,
+# e.g. "Is the server running on that host...?"), so every line is kept.
+log_client_error() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" =~ [^[:space:]] ]] && log_info "  $line"
+  done <<<"$1"
+}
+
 cmd_test() {
   local host="${1:-}"
 
@@ -2656,22 +2666,28 @@ cmd_test() {
   local test_db
   test_db=$(jq -r ".hosts[\"$host\"].databases // {} | keys[]" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
   [[ -z "$test_db" ]] && test_db="postgres"
+  local conn_err
   case "$db_type" in
     postgres|postgresql)
-      if PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
-        psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$test_db" -c "SELECT 1" >/dev/null 2>&1; then
+      # 2>&1 >/dev/null keeps stderr and discards stdout — the client's own
+      # message ("database does not exist", "no pg_hba.conf entry for host")
+      # is the whole point of `dbx test`.
+      if conn_err=$(PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
+        psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$test_db" -c "SELECT 1" 2>&1 >/dev/null); then
         log_success "PostgreSQL connection successful"
       else
         log_error "PostgreSQL connection failed"
+        log_client_error "$conn_err"
         return 1
       fi
       ;;
     mysql|mariadb)
-      if MYSQL_PWD="$db_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
-        mysqladmin ping -h "$db_host" -P "$db_port" -u "$db_user" >/dev/null 2>&1; then
+      if conn_err=$(MYSQL_PWD="$db_pass" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
+        mysqladmin ping -h "$db_host" -P "$db_port" -u "$db_user" 2>&1 >/dev/null); then
         log_success "MySQL connection successful"
       else
         log_error "MySQL connection failed"
+        log_client_error "$conn_err"
         return 1
       fi
       ;;
