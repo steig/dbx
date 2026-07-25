@@ -72,9 +72,12 @@ init_age_encryption() {
   identity_file=$(get_age_identity_file)
 
   if [[ -f "$identity_file" ]]; then
-    # Extract public key from identity file
+    # Extract public key(s) from the identity file. Let age-keygen read the
+    # file itself: piping `grep -v '^#' | head -1` into it picks whatever
+    # happens to be on the first non-comment line, which is the wrong key on
+    # a multi-key file and an empty line on a file with leading blanks.
     local public_key
-    public_key=$(grep -v "^#" "$identity_file" | head -1 | age-keygen -y 2>/dev/null || true)
+    public_key=$(age-keygen -y "$identity_file" 2>/dev/null || true)
 
     if [[ -n "$public_key" ]]; then
       mkdir -p "$(dirname "$recipients_file")"
