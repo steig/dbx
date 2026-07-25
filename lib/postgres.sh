@@ -561,8 +561,11 @@ pg_restore_backup() {
     # Apply globals before the database so any tablespaces/roles they define
     # exist first. Cluster-scoped, so it runs against the maintenance DB.
     if [[ -n "$globals_file" ]]; then
-      pg_apply_globals "$globals_file" \
-        env PGPASSWORD="$pg_pass" PGHOST="$pg_host" PGPORT="$pg_port"
+      # Export the credential into a scoped subshell instead of passing
+      # `env PGPASSWORD=...` as an argv prefix (which `ps` would show, #127);
+      # pg_apply_globals then runs psql with the password inherited from env.
+      ( export PGPASSWORD="$pg_pass" PGHOST="$pg_host" PGPORT="$pg_port"
+        pg_apply_globals "$globals_file" )
     fi
 
     # Create database if it doesn't exist

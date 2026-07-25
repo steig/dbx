@@ -121,3 +121,13 @@ assert_no_docker_argv_leak() {
   mysql_container_has_user_dbs some-my-container "$SENTINEL"
   assert_no_docker_argv_leak MYSQL_PWD
 }
+
+@test "_list_user_dbs (postgres): password via env, not docker argv (#127)" {
+  DBX_PG_PASSWORD="$SENTINEL" _list_user_dbs some-postgres-container >/dev/null
+  assert_no_docker_argv_leak PGPASSWORD
+}
+
+@test "_list_user_dbs (mysql): password via env, not docker argv (#127)" {
+  DBX_MYSQL_PASSWORD="$SENTINEL" _list_user_dbs some-mysql-container >/dev/null
+  assert_no_docker_argv_leak MYSQL_PWD
+}
