@@ -785,6 +785,16 @@ audit_log() {
   # Ensure directory exists
   mkdir -p "$AUDIT_LOG_DIR"
 
+  # Create the log at 600 *before* anything is written to it. Appending
+  # first and chmod'ing afterwards leaves a window where a fresh audit log
+  # exists at the default umask mode (typically 644): on a multi-user host
+  # another local user can open it in that window and keep the descriptor,
+  # which survives the later chmod. `>>` never truncates, so this is a
+  # no-op for a log that already exists; the chmod below still repairs the
+  # mode of logs created by older dbx versions.
+  (umask 077; : >>"$AUDIT_LOG_FILE")
+  chmod 600 "$AUDIT_LOG_FILE"
+
   # Build JSON entry. `-c` (compact / one-line) is REQUIRED: the audit
   # log is JSONL (one object per line), and pretty-printed `jq` output
   # would split each entry across ~5 lines. Readers like the wizard
@@ -808,7 +818,6 @@ audit_log() {
 
   # Append to log
   echo "$entry" >> "$AUDIT_LOG_FILE"
-  chmod 600 "$AUDIT_LOG_FILE"
 }
 
 # Audit helper for backup operations
