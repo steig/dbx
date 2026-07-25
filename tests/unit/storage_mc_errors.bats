@@ -25,17 +25,16 @@ setup() {
   mkdir -p "$STUBDIR" "$MC_STORE"
   cat >"$STUBDIR/mc" <<'STUB'
 #!/usr/bin/env bash
-# Fake mc. `alias set` takes the secret as a positional argument, so
-# MC_ECHO_ARGV=1 reproduces the worst case: the client quoting its own argv
-# back in an error message.
+# Fake mc. Credentials arrive in MC_HOST_<alias> (#217), so a failing
+# subcommand is the first thing that can reject them; MC_ECHO_HOST=1
+# reproduces the worst case left, a client quoting its own alias URL — which
+# carries the secret — back in an error message.
 sub="$1"; shift
+echo_host() {
+  [ "${MC_ECHO_HOST:-0}" = 1 ] || return 0
+  printf 'mc: <ERROR> alias URL: %s\n' "${MC_HOST_dbx_storage:-<unset>}" >&2
+}
 case "$sub" in
-  alias)
-    [ "${MC_ECHO_ARGV:-0}" = 1 ] && printf 'mc: <ERROR> invoked as: %s\n' "$*" >&2
-    [ -n "${MC_ALIAS_STDERR:-}" ] && printf '%s\n' "$MC_ALIAS_STDERR" >&2
-    echo "Added \`dbx-storage\` successfully."
-    exit "${MC_ALIAS_RC:-0}"
-    ;;
   cp)
     [ -n "${MC_CP_STDERR:-}" ] && printf '%s\n' "$MC_CP_STDERR" >&2
     [ "${MC_CP_RC:-0}" != 0 ] && exit "$MC_CP_RC"
@@ -56,7 +55,7 @@ case "$sub" in
     ;;
   rm)
     [ -n "${MC_RM_STDERR:-}" ] && printf '%s\n' "$MC_RM_STDERR" >&2
-    [ "${MC_RM_RC:-0}" != 0 ] && exit "$MC_RM_RC"
+    [ "${MC_RM_RC:-0}" != 0 ] && { echo_host; exit "$MC_RM_RC"; }
     rm -f "$MC_STORE/$(basename "$1")"
     exit 0
     ;;
@@ -145,17 +144,46 @@ check_deps_script() {
 # #212 — mc's own error text reaches the user
 # ----------------------------------------------------------------------------
 
-@test "storage test: surfaces mc's rejection of the credentials (#212)" {
+# `mc alias set` used to run first, so a bad key was rejected before anything
+# was transferred. The credentials travel in MC_HOST_<alias> now (#217) and the
+# first real operation is what rejects them — what the user is told must not
+# change, and must not be confused with an endpoint that isn't answering.
+@test "storage test: surfaces mc's rejection of the credentials (#212, #217)" {
   config_ok
   with_mc
-  MC_ALIAS_RC=1
-  MC_ALIAS_STDERR='mc: <ERROR> Unable to initialize new alias from the provided credentials. The request signature we calculated does not match.'
-  export MC_ALIAS_RC MC_ALIAS_STDERR
+  MC_CP_RC=1
+  MC_CP_STDERR='mc: <ERROR> Failed to copy `/tmp/probe`. The request signature we calculated does not match the signature you provided.'
+  export MC_CP_RC MC_CP_STDERR
 
   run storage_test_roundtrip
   [ "$status" -ne 0 ]
-  [[ "$output" == *"Unable to initialize new alias"* ]]
   [[ "$output" == *"signature we calculated does not match"* ]]
+  [[ "$output" != *"connection refused"* ]]
+}
+
+@test "storage test: surfaces an endpoint that isn't answering (#212, #217)" {
+  config_ok
+  with_mc
+  MC_CP_RC=1
+  MC_CP_STDERR='mc: <ERROR> Failed to copy `/tmp/probe`. Get "http://s3.example/b/": dial tcp: connect: connection refused'
+  export MC_CP_RC MC_CP_STDERR
+
+  run storage_test_roundtrip
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"connection refused"* ]]
+  [[ "$output" != *"signature"* ]]
+}
+
+# An endpoint with no scheme is the one credential-independent thing mc_configure
+# can still catch on its own: mc rejects `MC_HOST_x=AK:SK@host` with nothing more
+# useful than "Invalid arguments provided".
+@test "storage test: names a scheme-less endpoint instead of letting mc shrug (#217)" {
+  write_config "$(printf '{"storage":{"type":"s3","s3":{"endpoint":"s3.example","bucket":"b","access_key":"AK","secret_key_cmd":"printf %%s %s"}}}' "$SENTINEL")"
+  with_mc
+  run storage_test_roundtrip
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must start with http:// or https://"* ]]
+  [[ "$output" == *"s3.example"* ]]
 }
 
 @test "storage test: surfaces mc's upload error (#212)" {
@@ -229,21 +257,20 @@ check_deps_script() {
 # The secret never reaches the terminal (#127)
 # ----------------------------------------------------------------------------
 
-@test "storage test: mc quoting its own argv does not leak the secret (#127, #212)" {
+@test "storage test: mc quoting its own alias URL does not leak the secret (#127, #217)" {
   config_ok
   with_mc
-  MC_ECHO_ARGV=1
-  MC_ALIAS_RC=1
-  export MC_ECHO_ARGV MC_ALIAS_RC
+  MC_ECHO_HOST=1
+  MC_RM_RC=1
+  export MC_ECHO_HOST MC_RM_RC
 
   run storage_test_roundtrip
   [ "$status" -ne 0 ]
   # The error is surfaced...
-  [[ "$output" == *"invoked as: set dbx-storage"* ]]
+  [[ "$output" == *"alias URL: http://"* ]]
   # ...with the secret blanked out, and the access key left readable.
   [[ "$output" != *"$SENTINEL"* ]]
-  [[ "$output" == *"***"* ]]
-  [[ "$output" == *"AK"* ]]
+  [[ "$output" == *"AK:***@s3.example"* ]]
 }
 
 @test "storage test: a successful round-trip never prints the secret (#127)" {

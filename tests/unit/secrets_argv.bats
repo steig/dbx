@@ -59,6 +59,21 @@ echo 1
 STUB
   chmod +x "$stubdir/docker"
 
+  # Fake mc: log argv, and separately log the MC_HOST_* alias it was handed
+  # (proving the S3 secret is delivered via env, not argv).
+  MC_ARGV_LOG="$BATS_TEST_TMPDIR/mc-argv.log"
+  MC_ENV_LOG="$BATS_TEST_TMPDIR/mc-env.log"
+  export MC_ARGV_LOG MC_ENV_LOG
+  : >"$MC_ARGV_LOG"
+  : >"$MC_ENV_LOG"
+  cat >"$stubdir/mc" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MC_ARGV_LOG"
+env | grep '^MC_HOST_' >> "$MC_ENV_LOG"
+exit 0
+STUB
+  chmod +x "$stubdir/mc"
+
   PATH="$stubdir:$PATH"
 
   SENTINEL="S3CRET-PASS-$$"
@@ -130,6 +145,54 @@ assert_no_docker_argv_leak() {
 @test "_list_user_dbs (mysql): password via env, not docker argv (#127)" {
   DBX_MYSQL_PASSWORD="$SENTINEL" _list_user_dbs some-mysql-container >/dev/null
   assert_no_docker_argv_leak MYSQL_PWD
+}
+
+# ----------------------------------------------------------------------------
+# #217 — the S3 secret reaches mc through MC_HOST_<alias>, never argv
+# ----------------------------------------------------------------------------
+
+s3_config() {
+  write_config "$(printf '{"storage":{"type":"s3","s3":{"endpoint":"http://s3.example","bucket":"b","access_key":"AK","secret_key_cmd":"printf %%s %s"}}}' "$SENTINEL")"
+}
+
+# Assert the S3 secret reached mc via MC_HOST_<alias> but not via argv.
+assert_no_mc_argv_leak() {
+  [ -s "$MC_ARGV_LOG" ] || { echo "mc was never invoked"; return 1; }
+  if grep -q "$SENTINEL" "$MC_ARGV_LOG"; then
+    echo "LEAK: S3 secret found in mc argv:"; cat "$MC_ARGV_LOG"; return 1
+  fi
+  # `mc alias set` is what used to carry it; nothing may bring it back.
+  if grep -q '^alias' "$MC_ARGV_LOG"; then
+    echo "unexpected 'mc alias' invocation:"; cat "$MC_ARGV_LOG"; return 1
+  fi
+  grep -q "MC_HOST_dbx_storage=http://AK:$SENTINEL@s3.example" "$MC_ENV_LOG" || {
+    echo "secret did not reach mc via MC_HOST_<alias>; env log:"; cat "$MC_ENV_LOG"; return 1
+  }
+}
+
+@test "storage upload: S3 secret via MC_HOST_<alias>, not mc argv (#217)" {
+  s3_config
+  printf '.' >"$BATS_TEST_TMPDIR/probe"
+  storage_upload "$BATS_TEST_TMPDIR/probe" "probe" >/dev/null
+  assert_no_mc_argv_leak
+}
+
+@test "storage download: S3 secret via MC_HOST_<alias>, not mc argv (#217)" {
+  s3_config
+  storage_download "probe" "$BATS_TEST_TMPDIR/out" >/dev/null
+  assert_no_mc_argv_leak
+}
+
+@test "storage list: S3 secret via MC_HOST_<alias>, not mc argv (#217)" {
+  s3_config
+  storage_list "" >/dev/null
+  assert_no_mc_argv_leak
+}
+
+@test "storage delete: S3 secret via MC_HOST_<alias>, not mc argv (#217)" {
+  s3_config
+  storage_delete "probe" >/dev/null
+  assert_no_mc_argv_leak
 }
 
 # ----------------------------------------------------------------------------

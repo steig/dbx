@@ -72,8 +72,19 @@ CFG_MULTI='{"storages":{"r2":{"type":"s3","s3":{"bucket":"rb","endpoint":"https:
 @test "storage_vault_key + mc_alias_name are per-backend (named vs legacy)" {
   [ "$(_STORAGE_NAME=r2 storage_vault_key)" = "s3-secret-key-r2" ]
   [ "$(storage_vault_key)" = "s3-secret-key" ]
-  [ "$(_STORAGE_NAME=r2 mc_alias_name)" = "dbx-storage-r2" ]
-  [ "$(mc_alias_name)" = "dbx-storage" ]
+  [ "$(_STORAGE_NAME=r2 mc_alias_name)" = "dbx_storage_r2" ]
+  [ "$(mc_alias_name)" = "dbx_storage" ]
+}
+
+# The alias is the suffix of the MC_HOST_<alias> variable holding the
+# credentials (#217), so a backend name carrying a character that is legal in
+# a config key but not in a variable name must not produce an unusable one.
+@test "mc_alias_name is usable as an environment variable name (#217)" {
+  local alias
+  alias=$(_STORAGE_NAME='eu.west-1' mc_alias_name)
+  [ "$alias" = "dbx_storage_eu_west_1" ]
+  # `export MC_HOST_dbx-storage=...` fails outright: "not a valid identifier".
+  export "MC_HOST_$alias=http://a:b@example"
 }
 
 @test "storage_root_jq targets the named map vs legacy" {
