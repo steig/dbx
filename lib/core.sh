@@ -203,7 +203,7 @@ require_container() {
       # Wait for mysql to be ready
       log_info "Waiting for MySQL to initialize..."
       for i in {1..60}; do
-        if docker exec -e MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" mysql-dbx mysqladmin ping -h localhost -u root >/dev/null 2>&1; then
+        if MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" docker exec -e MYSQL_PWD mysql-dbx mysqladmin ping -h localhost -u root >/dev/null 2>&1; then
           break
         fi
         sleep 1
@@ -1600,7 +1600,7 @@ _recreate_container() {
           "$image" >/dev/null
         log_info "Waiting for MySQL to initialize..."
         for i in {1..60}; do
-          docker exec -e MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" "$container" \
+          MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" docker exec -e MYSQL_PWD "$container" \
             mysqladmin ping -h localhost -u root >/dev/null 2>&1 && break
           sleep 1
         done
@@ -1630,13 +1630,13 @@ _list_user_dbs() {
   esac
   case "$_db_type" in
     postgres)
-      docker exec -e PGPASSWORD="${DBX_PG_PASSWORD:-devpassword}" "$container" \
+      PGPASSWORD="${DBX_PG_PASSWORD:-devpassword}" docker exec -e PGPASSWORD "$container" \
         psql -U postgres -tA -c \
         "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres','template0','template1') ORDER BY datname" \
         2>/dev/null
       ;;
     mysql)
-      docker exec -e MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" "$container" \
+      MYSQL_PWD="${DBX_MYSQL_PASSWORD:-devpassword}" docker exec -e MYSQL_PWD "$container" \
         mysql -u root -N -e \
         "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys') ORDER BY schema_name" \
         2>/dev/null

@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Security
+
+- **DB passwords kept out of argv at the remaining call sites (#127).** The argv sweep in 0.38.0 missed four paths, which still passed the credential as `docker exec -e MYSQL_PWD="$x"` / an `env PGPASSWORD=…` prefix — visible in `ps` / `/proc/PID/cmdline` on a multi-user host. Now covered: the MySQL readiness loops in `require_container` and `_recreate_container`, the MySQL and Postgres branches of `_list_user_dbs`, and `pg_restore_backup`'s globals path. The first three use the same env-assignment prefix + name-only `-e` form as the rest of the codebase; the globals path exports into a scoped subshell. Behaviour-preserving.
+
 ### Fixed
 
 - **`dbx wizard` / `dbx serve` no longer stall at startup on hosts with a slow resolver.** Python's `http.server` sets its `server_name` by calling `socket.getfqdn()` during bind — a reverse-DNS lookup — and only assigns the bound port afterwards. On a machine whose DNS resolver is slow or unreachable, that lookup blocks for the full resolver timeout, during which the socket is bound but nothing is being served and no port has been reported, so startup looks hung. The server now skips the lookup (`server_name` is only consulted by the CGI handlers, which dbx doesn't use). Measured with the lookup stubbed at 8s: startup went from 8.01s to 0.00s.
