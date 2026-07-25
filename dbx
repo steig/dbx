@@ -1111,16 +1111,79 @@ cmd_clean() {
   fi
 }
 
+# `dbx vault set` target that names a storage backend's S3 secret instead of a
+# host password. The backend has to exist in config already, which keeps the
+# same typo protection the host lookup gives the other path.
+#   $1 = vault key   $2 = backend name ("" = legacy .storage block)
+vault_set_storage_secret() {
+  local key="$1" name="${2:-}"
+
+  local label root
+  if [[ -n "$name" ]]; then
+    label="storage '$name'"
+    root=".storages[\"$name\"]"
+  else
+    label="the default storage backend"
+    root=".storage"
+  fi
+
+  if [[ -z "$(get_config_value "${root}.type" 2>/dev/null || true)" ]]; then
+    local hint="Run: dbx storage add"
+    local known
+    known=$(storage_list_backends | tr '\n' ' ')
+    known="${known% }"
+    [[ -n "$known" ]] && hint="Configured backends: $known. $hint"
+    if [[ -n "$name" ]]; then
+      die "Storage '$name' not found in config. $hint"
+    else
+      die "No default storage block ('.storage') in config. $hint"
+    fi
+  fi
+
+  local endpoint bucket
+  endpoint=$(get_config_value "${root}.s3.endpoint" 2>/dev/null || true)
+  bucket=$(get_config_value "${root}.s3.bucket" 2>/dev/null || true)
+
+  echo -e "${BOLD}Setting S3 secret key for: $label${NC}"
+  echo "  Endpoint:  ${endpoint:-(unset)}"
+  echo "  Bucket:    ${bucket:-(unset)}"
+  echo "  Vault key: $key"
+  echo ""
+
+  echo -n "Secret key: "
+  local secret_key
+  read -rs secret_key
+  echo ""
+
+  if [[ -z "$secret_key" ]]; then
+    die "Secret key cannot be empty"
+  fi
+
+  keychain_set "$key" "$secret_key"
+  audit_vault "set" "$key" "success"
+  log_success "S3 secret key stored for: $label"
+  log_info "Secret will be retrieved automatically during storage operations"
+}
+
 cmd_vault() {
   local action="${1:-}"
   local host="${2:-}"
 
   case "$action" in
     set)
-      [[ -z "$host" ]] && die "Usage: dbx vault set <host>"
+      [[ -z "$host" ]] && die "Usage: dbx vault set <host>|s3-secret-key[-<storage>]"
 
       require_config
       require_jq
+
+      # Storage backends keep their S3 secret in this same vault namespace, so a
+      # storage-secret key is a legitimate target even though it names no host.
+      # A host of that name wins, since host passwords are the older meaning.
+      local storage_name
+      if ! host_exists "$host" && storage_name=$(vault_storage_key_name "$host"); then
+        vault_set_storage_secret "$host" "$storage_name"
+        return 0
+      fi
 
       # Get host info from config
       local db_host db_port db_user db_type

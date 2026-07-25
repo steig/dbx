@@ -75,6 +75,10 @@ require_docker() {
   command -v docker &>/dev/null || die "docker is required but not installed"
 }
 
+require_gum() {
+  command -v gum &>/dev/null || die "gum is required for the interactive wizards but not installed. Install with: brew install gum / apt install gum / nix-shell -p gum"
+}
+
 # Compose the docker `-p` publish mapping for an auto-managed dev container.
 # The host-side port is configurable (DBX_PG_HOST_PORT / DBX_MYSQL_HOST_PORT) so
 # the container can avoid clashing with a Postgres/MySQL already bound to the
@@ -487,6 +491,25 @@ gpg_file_list() {
 # ============================================================================
 # Unified vault interface
 # ============================================================================
+
+# Storage backends keep their S3 secret in the same vault namespace as host
+# passwords, under the key storage_vault_key() derives (lib/storage.sh):
+# "s3-secret-key" for the legacy `.storage` block, "s3-secret-key-<name>" for a
+# named backend. Return 0 when $1 has that shape, echoing the backend name (empty
+# for the legacy block); 1 otherwise. The name must be a valid identifier so
+# callers can interpolate it into a jq path.
+vault_storage_key_name() {
+  local key="${1:-}"
+  case "$key" in
+    s3-secret-key) return 0 ;;
+    s3-secret-key-?*)
+      local name="${key#s3-secret-key-}"
+      host_alias_valid "$name" || return 1
+      echo "$name"
+      ;;
+    *) return 1 ;;
+  esac
+}
 
 keychain_get() {
   local account="$1"
