@@ -60,6 +60,16 @@ run_create() {
     '
 }
 
+# Match an ssh flag as its own word in SSH_LOG. A bare `grep -- '-M'` also
+# matches the flag's *value*: the control path runs through BATS_RUN_TMPDIR,
+# which bats makes with `mktemp -d bats-run-XXXXXX`, so roughly one run in 62
+# lands on a directory like `bats-run-Mk3x9a` and every `-M` assertion reads
+# the path instead of the flag. That made the reuse test fail ~3% of the time
+# and, worse, made the positive `-M` assertions pass for the wrong reason.
+ssh_logged_flag() {
+  grep -qE "(^| )$1( |\$)" "$SSH_LOG"
+}
+
 # Compute the control socket path for the prod target (mirrors tunnel.sh).
 ctl_path() {
   local key; key=$(printf '%s' "jump|db|5432" | _sha256_stdin | cut -c1-32)
@@ -78,7 +88,7 @@ prime_reuse_socket() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"REUSED=false"* ]]
   [[ "$output" == *"RESULT"* ]]
-  grep -q -- '-M' "$SSH_LOG"
+  ssh_logged_flag -M
   grep -q 'ControlPersist=60' "$SSH_LOG"
   grep -q -- "-S $DBX_RUNTIME_DIR/dbx-tunnels/" "$SSH_LOG"
 }
@@ -93,7 +103,7 @@ prime_reuse_socket() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"REUSED=true"* ]]
   [[ "$output" == *"PORT=54321"* ]]
-  ! grep -q -- '-M' "$SSH_LOG"   # reuse must not start a new master
+  ! ssh_logged_flag -M   # reuse must not start a new master
 }
 
 @test "reuse: master alive but forward dead -> tears down and recreates (#128)" {
@@ -101,8 +111,8 @@ prime_reuse_socket() {
   run_create SSH_CHECK_RC=0 LSOF_LISTEN_RC=1
   [ "$status" -eq 0 ]
   [[ "$output" == *"REUSED=false"* ]]
-  grep -q -- '-O exit' "$SSH_LOG"   # dropped the stale master
-  grep -q -- '-M' "$SSH_LOG"        # then created a fresh one
+  ssh_logged_flag '-O exit'   # dropped the stale master
+  ssh_logged_flag -M          # then created a fresh one
 }
 
 @test "hardening: a non-0700 control dir is refused (#128)" {
@@ -148,5 +158,5 @@ prime_reuse_socket() {
       cleanup_tunnel
     '
   [ "$status" -eq 0 ]
-  grep -q -- '-O exit' "$SSH_LOG"
+  ssh_logged_flag '-O exit'
 }
