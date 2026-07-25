@@ -138,17 +138,40 @@ detect_s3_client() {
   fi
 }
 
+# Neither client ships with dbx and neither is checked by install.sh, so this
+# is the first place most people learn `mc` is needed at all. Name both options
+# and where to get them. Note for Debian/Ubuntu readers: `apt install mc` is
+# Midnight Commander, not this.
+s3_client_missing_message() {
+  printf '%s' "No S3 client found. 'dbx storage' needs 'mc' (MinIO Client) or the 'aws' CLI on PATH.
+  mc:  https://min.io/docs/minio/linux/reference/minio-mc.html#install-mc
+  aws: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+}
+
 require_s3_client() {
   local client
   client=$(detect_s3_client)
   if [[ "$client" == "none" ]]; then
-    die "No S3 client found. Install 'mc' (MinIO Client) or 'aws' CLI"
+    die "$(s3_client_missing_message)"
   fi
 }
 
 # ============================================================================
 # MinIO Client (mc) Operations
 # ============================================================================
+
+# Blank out every occurrence of the secret in text destined for the log. The
+# secret is on `mc alias set`'s argv, and mc quotes its arguments back in some
+# errors — this repo does not print secrets (#127). Pattern quoted so a secret
+# containing glob characters is matched literally.
+redact_secret() {
+  local text="$1" secret="$2"
+  if [[ -z "$secret" ]]; then
+    printf '%s' "$text"
+  else
+    printf '%s' "${text//"$secret"/***}"
+  fi
+}
 
 mc_configure() {
   local endpoint bucket access_key secret_key
@@ -160,7 +183,17 @@ mc_configure() {
   local secret_cmd
   secret_cmd=$(get_storage_config "s3.secret_key_cmd")
   if [[ -n "$secret_cmd" ]]; then
-    secret_key=$(eval "$secret_cmd")
+    # `cat` on a missing file, a locked keychain, a typo'd command: the command
+    # substitution alone reports none of it, leaving an empty secret and a
+    # "not fully configured" error that blames the config instead (#212).
+    local secret_err
+    secret_err=$(mktemp)
+    secret_key=$(eval "$secret_cmd" 2>"$secret_err") || true
+    if [[ -z "$secret_key" ]]; then
+      log_error "s3.secret_key_cmd produced no secret: $secret_cmd"
+      log_client_error "$(cat "$secret_err")"
+    fi
+    rm -f "$secret_err"
   else
     secret_key=$(keychain_get "$(storage_vault_key)" 2>/dev/null || true)
     if [[ -z "$secret_key" ]]; then
@@ -168,19 +201,30 @@ mc_configure() {
     fi
   fi
 
-  if [[ -z "$endpoint" || -z "$access_key" || -z "$secret_key" ]]; then
-    die "S3 storage not fully configured. Required: endpoint, access_key, secret_key"
+  local missing=()
+  [[ -z "$endpoint" ]] && missing+=("endpoint")
+  [[ -z "$access_key" ]] && missing+=("access_key")
+  [[ -z "$secret_key" ]] && missing+=("secret_key")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    die "S3 storage${_STORAGE_NAME:+ '$_STORAGE_NAME'} not fully configured — missing: ${missing[*]}"
   fi
 
-  # Configure mc alias (quietly)
-  mc alias set "$(mc_alias_name)" "$endpoint" "$access_key" "$secret_key" --api S3v4 >/dev/null 2>&1
+  # 2>&1 >/dev/null keeps mc's diagnostic and drops its chatter. Discarding
+  # both is what made "mc not installed", "wrong credentials" and "endpoint
+  # unreachable" indistinguishable (#212).
+  local alias_err
+  if ! alias_err=$(mc alias set "$(mc_alias_name)" "$endpoint" "$access_key" "$secret_key" --api S3v4 2>&1 >/dev/null); then
+    log_error "mc could not connect to $endpoint"
+    log_client_error "$(redact_secret "$alias_err" "$secret_key")"
+    return 1
+  fi
 }
 
 mc_upload() {
   local local_file="$1"
   local remote_path="$2"
 
-  mc_configure
+  mc_configure || return 1
 
   local bucket prefix
   bucket=$(get_storage_config "s3.bucket")
@@ -203,7 +247,7 @@ mc_download() {
   local remote_path="$1"
   local local_file="$2"
 
-  mc_configure
+  mc_configure || return 1
 
   local bucket prefix
   bucket=$(get_storage_config "s3.bucket")
@@ -225,7 +269,7 @@ mc_download() {
 mc_list() {
   local path="${1:-}"
 
-  mc_configure
+  mc_configure || return 1
 
   local bucket prefix
   bucket=$(get_storage_config "s3.bucket")
@@ -234,13 +278,15 @@ mc_list() {
 
   local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$path")"
 
-  mc ls "$full_path" 2>/dev/null
+  # mc's stderr is left alone: an empty listing and an unreachable bucket look
+  # the same on stdout, and the caller decides whether to show the difference.
+  mc ls "$full_path"
 }
 
 mc_delete() {
   local remote_path="$1"
 
-  mc_configure
+  mc_configure || return 1
 
   local bucket prefix
   bucket=$(get_storage_config "s3.bucket")
@@ -250,11 +296,13 @@ mc_delete() {
   local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Deleting: $full_path"
-  if mc rm "$full_path" >/dev/null 2>&1; then
+  local rm_err
+  if rm_err=$(mc rm "$full_path" 2>&1 >/dev/null); then
     log_success "Deleted"
     return 0
   else
     log_error "Delete failed"
+    log_client_error "$rm_err"
     return 1
   fi
 }
@@ -405,12 +453,15 @@ storage_upload() {
   local client
   client=$(detect_s3_client)
 
+  # Return here rather than falling through: the sidecar blocks below end in an
+  # `if` that is false whenever the sidecar is absent, and that 0 would become
+  # the function's exit status — a failed backup upload reporting success.
   case "$client" in
     mc)
-      mc_upload "$local_file" "$remote_path"
+      mc_upload "$local_file" "$remote_path" || return 1
       ;;
     aws)
-      aws_upload "$local_file" "$remote_path"
+      aws_upload "$local_file" "$remote_path" || return 1
       ;;
   esac
 
@@ -459,12 +510,14 @@ storage_download() {
   local client
   client=$(detect_s3_client)
 
+  # Same trap as storage_upload — here it is the trailing `echo "$local_file"`
+  # that would otherwise make every download look successful.
   case "$client" in
     mc)
-      mc_download "$remote_path" "$local_file"
+      mc_download "$remote_path" "$local_file" || return 1
       ;;
     aws)
-      aws_download "$remote_path" "$local_file"
+      aws_download "$remote_path" "$local_file" || return 1
       ;;
   esac
 
@@ -640,16 +693,20 @@ storage_delete() {
   local client
   client=$(detect_s3_client)
 
+  # The sidecar delete stays best-effort (it usually isn't there), but its
+  # `|| true` must not become the whole function's exit status.
+  local rc=0
   case "$client" in
     mc)
-      mc_delete "$remote_path"
+      mc_delete "$remote_path" || rc=1
       mc_delete "${remote_path}.meta.json" 2>/dev/null || true
       ;;
     aws)
-      aws_delete "$remote_path"
+      aws_delete "$remote_path" || rc=1
       aws_delete "${remote_path}.meta.json" 2>/dev/null || true
       ;;
   esac
+  return "$rc"
 }
 
 # ============================================================================
@@ -712,7 +769,7 @@ storage_sync_download() {
   local count=0
   case "$client" in
     mc)
-      mc_configure
+      mc_configure || return 1
       local bucket prefix
       bucket=$(get_storage_config "s3.bucket")
       prefix=$(get_storage_config "s3.prefix")
@@ -762,24 +819,39 @@ storage_test_roundtrip() {
   probe_remote=".dbx-test/probe-${ts}"
   probe_local=$(mktemp)
 
+  # Each step keeps the client's stderr and drops its routine "Uploading to:
+  # ..." chatter (2>&1 >/dev/null, the idiom from the #201 fix) — discarding
+  # both is what made every failure look identical (#212). The substitution
+  # being a subshell also contains a `die` deeper down (no S3 client, a missing
+  # endpoint): the step ends instead of the process, and the message is
+  # captured rather than lost.
+  local step_err
+
   log_info "storage test: upload"
-  if ! storage_upload "$probe_src" "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1; then
+  if ! step_err=$(storage_upload "$probe_src" "$probe_remote" "$_STORAGE_NAME" 2>&1 >/dev/null); then
     log_error "storage test: upload failed"
+    log_client_error "$step_err"
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
 
   log_info "storage test: list"
-  if ! storage_list ".dbx-test" "$_STORAGE_NAME" 2>/dev/null | grep -q "probe-${ts}"; then
+  # Merged streams here: the listing is grepped, and on a miss the client's
+  # complaint ("Unable to list", "bucket does not exist") is the diagnosis.
+  local listing
+  listing=$(storage_list ".dbx-test" "$_STORAGE_NAME" 2>&1) || true
+  if ! grep -q "probe-${ts}" <<<"$listing"; then
     log_error "storage test: list did not contain the uploaded probe"
+    log_client_error "$listing"
     storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1 || true
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
 
   log_info "storage test: download"
-  if ! storage_download "$probe_remote" "$probe_local" "$_STORAGE_NAME" >/dev/null 2>&1; then
+  if ! step_err=$(storage_download "$probe_remote" "$probe_local" "$_STORAGE_NAME" 2>&1 >/dev/null); then
     log_error "storage test: download failed"
+    log_client_error "$step_err"
     storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1 || true
     rm -f "$probe_src" "$probe_local"
     return 1
@@ -793,8 +865,9 @@ storage_test_roundtrip() {
   fi
 
   log_info "storage test: delete"
-  if ! storage_delete "$probe_remote" "$_STORAGE_NAME" >/dev/null 2>&1; then
+  if ! step_err=$(storage_delete "$probe_remote" "$_STORAGE_NAME" 2>&1 >/dev/null); then
     log_error "storage test: delete failed (probe left in bucket)"
+    log_client_error "$step_err"
     rm -f "$probe_src" "$probe_local"
     return 1
   fi
