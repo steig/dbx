@@ -21,10 +21,14 @@ setup() {
   REPO="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$REPO/man/man1" "$REPO/scripts" "$REPO/lib"
   cp "$DBX_REPO_ROOT/dbx" "$REPO/dbx"
-  cp "$DBX_REPO_ROOT/CHANGELOG.md" "$DBX_REPO_ROOT/install.sh" "$REPO/"
+  cp "$DBX_REPO_ROOT/CHANGELOG.md" "$DBX_REPO_ROOT/install.sh" \
+     "$DBX_REPO_ROOT/SHASUMS256.txt" "$REPO/"
   seed_unreleased
   cp "$DBX_REPO_ROOT"/man/man1/*.1 "$REPO/man/man1/"
-  cp "$DBX_REPO_ROOT"/lib/*.sh "$REPO/lib/"
+  # The whole payload, not just the libs: SHASUMS256.txt covers every file
+  # install.sh downloads, and the drift guard rehashes all of them.
+  cp "$DBX_REPO_ROOT"/lib/*.sh "$DBX_REPO_ROOT"/lib/*.html \
+     "$DBX_REPO_ROOT/lib/wizard-server.py" "$REPO/lib/"
   cp "$DBX_REPO_ROOT"/scripts/*.sh "$REPO/scripts/"
   git -C "$REPO" init -q
   # Belt and braces for git < 2.32, which ignores GIT_CONFIG_GLOBAL.
@@ -240,10 +244,31 @@ released_sections() {
 @test "release: leaves check-release-consistency.sh passing" {
   release "$NEXT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"OK: man pages, .TH versions, and lib list are all in sync"* ]]
+  [[ "$output" == *"OK: man pages, .TH versions, install.sh's file lists, and SHASUMS256.txt are all in sync"* ]]
 
   run bash "$REPO/scripts/check-release-consistency.sh"
   [ "$status" -eq 0 ]
+}
+
+@test "release: regenerates SHASUMS256.txt over the bumped files" {
+  before=$(grep '  dbx$' "$REPO/SHASUMS256.txt")
+
+  release "$NEXT"
+  [ "$status" -eq 0 ]
+
+  # The launcher and every man page changed, so their digests must have too.
+  [ "$(grep '  dbx$' "$REPO/SHASUMS256.txt")" != "$before" ]
+  run bash -c "cd '$REPO' && shasum -a 256 -c SHASUMS256.txt >/dev/null 2>&1 ||
+               sha256sum -c SHASUMS256.txt >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
+}
+
+@test "release: --dry-run previews the SHASUMS256.txt rewrite without writing it" {
+  before=$(cat "$REPO/SHASUMS256.txt")
+  release --dry-run "$NEXT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SHASUMS256.txt (after)"* ]]
+  [ "$(cat "$REPO/SHASUMS256.txt")" = "$before" ]
 }
 
 @test "release: prints the tag/push/gh steps without running them" {
@@ -260,7 +285,7 @@ released_sections() {
   release "$NEXT"
   [ "$status" -eq 0 ]
   changed=$(git -C "$REPO" status --porcelain | awk '{print $2}' | sort)
-  expected=$( { printf 'CHANGELOG.md\ndbx\n'
+  expected=$( { printf 'CHANGELOG.md\nSHASUMS256.txt\ndbx\n'
                 for f in "$REPO"/man/man1/*.1; do echo "man/man1/$(basename "$f")"; done
               } | sort)
   [ "$changed" = "$expected" ]
@@ -285,4 +310,29 @@ released_sections() {
   run bash "$REPO/scripts/check-release-consistency.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"dbx-newcmd.1"* ]]
+}
+
+@test "check-release-consistency: fails when a shipped file changes without regenerating SHASUMS256.txt" {
+  echo "# edited" >> "$REPO/lib/notify.sh"
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHASUMS256.txt is stale"* ]]
+  [[ "$output" == *"lib/notify.sh"* ]]
+}
+
+@test "check-release-consistency: fails when SHASUMS256.txt is missing" {
+  rm "$REPO/SHASUMS256.txt"
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHASUMS256.txt is missing"* ]]
+}
+
+@test "gen-shasums: rewrites the manifest for the tree it runs in" {
+  echo "# edited" >> "$REPO/lib/notify.sh"
+  run bash "$REPO/scripts/gen-shasums.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Wrote SHASUMS256.txt"* ]]
+
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -eq 0 ]
 }

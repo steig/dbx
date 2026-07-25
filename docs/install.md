@@ -13,6 +13,35 @@ export PATH="$PWD/dbx:$PATH"
 
 Once installed, `dbx update` upgrades in place when a new release is out.
 
+## Integrity verification
+
+Every release ships a `SHASUMS256.txt` listing the sha256 of each file the installer downloads — the `dbx` launcher, the libraries, the wizard assets, and the man pages. `install.sh` fetches it for the ref it is installing, downloads everything into a staging directory, checks each file, and only then moves anything into place.
+
+```text
+[INFO] Downloading from github.com/steig/dbx@main...
+[INFO] Verifying downloads against SHASUMS256.txt
+```
+
+A mismatch aborts the install and prints both digests. Nothing is moved into place, so an existing install is left exactly as it was.
+
+**What this protects against:** a truncated or corrupted download, a proxy that mangles a file, and a CDN serving a half-updated ref (`raw.githubusercontent.com` caches each path independently, so a mid-release install can otherwise mix versions).
+
+**What it does not protect against:** a compromised origin. The manifest is served from the same place as the files it describes, and `install.sh` is itself fetched over the same channel with nothing to check it against — so anyone able to tamper with one can tamper with both. Real provenance needs a signature verified against a key you obtained some other way; dbx does not sign releases today. If that matters to you, clone the repo at a tag you have inspected and install from the checkout, or run the [container image](container.md) by digest.
+
+Verify a checkout yourself with the stock tool:
+
+```bash
+sha256sum -c SHASUMS256.txt     # macOS: shasum -a 256 -c SHASUMS256.txt
+```
+
+Releases up to 0.38.0 were cut before the manifest existed. Installing one of those tags (`DBX_REF=v0.38.0`) warns and continues rather than failing:
+
+```bash
+DBX_REQUIRE_CHECKSUMS=1 curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash
+```
+
+`DBX_REQUIRE_CHECKSUMS=1` turns anything unverifiable — a ref with no manifest, a file the manifest doesn't list, a machine with neither `sha256sum` nor `shasum` — into an error instead of a warning.
+
 ## Requirements
 
 **Required**

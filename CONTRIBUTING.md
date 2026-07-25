@@ -36,7 +36,8 @@ bats tests/unit/
 # 4. Integration tests — boots postgres-dbx + mysql-dbx, ~30s, needs docker
 bats tests/integration/
 
-# 5. Release consistency — man pages, .TH versions, and install.sh's file lists
+# 5. Release consistency — man pages, .TH versions, install.sh's file lists,
+#    and SHASUMS256.txt. Changed a file that ships? Run scripts/gen-shasums.sh.
 bash scripts/check-release-consistency.sh
 
 # Full sweep
@@ -54,7 +55,7 @@ ubuntu + macOS matrix and checks:
 1. **Shellcheck** (severity: error) on `dbx` and all `lib/*.sh`
 2. **Bash syntax** (`bash -n`) on every script
 3. **Test Install** — runs `install.sh` and verifies `dbx help` works
-4. **Release consistency** — `scripts/check-release-consistency.sh`
+4. **Release consistency** — `scripts/check-release-consistency.sh` (includes `SHASUMS256.txt`)
 5. **Ruff** — lints the Python under `lib/`
 6. **Unit tests** (bats) — ubuntu + macOS
 7. **Integration tests** (docker) — ubuntu only
@@ -81,7 +82,23 @@ ubuntu + macOS matrix and checks:
 [a new library module](AGENTS.md#adding-a-new-library-module), and
 [a test](AGENTS.md#adding-a-test). The short version: register the command in
 `dbx`'s dispatcher and help output, prefix module helpers with the module name,
-add the new file to `install.sh`, and wire it into the test helpers.
+add the new file to `install.sh`, run `scripts/gen-shasums.sh`, and wire it into
+the test helpers.
+
+## Changing a file that ships
+
+`install.sh` verifies every file it downloads against `SHASUMS256.txt`, so the
+manifest has to be regenerated whenever `dbx`, a `lib/*` file, or a man page
+changes:
+
+```bash
+scripts/gen-shasums.sh   # then commit SHASUMS256.txt with your change
+```
+
+Never hand-edit it. `scripts/check-release-consistency.sh` (a CI job on every
+PR) rehashes the tree and fails if the committed manifest doesn't match, so a
+forgotten regeneration is caught before it can make an install fail
+verification.
 
 ## Cutting a release (maintainers)
 
@@ -95,7 +112,9 @@ scripts/release.sh minor             # or major | patch | an explicit 0.39.0
 
 It rewrites `VERSION` in `dbx`, the `.TH` line (version **and** date) of every
 `man/man1/*.1`, and moves `CHANGELOG.md`'s `## [Unreleased]` section under a new
-`## [X.Y.Z] - YYYY-MM-DD` heading, leaving a fresh empty `[Unreleased]` behind.
+`## [X.Y.Z] - YYYY-MM-DD` heading, leaving a fresh empty `[Unreleased]` behind,
+then regenerates `SHASUMS256.txt` over the result (the bump invalidates the
+launcher's and every man page's digest).
 It refuses to run on a dirty tree, on a version that isn't newer than the current
 one, or when `[Unreleased]` is empty, and it finishes by running
 `scripts/check-release-consistency.sh` — the same drift guard CI runs. The script

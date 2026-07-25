@@ -57,6 +57,8 @@ export PATH="$PWD/dbx:$PATH"
 
 Once installed, `dbx update` upgrades in place when a new release is out. To remove dbx, see [Uninstall](docs/install.md#uninstall).
 
+The installer checks everything it downloads against the release's `SHASUMS256.txt` before installing any of it — see [Integrity verification](docs/install.md#integrity-verification) for what that does and does not protect against.
+
 > 💡 Prefer a browser-driven setup? After install, `dbx wizard` opens a form in your default browser. Or **try the form first without installing** at <https://steig.github.io/dbx/config-builder>.
 
 <details>

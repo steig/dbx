@@ -24,7 +24,8 @@ lib/
   wizard.sh            # `dbx wizard` browser-driven config builder + helpers
   wizard.html          # HTML shell for the wizard's local Python server
   wizard-form.html     # Shared Alpine.js form fragment — also embedded in docs/config-builder.md
-install.sh             # Curl-based installer script
+install.sh             # Curl-based installer script (verifies SHASUMS256.txt)
+SHASUMS256.txt         # Generated digests of everything install.sh downloads
 tests/
   helpers/             # Shared bats helpers
   unit/                # Pure-function tests, no docker
@@ -78,13 +79,13 @@ When adding a new public page, drop it under `docs/` and add it to the `nav:` bl
 
 ### Releasing
 
-`scripts/release.sh <X.Y.Z | major | minor | patch>` performs the entire bump — `VERSION` in `dbx`, the `.TH` version + date of every `man/man1/*.1`, and the `CHANGELOG.md` `[Unreleased]` → `[X.Y.Z] - DATE` roll — then runs `scripts/check-release-consistency.sh` as a gate. Use `--dry-run` to see the diff first. Never hand-edit those files for a release; that is how a stale man page shipped (#122). Tag, push, and `gh release create` stay manual — the script prints them.
+`scripts/release.sh <X.Y.Z | major | minor | patch>` performs the entire bump — `VERSION` in `dbx`, the `.TH` version + date of every `man/man1/*.1`, the `CHANGELOG.md` `[Unreleased]` → `[X.Y.Z] - DATE` roll, and a regenerated `SHASUMS256.txt` — then runs `scripts/check-release-consistency.sh` as a gate. Use `--dry-run` to see the diff first. Never hand-edit those files for a release; that is how a stale man page shipped (#122). Tag, push, and `gh release create` stay manual — the script prints them.
 
 CI (`.github/workflows/ci.yml`, push/PR to `main`) runs:
 1. **Shellcheck** (severity: error) on all `.sh` files and `dbx`
 2. **Bash syntax** (`bash -n`) on all scripts
 3. **Test Install** — runs `install.sh`, verifies `dbx help` works (ubuntu + macOS matrix)
-4. **Release consistency** — `scripts/check-release-consistency.sh`; fails on man-page / lib-list / `.TH` version drift
+4. **Release consistency** — `scripts/check-release-consistency.sh`; fails on man-page / lib-list / `.TH` version drift, or a `SHASUMS256.txt` that doesn't match the tree (`scripts/gen-shasums.sh` regenerates it)
 5. **Ruff** — lints the Python under `lib/`
 6. **Unit tests (bats)** — ubuntu + macOS matrix
 7. **Integration tests (docker)** — ubuntu only
@@ -215,6 +216,8 @@ done
 5. If it needs a new library, create `lib/<name>.sh` and source it at top of `dbx`
 6. Add a `man/man1/dbx-<name>.1` page and add its filename to the `MAN_PAGES`
    list in `install.sh` (the `release-consistency` CI job fails if these drift)
+7. Run `scripts/gen-shasums.sh` and commit `SHASUMS256.txt` — `install.sh`
+   verifies every file it downloads against it
 
 ### Adding a New Library Module
 
@@ -222,8 +225,9 @@ done
 2. Source it in `dbx` after its dependencies (core.sh must be first)
 3. Prefix public functions with the module name
 4. Update `install.sh` to include the new file in the download list
-5. Update `tests/helpers/common.bash::source_dbx_libs` so unit tests can call into the new module
-6. Don't fire EXIT traps or other side effects at module load time — define the function and have `dbx` call it
+5. Run `scripts/gen-shasums.sh` and commit `SHASUMS256.txt`
+6. Update `tests/helpers/common.bash::source_dbx_libs` so unit tests can call into the new module
+7. Don't fire EXIT traps or other side effects at module load time — define the function and have `dbx` call it
 
 ### Adding a Test
 
