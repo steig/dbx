@@ -65,8 +65,8 @@ stub_storage_ok() {
 
 @test "storage_test_roundtrip: download byte-mismatch -> non-zero" {
   echo '{"storage": {"type": "s3", "s3": {"bucket": "x"}}}' > "$CONFIG_FILE"
-  storage_upload()   { return 0; }
-  storage_list()     { echo ".dbx-test/probe-$(date +%s)"; return 0; }
+  storage_upload()   { echo "$2" > "$BATS_TEST_TMPDIR/probe_remote"; return 0; }
+  storage_list()     { cat "$BATS_TEST_TMPDIR/probe_remote" 2>/dev/null; return 0; }
   storage_download() { echo "different" > "$2"; return 0; }   # multi-byte ≠ "."
   storage_delete()   { return 0; }
   export -f storage_upload storage_list storage_download storage_delete
@@ -78,8 +78,8 @@ stub_storage_ok() {
 
 @test "storage_test_roundtrip: delete failure -> non-zero" {
   echo '{"storage": {"type": "s3", "s3": {"bucket": "x"}}}' > "$CONFIG_FILE"
-  storage_upload()   { return 0; }
-  storage_list()     { echo ".dbx-test/probe-$(date +%s)"; return 0; }
+  storage_upload()   { echo "$2" > "$BATS_TEST_TMPDIR/probe_remote"; return 0; }
+  storage_list()     { cat "$BATS_TEST_TMPDIR/probe_remote" 2>/dev/null; return 0; }
   storage_download() { printf '.' > "$2"; return 0; }
   storage_delete()   { return 1; }
   export -f storage_upload storage_list storage_download storage_delete
