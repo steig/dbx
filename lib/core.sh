@@ -1010,6 +1010,75 @@ log_step_elapsed() {
 }
 
 # ============================================================================
+# Exit Handler Registry
+# ============================================================================
+#
+# Bash has one trap slot per signal, so a second `trap ... EXIT` silently
+# replaces the first and the earlier cleanup never runs. Handlers registered
+# here are appended to a list run by a single dispatcher, so callers cannot
+# clobber each other and nobody has to hand-chain via `trap -p`.
+#
+# Subshells: bash resets traps in a subshell, so a parent's handlers do not
+# fire when a subshell exits. A subshell that registers its own handler
+# re-installs the dispatcher and will run the inherited list too — same as
+# the hand-rolled traps this replaces.
+
+_DBX_EXIT_HANDLERS=()
+_DBX_EXIT_HANDLERS_RAN=false
+
+# Run every registered handler, most recently registered first (LIFO): later
+# setup may depend on earlier setup, so it is torn down first. Handlers run
+# with errexit off and their failures swallowed — one broken handler must not
+# skip the rest — and $1 is returned untouched so the exit status survives.
+_dbx_run_exit_handlers() {
+  local rc="$1"
+
+  # Guard the INT/TERM -> re-raise -> EXIT path from running handlers twice.
+  if [[ "$_DBX_EXIT_HANDLERS_RAN" == "true" ]]; then
+    return "$rc"
+  fi
+  _DBX_EXIT_HANDLERS_RAN=true
+
+  local errexit=false
+  case "$-" in *e*) errexit=true ;; esac
+  set +e
+
+  local i
+  for ((i = ${#_DBX_EXIT_HANDLERS[@]} - 1; i >= 0; i--)); do
+    eval "${_DBX_EXIT_HANDLERS[$i]}"
+  done
+
+  [[ "$errexit" == "true" ]] && set -e
+  return "$rc"
+}
+
+_dbx_exit_trap() {
+  local rc=$?
+  _dbx_run_exit_handlers "$rc"
+}
+
+# Clean up, then re-raise so we die of the signal: the caller sees the
+# conventional 128+signo and a Ctrl-C actually stops the run instead of
+# resuming the loop it interrupted. The shell dies before the EXIT trap,
+# and _DBX_EXIT_HANDLERS_RAN covers us if the signal is ignored.
+_dbx_signal_trap() {
+  local sig="$1"
+  _dbx_run_exit_handlers 0
+  trap - EXIT "$sig"
+  kill -s "$sig" $$
+}
+
+# Append a cleanup command to run on EXIT/INT/TERM. Args: $1=command string,
+# evaluated at exit time in the current shell (interpolate values you need
+# captured now, as the trap builtin would).
+register_exit_handler() {
+  _DBX_EXIT_HANDLERS[${#_DBX_EXIT_HANDLERS[@]}]="$1"
+  trap '_dbx_exit_trap' EXIT
+  trap '_dbx_signal_trap INT' INT
+  trap '_dbx_signal_trap TERM' TERM
+}
+
+# ============================================================================
 # Security Functions
 # ============================================================================
 
@@ -1073,9 +1142,10 @@ cleanup_secrets() {
 # Set trap to cleanup on exit. Caller (dbx entrypoint) is responsible
 # for invoking this — sourcing the lib does not install the trap, so
 # tests and other consumers can use the lib without clobbering their
-# own EXIT trap.
+# own EXIT trap. Registered first so it runs last (LIFO): handlers added
+# later may still need the credentials this scrubs.
 setup_security_trap() {
-  trap 'cleanup_secrets' EXIT INT TERM
+  register_exit_handler 'cleanup_secrets'
 }
 
 # ============================================================================

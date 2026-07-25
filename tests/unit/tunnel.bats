@@ -113,6 +113,28 @@ prime_reuse_socket() {
   [[ "$output" == *"mode 0700"* ]]
 }
 
+@test "cleanup: teardown fires at exit alongside the credential scrub (#149)" {
+  # create_ssh_tunnel registers its teardown rather than installing its own
+  # EXIT trap, so the scrub setup_security_trap registered earlier survives —
+  # and the teardown still runs when the shell exits, not only when
+  # cleanup_tunnel is called by hand (the case covered below).
+  run env PATH="$STUBDIR:$PATH" SSH_LOG="$SSH_LOG" \
+    DBX_DATA_DIR="$DBX_DATA_DIR" DBX_CONFIG_DIR="$DBX_CONFIG_DIR" \
+    DBX_AUDIT_DIR="$DBX_AUDIT_DIR" DBX_RUNTIME_DIR="$DBX_RUNTIME_DIR" \
+    bash -c '
+      set -uo pipefail
+      source "'"$REPO"'/lib/core.sh"; source "'"$REPO"'/lib/tunnel.sh"
+      setup_security_trap
+      db_pass=hunter2
+      create_ssh_tunnel prod >/dev/null
+      : > "'"$SSH_LOG"'"        # observe only what happens at exit
+      register_exit_handler '\''echo "SCRUB db_pass=${db_pass:-unset}" >&2'\''
+    '
+  [ "$status" -eq 0 ]
+  grep -q -- '-O exit' "$SSH_LOG"        # tunnel torn down by the exit handler
+  [[ "$output" == *"SCRUB db_pass=hunter2"* ]]  # ran before cleanup_secrets
+}
+
 @test "cleanup: owned tunnel torn down via ssh -O exit; reused left alone (#128)" {
   # Owned: create then cleanup -> ssh -O exit fires.
   run env PATH="$STUBDIR:$PATH" SSH_LOG="$SSH_LOG" \
