@@ -76,12 +76,19 @@ python3 -m venv /tmp/mkdocs-venv && /tmp/mkdocs-venv/bin/pip install mkdocs-mate
 
 When adding a new public page, drop it under `docs/` and add it to the `nav:` block in `mkdocs.yml` so it appears in the sidebar.
 
+### Releasing
+
+`scripts/release.sh <X.Y.Z | major | minor | patch>` performs the entire bump — `VERSION` in `dbx`, the `.TH` version + date of every `man/man1/*.1`, and the `CHANGELOG.md` `[Unreleased]` → `[X.Y.Z] - DATE` roll — then runs `scripts/check-release-consistency.sh` as a gate. Use `--dry-run` to see the diff first. Never hand-edit those files for a release; that is how a stale man page shipped (#122). Tag, push, and `gh release create` stay manual — the script prints them.
+
 CI (`.github/workflows/ci.yml`, push/PR to `main`) runs:
 1. **Shellcheck** (severity: error) on all `.sh` files and `dbx`
 2. **Bash syntax** (`bash -n`) on all scripts
 3. **Test Install** — runs `install.sh`, verifies `dbx help` works (ubuntu + macOS matrix)
-4. **Unit tests (bats)** — ubuntu + macOS matrix
-5. **Integration tests (docker)** — ubuntu only
+4. **Release consistency** — `scripts/check-release-consistency.sh`; fails on man-page / lib-list / `.TH` version drift
+5. **Ruff** — lints the Python under `lib/`
+6. **Unit tests (bats)** — ubuntu + macOS matrix
+7. **Integration tests (docker)** — ubuntu only
+8. **Container image** — builds `docker/Dockerfile` and smoke-tests `dbx version`
 
 Pre-PR smoke check:
 ```bash

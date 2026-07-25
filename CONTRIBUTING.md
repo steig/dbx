@@ -36,6 +36,9 @@ bats tests/unit/
 # 4. Integration tests — boots postgres-dbx + mysql-dbx, ~30s, needs docker
 bats tests/integration/
 
+# 5. Release consistency — man pages, .TH versions, and install.sh's file lists
+bash scripts/check-release-consistency.sh
+
 # Full sweep
 bats tests/unit/ tests/integration/
 ```
@@ -51,8 +54,11 @@ ubuntu + macOS matrix and checks:
 1. **Shellcheck** (severity: error) on `dbx` and all `lib/*.sh`
 2. **Bash syntax** (`bash -n`) on every script
 3. **Test Install** — runs `install.sh` and verifies `dbx help` works
-4. **Unit tests** (bats) — ubuntu + macOS
-5. **Integration tests** (docker) — ubuntu only
+4. **Release consistency** — `scripts/check-release-consistency.sh`
+5. **Ruff** — lints the Python under `lib/`
+6. **Unit tests** (bats) — ubuntu + macOS
+7. **Integration tests** (docker) — ubuntu only
+8. **Container image** — builds `docker/Dockerfile` and smoke-tests it
 
 ## Commit and PR conventions
 
@@ -76,6 +82,38 @@ ubuntu + macOS matrix and checks:
 [a test](AGENTS.md#adding-a-test). The short version: register the command in
 `dbx`'s dispatcher and help output, prefix module helpers with the module name,
 add the new file to `install.sh`, and wire it into the test helpers.
+
+## Cutting a release (maintainers)
+
+A release is one commit that bumps every version-carrying file at once — 21 of
+them. Don't hand-edit them; `scripts/release.sh` does the whole pass:
+
+```bash
+scripts/release.sh --dry-run minor   # review the diff first
+scripts/release.sh minor             # or major | patch | an explicit 0.39.0
+```
+
+It rewrites `VERSION` in `dbx`, the `.TH` line (version **and** date) of every
+`man/man1/*.1`, and moves `CHANGELOG.md`'s `## [Unreleased]` section under a new
+`## [X.Y.Z] - YYYY-MM-DD` heading, leaving a fresh empty `[Unreleased]` behind.
+It refuses to run on a dirty tree, on a version that isn't newer than the current
+one, or when `[Unreleased]` is empty, and it finishes by running
+`scripts/check-release-consistency.sh` — the same drift guard CI runs. The script
+takes its file list from that guard, so the bump and the check can't disagree.
+
+Publishing stays manual; the script prints these when it's done:
+
+```bash
+git commit -am "chore: release X.Y.Z"
+git tag vX.Y.Z
+git push && git push --tags   # the tag fires release-image.yml → GHCR image
+gh release create vX.Y.Z --title "vX.Y.Z" --notes "<the new CHANGELOG section>"
+```
+
+Deliberately *not* bumped: `install.sh`'s `MAN_PAGES` and lib lists (curated
+order — the guard checks them as sets on every PR but never regenerates them),
+the `:latest` tags under `docker/`, and the illustrative version strings in
+`docs/` and `README.md`.
 
 ## Reporting bugs and security issues
 

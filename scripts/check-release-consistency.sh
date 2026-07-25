@@ -14,6 +14,10 @@
 # or regenerated — only checked. Runs in CI on every PR and is safe to run
 # locally (`scripts/check-release-consistency.sh`). Portable to macOS bash 3.2
 # / BSD tools: no GNU-isms, no ${var//pat/rep}.
+#
+# scripts/release.sh sources this file to reuse the accessors below, so the
+# bump and the check share one definition of which files carry the version.
+# Sourcing runs no checks — it only cd's to the repo root.
 
 set -euo pipefail
 
@@ -21,6 +25,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
+
+# --- accessors (shared with scripts/release.sh) ---
+
+# VERSION in dbx — the single source of truth every other file must match.
+release_version() {
+  grep -E '^VERSION=' dbx | head -1 | cut -d'"' -f2 || true
+}
+
+# Every file whose .TH line carries the version.
+release_man_pages() {
+  local f
+  for f in man/man1/*.1; do printf '%s\n' "$f"; done
+}
+
+# The X.Y.Z token from a man page's .TH line; empty if the line is malformed.
+# `|| true`: a missing token must reach the caller's friendly check, not abort
+# the script via pipefail (the malformed-man-page case is the point).
+release_man_th_version() {
+  head -1 "$1" | grep -oE 'dbx [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true
+}
+
+# --- checks ---
 
 fail=0
 problem() { printf 'DRIFT: %s\n' "$1" >&2; fail=1; }
@@ -39,39 +65,45 @@ compare_sets() {
   fi
 }
 
-# --- VERSION (single source of truth: dbx) ---
-version="$(grep -E '^VERSION=' dbx | head -1 | cut -d'"' -f2 || true)"
-if [ -z "$version" ]; then
-  echo "ERROR: could not read VERSION from dbx" >&2; exit 2
-fi
-echo "VERSION (dbx): $version"
+check_release_consistency() {
+  local version declared_man actual_man declared_lib actual_lib f token
+  fail=0
 
-# --- 1. MAN_PAGES vs man/man1/*.1 ---
-declared_man="$(sed -n '/^MAN_PAGES=(/,/^)/p' install.sh | grep -oE 'dbx[a-z0-9-]*\.1')"
-actual_man="$(for f in man/man1/*.1; do basename "$f"; done)"
-compare_sets "install.sh MAN_PAGES" "man/man1/" "$declared_man" "$actual_man"
-
-# --- 2. .TH version token in every man page == VERSION ---
-for f in man/man1/*.1; do
-  th="$(head -1 "$f")"
-  # `|| true`: a missing token must reach the friendly check below, not abort
-  # the script via pipefail (the malformed-man-page case is the point).
-  token="$(printf '%s\n' "$th" | grep -oE 'dbx [0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)"
-  if [ -z "$token" ]; then
-    problem "$f: no \"dbx X.Y.Z\" token on its .TH line"
-  elif [ "$token" != "$version" ]; then
-    problem "$f: .TH version $token != dbx VERSION $version"
+  version="$(release_version)"
+  if [ -z "$version" ]; then
+    echo "ERROR: could not read VERSION from dbx" >&2; exit 2
   fi
-done
+  echo "VERSION (dbx): $version"
 
-# --- 3. install.sh lib download list vs lib/*.sh ---
-declared_lib="$(grep -E '^[[:space:]]*for lib in ' install.sh | grep -oE '[a-z_]+\.sh')"
-actual_lib="$(for f in lib/*.sh; do basename "$f"; done)"
-compare_sets "install.sh lib list" "lib/" "$declared_lib" "$actual_lib"
+  # --- 1. MAN_PAGES vs man/man1/*.1 ---
+  declared_man="$(sed -n '/^MAN_PAGES=(/,/^)/p' install.sh | grep -oE 'dbx[a-z0-9-]*\.1')"
+  actual_man="$(release_man_pages | while read -r f; do basename "$f"; done)"
+  compare_sets "install.sh MAN_PAGES" "man/man1/" "$declared_man" "$actual_man"
 
-if [ "$fail" -ne 0 ]; then
-  echo "" >&2
-  echo "Release-consistency check FAILED. Fix the drift above before merging." >&2
-  exit 1
+  # --- 2. .TH version token in every man page == VERSION ---
+  for f in $(release_man_pages); do
+    token="$(release_man_th_version "$f")"
+    if [ -z "$token" ]; then
+      problem "$f: no \"dbx X.Y.Z\" token on its .TH line"
+    elif [ "$token" != "$version" ]; then
+      problem "$f: .TH version $token != dbx VERSION $version"
+    fi
+  done
+
+  # --- 3. install.sh lib download list vs lib/*.sh ---
+  declared_lib="$(grep -E '^[[:space:]]*for lib in ' install.sh | grep -oE '[a-z_]+\.sh')"
+  actual_lib="$(for f in lib/*.sh; do basename "$f"; done)"
+  compare_sets "install.sh lib list" "lib/" "$declared_lib" "$actual_lib"
+
+  if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Release-consistency check FAILED. Fix the drift above before merging." >&2
+    exit 1
+  fi
+  echo "OK: man pages, .TH versions, and lib list are all in sync with VERSION $version."
+}
+
+# Executed directly: run the checks. Sourced (by release.sh): just define them.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  check_release_consistency
 fi
-echo "OK: man pages, .TH versions, and lib list are all in sync with VERSION $version."
