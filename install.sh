@@ -86,6 +86,20 @@ check_deps() {
     fi
     echo ""
   fi
+
+  # `dbx storage` shells out to an S3 client that only the Docker image ships,
+  # so a source install had no way to learn it was needed until every S3
+  # operation failed. Reported separately from the hard dependencies above:
+  # storage is opt-in, either client will do, and neither is a distro package
+  # the block's `apt install` line could offer — on Debian/Ubuntu `mc` is
+  # Midnight Commander.
+  if ! command -v mc &>/dev/null && ! command -v aws &>/dev/null; then
+    echo ""
+    echo -e "${BLUE}Optional:${NC} 'dbx storage' (S3/MinIO offload) needs an S3 client — none found."
+    echo "  mc:  https://min.io/docs/minio/linux/reference/minio-mc.html#install-mc"
+    echo "  aws: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    echo ""
+  fi
 }
 
 main() {

@@ -2596,16 +2596,6 @@ cmd_query() {
   esac
 }
 
-# Print a failed client's stderr under the error message. psql and mysqladmin
-# both emit multi-line diagnostics (the second line is often the useful hint,
-# e.g. "Is the server running on that host...?"), so every line is kept.
-log_client_error() {
-  local line
-  while IFS= read -r line; do
-    [[ "$line" =~ [^[:space:]] ]] && log_info "  $line"
-  done <<<"$1"
-}
-
 cmd_test() {
   local host="${1:-}"
 

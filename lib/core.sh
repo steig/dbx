@@ -50,6 +50,19 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 log_step() { echo -e "${CYAN}==>${NC} ${BOLD}$*${NC}"; }
 
+# Print a failed client's stderr under the error message. psql, mysqladmin and
+# mc all emit multi-line diagnostics (the second line is often the useful hint,
+# e.g. "Is the server running on that host...?"), so every line is kept.
+# Goes to stderr with the log_error it explains — a caller that captures a
+# failing step with `2>&1 >/dev/null` would otherwise keep the headline and
+# throw away the detail.
+log_client_error() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" =~ [^[:space:]] ]] && log_info "  $line" >&2
+  done <<<"$1"
+}
+
 die() {
   log_error "$@"
   exit 1
