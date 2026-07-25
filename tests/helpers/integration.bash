@@ -28,14 +28,33 @@ dbx_run() {
 # Args: container [user=postgres] [password=devpassword] [db=postgres]
 # (db matters when the container has a custom POSTGRES_USER/DB — psql defaults
 # to connecting to a database named after the user, which may not exist.)
+#
+# One successful SELECT is not enough, because it can land on the bootstrap
+# server. Observed on postgres:15-alpine:
+#
+#   [279] LOG:  database system is ready to accept connections   <- bootstrap
+#   [280] LOG:  shutting down
+#         PostgreSQL init process complete; ready for start up.
+#   [1]   LOG:  database system is ready to accept connections   <- real server
+#
+# The whole window is ~250ms, so a caller that queried during it got a working
+# psql and then `No such file or directory` on the very next exec. Requiring
+# consecutive successes across a longer span than the restart gap closes it.
+# Consecutive-success rather than log-grepping on purpose: those log strings
+# are not stable across postgres major versions, and this helper is used
+# against 13, 15 and 16.
 pg_wait_ready() {
   local container="$1" user="${2:-postgres}" pass="${3:-devpassword}" db="${4:-postgres}"
-  for _ in $(seq 1 60); do
+  local streak=0
+  for _ in $(seq 1 120); do
     if docker exec -e PGPASSWORD="$pass" "$container" \
          psql -U "$user" -d "$db" -tAc 'SELECT 1' >/dev/null 2>&1; then
-      return 0
+      streak=$((streak + 1))
+      [ "$streak" -ge 3 ] && return 0
+    else
+      streak=0   # a drop means that was the bootstrap server; start over
     fi
-    sleep 1
+    sleep 0.5
   done
   echo "postgres container '$container' failed to become ready" >&2
   return 1
