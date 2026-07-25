@@ -300,6 +300,33 @@ restart_wiz() {
   done
 }
 
+@test "server binds without waiting on reverse DNS (#176)" {
+  # http.server.HTTPServer.server_bind() sets server_name via socket.getfqdn(),
+  # a reverse-DNS lookup that blocks until the resolver answers. server_port is
+  # assigned after it, so on a host with a dead resolver the port is never
+  # reported and the server appears hung at startup. ThreadingHTTPServer
+  # overrides server_bind to skip it; assert binding stays fast when getfqdn is
+  # slow. Without the override this takes the full 8s and fails.
+  run python3 - "$WIZ_REPO_ROOT/lib/wizard-server.py" <<'PY'
+import http.server, importlib.util, socket, sys, time
+spec = importlib.util.spec_from_file_location("wiz", sys.argv[1])
+wiz = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wiz)
+
+socket.getfqdn = lambda name="": (time.sleep(8) or "slow.example")
+
+start = time.time()
+httpd = wiz.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+elapsed = time.time() - start
+port = httpd.server_port
+httpd.server_close()
+
+assert elapsed < 1.0, f"server_bind blocked {elapsed:.1f}s on reverse DNS"
+assert port > 0, "no port assigned"
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "GET / with valid token serves composed HTML" {
   run curl -s "$(api /)"
   [ "$status" -eq 0 ]
