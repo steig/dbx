@@ -76,8 +76,8 @@ _tunnel_port_listening() {
 #   TUNNEL_CONTROL_PATH — the control socket (teardown handle)
 # Returns 0 on success; die()s on unrecoverable failure (the established
 # contract — callers either ignore the return or treat non-success as fatal).
-# Installs an EXIT/INT/TERM trap calling cleanup_tunnel (chained with
-# cleanup_secrets so tunneled runs still scrub credentials on exit).
+# Registers cleanup_tunnel as an exit handler; it runs before the credential
+# scrub registered by setup_security_trap (LIFO).
 create_ssh_tunnel() {
   local host="$1"
 
@@ -138,7 +138,7 @@ create_ssh_tunnel() {
       ( umask 077; printf '%s\n' "$port" > "$portfile" )
       TUNNEL_REUSED=false
       log_success "Tunnel established (control: $ctl)"
-      trap 'cleanup_tunnel; cleanup_secrets' EXIT INT TERM
+      register_exit_handler 'cleanup_tunnel'
       return 0
     fi
     # bind/forward failure — try another port

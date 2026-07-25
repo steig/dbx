@@ -239,9 +239,9 @@ EOF
     log_info "Verbose: streaming server stdout/stderr to this terminal (will be preserved on exit)."
     tail -F "$server_log" >&2 &
     tail_pid=$!
-    trap 'kill '"$srv_pid"' 2>/dev/null; kill '"$tail_pid"' 2>/dev/null; rm -f '"$done_marker"'' EXIT INT TERM
+    register_exit_handler "kill $srv_pid 2>/dev/null; kill $tail_pid 2>/dev/null; rm -f '$done_marker'"
   else
-    trap 'kill '"$srv_pid"' 2>/dev/null; rm -f '"$done_marker"' '"$server_log"'' EXIT INT TERM
+    register_exit_handler "kill $srv_pid 2>/dev/null; rm -f '$done_marker' '$server_log'"
   fi
 
   local ready=false
