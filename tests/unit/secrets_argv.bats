@@ -131,3 +131,93 @@ assert_no_docker_argv_leak() {
   DBX_MYSQL_PASSWORD="$SENTINEL" _list_user_dbs some-mysql-container >/dev/null
   assert_no_docker_argv_leak MYSQL_PWD
 }
+
+# ----------------------------------------------------------------------------
+# Call sites in the `dbx` script itself (cmd_query, cmd_test, analyze --json).
+# These live outside lib/, so they need the script sourced with
+# DBX_NO_AUTO_MAIN=1 and the docker / tunnel / credential layers stubbed.
+# ----------------------------------------------------------------------------
+
+dbx_script_subshell() {
+  SNIPPET="$1" SENTINEL="$SENTINEL" bash -c '
+    set -uo pipefail
+    export DBX_NO_AUTO_MAIN=1
+    # shellcheck source=/dev/null
+    source "'"$DBX_BIN"'"
+    # Stubs go after the source so they win over the real definitions.
+    require_docker()        { :; }
+    require_container()     { :; }
+    has_ssh_tunnel()        { return 1; }
+    create_ssh_tunnel()     { :; }
+    list_remote_databases() { :; }
+    get_password()          { printf "%s" "$SENTINEL"; }
+    eval "$SNIPPET"
+  '
+}
+
+@test "dbx query (postgres, database named): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"prod":{"type":"postgres","host":"127.0.0.1","port":5432,"user":"u","safety":"prod"}}}'
+  run dbx_script_subshell 'cmd_query prod app'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak PGPASSWORD
+  # PGOPTIONS is not a secret and still travels as a name=value pair.
+  grep -q -- '-e PGOPTIONS=' "$DOCKER_ARGV_LOG"
+}
+
+@test "dbx query (postgres, no database): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"prod":{"type":"postgres","host":"127.0.0.1","port":5432,"user":"u"}}}'
+  run dbx_script_subshell 'cmd_query prod'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak PGPASSWORD
+}
+
+@test "dbx query (mysql prod, database named): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"prod":{"type":"mysql","host":"127.0.0.1","port":3306,"user":"u","safety":"prod"}}}'
+  run dbx_script_subshell 'cmd_query prod app'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak MYSQL_PWD
+  grep -q -- '--init-command=SET SESSION TRANSACTION READ ONLY' "$DOCKER_ARGV_LOG"
+}
+
+@test "dbx query (mysql prod, no database): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"prod":{"type":"mysql","host":"127.0.0.1","port":3306,"user":"u","safety":"prod"}}}'
+  run dbx_script_subshell 'cmd_query prod'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak MYSQL_PWD
+}
+
+@test "dbx query (mysql, database named): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"dev":{"type":"mysql","host":"127.0.0.1","port":3306,"user":"u"}}}'
+  run dbx_script_subshell 'cmd_query dev app'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak MYSQL_PWD
+}
+
+@test "dbx query (mysql, no database): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"dev":{"type":"mysql","host":"127.0.0.1","port":3306,"user":"u"}}}'
+  run dbx_script_subshell 'cmd_query dev'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak MYSQL_PWD
+}
+
+@test "dbx test (postgres connectivity check): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"prod":{"type":"postgres","host":"127.0.0.1","port":5432,"user":"u"}}}'
+  run dbx_script_subshell 'cmd_test prod'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak PGPASSWORD
+}
+
+@test "dbx test (mysql connectivity check): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"dev":{"type":"mysql","host":"127.0.0.1","port":3306,"user":"u"}}}'
+  run dbx_script_subshell 'cmd_test dev'
+  [ "$status" -eq 0 ]
+  assert_no_docker_argv_leak MYSQL_PWD
+}
+
+@test "analyze --json (postgres stats query): password via env, not docker argv (#127)" {
+  write_config '{"hosts":{"prod":{"type":"postgres","host":"127.0.0.1","port":5432,"user":"u"}}}'
+  # The fake docker returns a stub row that the downstream jq stitching may
+  # reject; the exit status is not what this test is about.
+  run dbx_script_subshell '_analyze_emit_json prod app postgres true'
+  assert_no_docker_argv_leak PGPASSWORD
+}

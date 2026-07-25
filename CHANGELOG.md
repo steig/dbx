@@ -6,6 +6,7 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ### Security
 
+- **DB passwords kept out of argv in the `dbx` script itself (#127).** The earlier sweeps covered `lib/`; the CLI entrypoint was never swept, so nine `docker exec -e PGPASSWORD="$x"` / `-e MYSQL_PWD="$x"` call sites still put the credential on the command line, where `ps` / `/proc/PID/cmdline` expose it to any other local user for the duration of the call. Converted to the env-assignment prefix + name-only `-e VAR` form used everywhere else: the interactive `dbx query` sessions (both engines, with and without a named database, read-only and normal), `dbx test`'s connectivity check (both engines), and the Postgres table-stats query behind `dbx analyze --json`. `PGOPTIONS` is not a secret and still travels as a name=value pair. Behaviour-preserving.
 - **DB passwords kept out of argv at the remaining call sites (#127).** The argv sweep in 0.38.0 missed four paths, which still passed the credential as `docker exec -e MYSQL_PWD="$x"` / an `env PGPASSWORD=…` prefix — visible in `ps` / `/proc/PID/cmdline` on a multi-user host. Now covered: the MySQL readiness loops in `require_container` and `_recreate_container`, the MySQL and Postgres branches of `_list_user_dbs`, and `pg_restore_backup`'s globals path. The first three use the same env-assignment prefix + name-only `-e` form as the rest of the codebase; the globals path exports into a scoped subshell. Behaviour-preserving.
 
 ### Fixed
