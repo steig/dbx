@@ -8,6 +8,21 @@ load '../helpers/common'
 
 WIZ_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 
+# Every test in this file starts a real wizard server, and setup() waits ~7s
+# before giving up. With 179 tests, an unusable python3 costs ~30 minutes of
+# identical "never reported its port" failures that look like 179 separate
+# bugs. Check the interpreter once, up front, so that turns into one clear
+# error in a couple of seconds.
+setup_file() {
+  local err
+  if ! err=$(python3 -c 'import http.server, socketserver, json, ssl' 2>&1); then
+    echo "python3 cannot run the wizard server; every test in this file would" >&2
+    echo "fail identically. Install a working python3 (CI: actions/setup-python)." >&2
+    echo "$err" >&2
+    return 1
+  fi
+}
+
 # The server is launched with --port 0 (OS-assigned) and prints the real bound
 # port on startup; poll the server log for it and set WIZ_PORT. This avoids the
 # old bind-a-port/close-it/respawn-on-it TOCTOU that flaked under CI load (#176).

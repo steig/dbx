@@ -127,16 +127,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # wizard_server.bats starts lib/wizard-server.py for each of its 179
+      # tests, so the suite needs a working python3. Pinning it here rather
+      # than trusting the runner image: macos-latest stopped shipping a usable
+      # python3, which turned the whole file red and stretched the job to ~31
+      # minutes of identical timeouts. Same version the ruff job pins.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # `parallel` backs `bats --jobs`.
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bats jq zstd
+        run: sudo apt-get update && sudo apt-get install -y bats jq zstd parallel
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install bats-core jq zstd
+        run: brew install bats-core jq zstd parallel
 
+      # Tests are independent — each gets its own BATS_TEST_TMPDIR, and the
+      # wizard server binds port 0 — so they parallelize safely. Locally this
+      # takes the suite from 101s to 34s.
       - name: Run unit tests
-        run: bats tests/unit/
+        run: bats --jobs 8 tests/unit/
 
   integration-tests:
     name: Integration tests (docker)

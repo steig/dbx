@@ -4,9 +4,14 @@ setup() { setup_dbx_env; source_dbx_libs; }
 
 # Stub storage_upload/list/download/delete so we can test the
 # orchestration logic of storage_test_roundtrip without a real S3.
+# The list stub echoes back the path the upload stub was actually given, rather
+# than recomputing `date +%s`. storage_test_roundtrip stamps the probe name once
+# and greps the listing for that exact stamp, so a stub that re-reads the clock
+# fails whenever the second ticks between upload and list — rare when the suite
+# runs serially, reliable under `bats -j` load.
 stub_storage_ok() {
-  storage_upload()   { echo "uploaded:$1:$2"; return 0; }
-  storage_list()     { echo ".dbx-test/probe-$(date +%s)"; return 0; }
+  storage_upload()   { echo "$2" > "$BATS_TEST_TMPDIR/probe_remote"; return 0; }
+  storage_list()     { cat "$BATS_TEST_TMPDIR/probe_remote" 2>/dev/null; return 0; }
   storage_download() {
     local remote="$1" local_file="$2"
     cp "${UPLOAD_SRC:-/dev/null}" "$local_file" 2>/dev/null
