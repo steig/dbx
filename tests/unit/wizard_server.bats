@@ -8,6 +8,21 @@ load '../helpers/common'
 
 WIZ_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 
+# Every test in this file starts a real wizard server, and setup() waits ~7s
+# before giving up. With 179 tests, an unusable python3 costs ~30 minutes of
+# identical "never reported its port" failures that look like 179 separate
+# bugs. Check the interpreter once, up front, so that turns into one clear
+# error in a couple of seconds.
+setup_file() {
+  local err
+  if ! err=$(python3 -c 'import http.server, socketserver, json, ssl' 2>&1); then
+    echo "python3 cannot run the wizard server; every test in this file would" >&2
+    echo "fail identically. Install a working python3 (CI: actions/setup-python)." >&2
+    echo "$err" >&2
+    return 1
+  fi
+}
+
 # The server is launched with --port 0 (OS-assigned) and prints the real bound
 # port on startup; poll the server log for it and set WIZ_PORT. This avoids the
 # old bind-a-port/close-it/respawn-on-it TOCTOU that flaked under CI load (#176).
@@ -283,6 +298,33 @@ restart_wiz() {
     if curl -s -o /dev/null "http://127.0.0.1:$WIZ_PORT/"; then break; fi
     sleep 0.1
   done
+}
+
+@test "server binds without waiting on reverse DNS (#176)" {
+  # http.server.HTTPServer.server_bind() sets server_name via socket.getfqdn(),
+  # a reverse-DNS lookup that blocks until the resolver answers. server_port is
+  # assigned after it, so on a host with a dead resolver the port is never
+  # reported and the server appears hung at startup. ThreadingHTTPServer
+  # overrides server_bind to skip it; assert binding stays fast when getfqdn is
+  # slow. Without the override this takes the full 8s and fails.
+  run python3 - "$WIZ_REPO_ROOT/lib/wizard-server.py" <<'PY'
+import http.server, importlib.util, socket, sys, time
+spec = importlib.util.spec_from_file_location("wiz", sys.argv[1])
+wiz = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wiz)
+
+socket.getfqdn = lambda name="": (time.sleep(8) or "slow.example")
+
+start = time.time()
+httpd = wiz.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+elapsed = time.time() - start
+port = httpd.server_port
+httpd.server_close()
+
+assert elapsed < 1.0, f"server_bind blocked {elapsed:.1f}s on reverse DNS"
+assert port > 0, "no port assigned"
+PY
+  [ "$status" -eq 0 ]
 }
 
 @test "GET / with valid token serves composed HTML" {
