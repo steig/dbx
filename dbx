@@ -35,6 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 
 source "$LIB_DIR/core.sh"
+source "$LIB_DIR/host.sh"
 source "$LIB_DIR/tunnel.sh"
 source "$LIB_DIR/encrypt.sh"
 source "$LIB_DIR/postgres.sh"
@@ -282,6 +283,115 @@ cmd_restore() {
   local with_globals=false
   local verbose=false
 
+  _restore_parse_args "$@"
+
+  require_config
+  require_jq
+
+  _restore_early_into_gate
+
+  require_docker
+
+  if [[ "$hooks_only" == "true" ]]; then
+    _restore_hooks_only
+    return 0
+  fi
+
+  local remote_local_file=""
+  _restore_fetch_remote
+
+  local backup_file=""
+  local host=""
+  local database=""
+  # Set by _restore_resolve_source when the user escapes out of the fzf picker.
+  local restore_cancelled=false
+
+  _restore_resolve_source
+  if [[ "$restore_cancelled" == "true" ]]; then
+    return 0
+  fi
+
+  [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
+
+  _restore_verify_checksum
+
+  # Per-host safety enforcement. If the SOURCE host (the one this backup
+  # came from) is marked safety=prod AND the user is using --into to
+  # write back into a sidecar container, refuse: that's the one path
+  # where a prod-source restore can mutate a live DB the operator might
+  # not realize is also prod. Plain restores (no --into) land in the
+  # managed postgres-dbx / mysql-dbx and are fine — those are dev clones.
+  if [[ -n "$into_container" && -n "$host" ]]; then
+    require_writable_host_for_restore_into "$host"
+  fi
+
+  _restore_target_name
+
+  local db_type=""
+  _restore_detect_db_type
+
+  log_info "Restoring: $(basename "$backup_file")"
+  log_info "Target database: $target_name"
+
+  # Baseline: last successful restore's duration. The restore audit row
+  # doesn't carry db_host/database, so we don't filter on them — this is
+  # a global "your last restore took N" hint, not per-source-DB.
+  local last_dur
+  last_dur=$(audit_last_duration "restore" "" "")
+  if [[ -n "$last_dur" ]]; then
+    log_info "Last restore took $(format_duration "$last_dur")"
+  fi
+
+  local restore_start
+  restore_start=$(date +%s)
+
+  _restore_scrub_preflight
+
+  _restore_dispatch
+
+  _restore_run_hooks
+
+  _restore_scrub_gate
+
+  local restore_dur=$(($(date +%s) - restore_start))
+  audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
+
+  echo ""
+  # On-disk size of the source backup file (not the restored DB) — gives
+  # the user a sense of throughput. Stat fallback covers both BSD (macOS)
+  # and GNU (Linux) flavors.
+  local src_size
+  src_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
+  notify_restore_success "$backup_file" "$target_name"
+
+  _restore_cleanup_download
+}
+
+# ----------------------------------------------------------------------------
+# cmd_restore steps
+#
+# Each _restore_* helper below is one step of cmd_restore. They read and write
+# cmd_restore's locals by name (bash dynamic scoping) rather than taking
+# arguments and echoing results: the flag set is wide, several steps produce
+# more than one value, and `die` has to terminate dbx rather than just a
+# command substitution's subshell. Every helper lists the caller locals it
+# reads and writes.
+#
+# cmd_restore calls all of them unconditionally so `set -e` keeps applying
+# inside each one exactly as it did inline. A step that has to stop the
+# restore early sets a caller local (restore_cancelled) instead of returning
+# non-zero, for the same reason.
+# ----------------------------------------------------------------------------
+
+# Parse the restore argv, expand the s3:// shorthand and reject incompatible
+# flag combinations.
+# Reads:  the argv it is given
+# Writes: source target_name from_remote keep_download restore_storage
+#         skip_hooks hooks_only skip_scrub skip_verify transform_script
+#         transform_inherit_env into_container with_globals verbose
+#         (and exports DBX_VERBOSE / DBX_RECREATE_CONTAINER)
+_restore_parse_args() {
   # Mixed flag/positional parse: `source` is the only positional and
   # may appear before or after flags (or be absent entirely when the
   # user uses --from-remote).
@@ -417,17 +527,18 @@ cmd_restore() {
       command -v "$transform_script" >/dev/null 2>&1 || die "--transform: '$transform_script' is not on PATH and is not an absolute executable path"
     fi
   fi
+}
 
-  require_config
-  require_jq
-
-  # Early safety gate: if --into is set, derive the source host from the
-  # source string (cheaply, without docker) and refuse the prod-source ->
-  # sidecar combo before we even check for docker. Two reasons to do this
-  # early: (1) the user gets a fast, clear refusal — no docker prereq
-  # check first, no container spinup. (2) it lets the CLI test suite
-  # exercise this branch on hosts that don't have docker (notably the
-  # macOS CI runner).
+# Early safety gate: if --into is set, derive the source host from the
+# source string (cheaply, without docker) and refuse the prod-source ->
+# sidecar combo before we even check for docker. Two reasons to do this
+# early: (1) the user gets a fast, clear refusal — no docker prereq
+# check first, no container spinup. (2) it lets the CLI test suite
+# exercise this branch on hosts that don't have docker (notably the
+# macOS CI runner).
+# Reads:  into_container source DATA_DIR
+# Writes: nothing
+_restore_early_into_gate() {
   if [[ -n "$into_container" && -n "$source" ]]; then
     local _early_host=""
     # Path-shape source ("<host>/<db>/<selector>"): host is the first
@@ -452,75 +563,77 @@ cmd_restore() {
     fi
     require_writable_host_for_restore_into "$_early_host"
   fi
+}
 
-  require_docker
+# Run only the configured post-restore hooks against an existing database.
+# Reads:  target_name source POSTGRES_CONTAINER MYSQL_CONTAINER
+# Writes: nothing
+_restore_hooks_only() {
+  [[ -z "$target_name" ]] && die "--hooks-only requires --name <existing-db>"
+  [[ -z "$source" || "$source" != */* ]] && \
+    die "--hooks-only requires a <host>/<database> source path so dbx knows which hooks to run"
 
-  # ---- --hooks-only: run only the configured hooks against an existing DB --
-  if [[ "$hooks_only" == "true" ]]; then
-    [[ -z "$target_name" ]] && die "--hooks-only requires --name <existing-db>"
-    [[ -z "$source" || "$source" != */* ]] && \
-      die "--hooks-only requires a <host>/<database> source path so dbx knows which hooks to run"
+  local ho_host ho_db ho_dbtype
+  ho_host=$(echo "$source" | cut -d'/' -f1)
+  ho_db=$(echo "$source" | cut -d'/' -f2)
+  [[ -z "$ho_host" || -z "$ho_db" ]] && \
+    die "--hooks-only: could not parse host/database from '$source'"
 
-    local ho_host ho_db ho_dbtype
-    ho_host=$(echo "$source" | cut -d'/' -f1)
-    ho_db=$(echo "$source" | cut -d'/' -f2)
-    [[ -z "$ho_host" || -z "$ho_db" ]] && \
-      die "--hooks-only: could not parse host/database from '$source'"
+  ho_dbtype=$(get_db_type "$ho_host")
+  [[ -z "$ho_dbtype" ]] && die "--hooks-only: host '$ho_host' not found in config (or missing 'type')"
 
-    ho_dbtype=$(get_db_type "$ho_host")
-    [[ -z "$ho_dbtype" ]] && die "--hooks-only: host '$ho_host' not found in config (or missing 'type')"
-
-    # --hooks-only is a validation flow — never auto-provision a container.
-    local ho_container exists
-    case "$ho_dbtype" in
-      postgres|postgresql) ho_container="$POSTGRES_CONTAINER" ;;
-      mysql|mariadb)       ho_container="$MYSQL_CONTAINER" ;;
-      *) die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype" ;;
-    esac
-    if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
-      die "--hooks-only: container '$ho_container' does not exist. Run a real restore first to create it."
-    fi
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
-      docker start "$ho_container" >/dev/null || die "--hooks-only: failed to start container '$ho_container'"
-    fi
-    # count(*) returns "0" or "1" — never empty — so we don't have to
-    # distinguish "DB missing" from "query produced no output for some
-    # reason". stderr is dropped on purpose; a non-zero exit code from
-    # docker/psql/mysql is the only failure signal we care about.
-    # Use inline SQL with shell-side quote-doubling. We control $target_name
-    # (it comes from --name); psql `-v` substitution was unreliable across
-    # versions, so we just escape and interpolate directly.
-    local sq=\'
-    local esc_name="${target_name//$sq/$sq$sq}"
-    case "$ho_dbtype" in
-      postgres|postgresql)
-        exists=$(docker exec "$ho_container" psql -U postgres -tA \
-          -c "SELECT count(*) FROM pg_database WHERE datname = '$esc_name'" 2>/dev/null) \
-          || die "--hooks-only: could not query $ho_container (psql failed)"
-        [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
-        ;;
-      mysql|mariadb)
-        exists=$(docker exec "$ho_container" mysql -u root -NB \
-          -e "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>/dev/null) \
-          || die "--hooks-only: could not query $ho_container (mysql failed)"
-        [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
-        ;;
-    esac
-
-    log_step "Running post-restore hooks against $target_name (--hooks-only)"
-    if ! run_post_restore_hooks "$ho_host" "$ho_db" "$target_name" "$ho_dbtype" \
-                                 "$ho_host" "$ho_db" "" ""; then
-      die "Post-restore hooks failed against '$target_name'."
-    fi
-    log_success "Post-restore hooks complete against $target_name"
-    return 0
+  # --hooks-only is a validation flow — never auto-provision a container.
+  local ho_container exists
+  case "$ho_dbtype" in
+    postgres|postgresql) ho_container="$POSTGRES_CONTAINER" ;;
+    mysql|mariadb)       ho_container="$MYSQL_CONTAINER" ;;
+    *) die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype" ;;
+  esac
+  if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
+    die "--hooks-only: container '$ho_container' does not exist. Run a real restore first to create it."
   fi
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
+    docker start "$ho_container" >/dev/null || die "--hooks-only: failed to start container '$ho_container'"
+  fi
+  # count(*) returns "0" or "1" — never empty — so we don't have to
+  # distinguish "DB missing" from "query produced no output for some
+  # reason". stderr is dropped on purpose; a non-zero exit code from
+  # docker/psql/mysql is the only failure signal we care about.
+  # Use inline SQL with shell-side quote-doubling. We control $target_name
+  # (it comes from --name); psql `-v` substitution was unreliable across
+  # versions, so we just escape and interpolate directly.
+  local sq=\'
+  local esc_name="${target_name//$sq/$sq$sq}"
+  case "$ho_dbtype" in
+    postgres|postgresql)
+      exists=$(docker exec "$ho_container" psql -U postgres -tA \
+        -c "SELECT count(*) FROM pg_database WHERE datname = '$esc_name'" 2>/dev/null) \
+        || die "--hooks-only: could not query $ho_container (psql failed)"
+      [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
+      ;;
+    mysql|mariadb)
+      exists=$(docker exec "$ho_container" mysql -u root -NB \
+        -e "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>/dev/null) \
+        || die "--hooks-only: could not query $ho_container (mysql failed)"
+      [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
+      ;;
+  esac
 
-  # Remote-fetch path: download into a tempdir under $DATA_DIR/.remote/
-  # then fall through to the normal local-file restore code below.
-  # On success the file is deleted unless --keep-download was passed.
-  # On failure we deliberately leave it so the user can retry.
-  local remote_local_file=""
+  log_step "Running post-restore hooks against $target_name (--hooks-only)"
+  if ! run_post_restore_hooks "$ho_host" "$ho_db" "$target_name" "$ho_dbtype" \
+                               "$ho_host" "$ho_db" "" ""; then
+    die "Post-restore hooks failed against '$target_name'."
+  fi
+  log_success "Post-restore hooks complete against $target_name"
+}
+
+# Remote-fetch path: download into a tempdir under $DATA_DIR/.remote/
+# then fall through to the normal local-file restore code below.
+# On success the file is deleted unless --keep-download was passed.
+# On failure we deliberately leave it so the user can retry.
+# Reads:  from_remote restore_storage
+# Writes: remote_local_file source
+_restore_fetch_remote() {
   if [[ -n "$from_remote" ]]; then
     if ! is_storage_configured "$restore_storage"; then
       die "Cloud storage is not configured. Run 'dbx storage info' for setup help."
@@ -533,11 +646,15 @@ cmd_restore() {
       || die "Failed to fetch remote backup: $resolved"
     source="$remote_local_file"
   fi
+}
 
-  local backup_file=""
-  local host=""
-  local database=""
-
+# Turn $source into a concrete backup file, plus the host/database it came
+# from where the path carries them.
+# Reads:  source DATA_DIR
+# Writes: backup_file host database restore_cancelled
+# The trailing `return 0` keeps a false `[[ -z "$backup_file" ... ]] && die`
+# in the last branch from becoming this function's exit status.
+_restore_resolve_source() {
   # Fuzzy selection if no source provided or just a host
   if [[ -z "$source" ]] || { [[ -n "$source" ]] && [[ ! -f "$source" ]] && [[ "$source" != */* ]]; }; then
     if ! command -v fzf &>/dev/null; then
@@ -586,6 +703,7 @@ cmd_restore() {
 
     if [[ -z "$selected" ]]; then
       log_info "Selection cancelled"
+      restore_cancelled=true
       return 0
     fi
 
@@ -640,13 +758,16 @@ cmd_restore() {
   else
     die "Invalid source: $source"
   fi
+  return 0
+}
 
-  [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
-
-  # Verify the backup's SHA-256 against its .meta.json before importing.
-  # For --from-remote this runs after the download (backup_file points at
-  # the fetched file). Non-fatal when no metadata or no checksum is present
-  # (warns); aborts only on a real mismatch.
+# Verify the backup's SHA-256 against its .meta.json before importing.
+# For --from-remote this runs after the download (backup_file points at
+# the fetched file). Non-fatal when no metadata or no checksum is present
+# (warns); aborts only on a real mismatch.
+# Reads:  skip_verify backup_file
+# Writes: nothing
+_restore_verify_checksum() {
   if [[ "$skip_verify" == "false" ]]; then
     log_step "Verifying backup checksum: $(basename "$backup_file")"
     if ! verify_backup_checksum "$backup_file"; then
@@ -655,18 +776,12 @@ cmd_restore() {
   else
     log_warn "--skip-verify: skipping backup checksum verification for $backup_file"
   fi
+}
 
-  # Per-host safety enforcement. If the SOURCE host (the one this backup
-  # came from) is marked safety=prod AND the user is using --into to
-  # write back into a sidecar container, refuse: that's the one path
-  # where a prod-source restore can mutate a live DB the operator might
-  # not realize is also prod. Plain restores (no --into) land in the
-  # managed postgres-dbx / mysql-dbx and are fine — those are dev clones.
-  if [[ -n "$into_container" && -n "$host" ]]; then
-    require_writable_host_for_restore_into "$host"
-  fi
-
-  # Determine target database name
+# Derive the target database name when --name was not given.
+# Reads:  target_name database backup_file POSTGRES_CONTAINER MYSQL_CONTAINER
+# Writes: target_name
+_restore_target_name() {
   if [[ -z "$target_name" ]]; then
     local base_name="${database:-$(basename "$backup_file")}"
     base_name="${base_name%.sql.zst.age}"
@@ -690,12 +805,15 @@ cmd_restore() {
       fi
     done
   fi
+}
 
-  # Determine database type. Try metadata first, then host config, then
-  # fall back to content sniffing. Metadata may not include a .type
-  # field for older or postgres backups, so an empty result there should
-  # fall through rather than terminate the chain.
-  local db_type=""
+# Determine database type. Try metadata first, then host config, then
+# fall back to content sniffing. Metadata may not include a .type
+# field for older or postgres backups, so an empty result there should
+# fall through rather than terminate the chain.
+# Reads:  backup_file host
+# Writes: db_type
+_restore_detect_db_type() {
   local meta_file="${backup_file}.meta.json"
   [[ -f "$meta_file" ]] && db_type=$(jq -r '.type // empty' "$meta_file")
   [[ -z "$db_type" && -n "$host" ]] && db_type=$(get_db_type "$host")
@@ -717,28 +835,17 @@ cmd_restore() {
       db_type="mysql"
     fi
   fi
+}
 
-  log_info "Restoring: $(basename "$backup_file")"
-  log_info "Target database: $target_name"
-
-  # Baseline: last successful restore's duration. The restore audit row
-  # doesn't carry db_host/database, so we don't filter on them — this is
-  # a global "your last restore took N" hint, not per-source-DB.
-  local last_dur
-  last_dur=$(audit_last_duration "restore" "" "")
-  if [[ -n "$last_dur" ]]; then
-    log_info "Last restore took $(format_duration "$last_dur")"
-  fi
-
-  local restore_start
-  restore_start=$(date +%s)
-
-  # Pre-restore PII scrub drift check. Reads schema captured in the
-  # backup's meta.json (added at backup time) and diffs against the
-  # host's manifest. On drift: abort BEFORE the engine restore so no
-  # data ever lands in the local container. Older backups (no
-  # captured schema) fall through and get checked by the post-restore
-  # gate. Bypassed by --no-scrub or when no gate is configured.
+# Pre-restore PII scrub drift check. Reads schema captured in the
+# backup's meta.json (added at backup time) and diffs against the
+# host's manifest. On drift: abort BEFORE the engine restore so no
+# data ever lands in the local container. Older backups (no
+# captured schema) fall through and get checked by the post-restore
+# gate. Bypassed by --no-scrub or when no gate is configured.
+# Reads:  skip_scrub host backup_file target_name
+# Writes: nothing
+_restore_scrub_preflight() {
   if [[ "$skip_scrub" == "false" && -n "$host" ]] && scrub_gate_active "$host"; then
     local pre_meta="${backup_file}.meta.json"
     [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.zst}.meta.json"
@@ -755,9 +862,15 @@ cmd_restore() {
       die "scrub: pre-restore drift check failed. No data was restored."
     fi
   fi
+}
 
-  # --transform / --into take the streaming code path. --into is
-  # postgres-only; MySQL --into is rejected below.
+# --transform / --into take the streaming code path. --into is
+# postgres-only; MySQL --into is rejected below.
+# Reads:  transform_script into_container db_type backup_file target_name
+#         host database transform_inherit_env with_globals
+#         POSTGRES_CONTAINER MYSQL_CONTAINER
+# Writes: nothing
+_restore_dispatch() {
   if [[ -n "$transform_script" || -n "$into_container" ]]; then
     local target_container="" target_user="postgres" target_pass=""
     if [[ -n "$into_container" ]]; then
@@ -821,13 +934,18 @@ cmd_restore() {
         ;;
     esac
   fi
+}
 
-  # Hooks skipped for ad-hoc file restores (no host/db in path).
-  # Hooks also skipped when --into targets an external container: the
-  # hook runners (pg_run_sql_stream / mysql_run_sql_stream) hardcode the
-  # local POSTGRES_CONTAINER / MYSQL_CONTAINER, so running them after an
-  # --into restore would mutate the wrong DB. The operator uses
-  # --transform for sanitization in the --into flow.
+# Hooks skipped for ad-hoc file restores (no host/db in path).
+# Hooks also skipped when --into targets an external container: the
+# hook runners (pg_run_sql_stream / mysql_run_sql_stream) hardcode the
+# local POSTGRES_CONTAINER / MYSQL_CONTAINER, so running them after an
+# --into restore would mutate the wrong DB. The operator uses
+# --transform for sanitization in the --into flow.
+# Reads:  skip_hooks host database into_container backup_file target_name
+#         db_type restore_start
+# Writes: nothing
+_restore_run_hooks() {
   if [[ "$skip_hooks" == "false" && -n "$host" && -n "$database" && -z "$into_container" ]]; then
     local backup_basename backup_ts
     backup_basename=$(basename "$backup_file")
@@ -847,15 +965,20 @@ cmd_restore() {
     # already happened.
     log_warn "Ad-hoc file restore: any configured post_restore hooks are skipped (no host/db context in the source path)."
   fi
+}
 
-  # PII scrub gate. Fires when hosts.<host>.scrub.required is true. The
-  # gate is fail-closed: any drift / UPDATE error / sniff failure drops
-  # the target DB rather than leaving it for inspection (a half-scrubbed
-  # clone is more dangerous than no clone).
-  #
-  # When --into <container> is set we ALREADY bypassed the gate above
-  # (with audit log) — see the streaming dispatch block. Skip the gate
-  # block entirely in that case so we don't double-log.
+# PII scrub gate. Fires when hosts.<host>.scrub.required is true. The
+# gate is fail-closed: any drift / UPDATE error / sniff failure drops
+# the target DB rather than leaving it for inspection (a half-scrubbed
+# clone is more dangerous than no clone).
+#
+# When --into <container> is set we ALREADY bypassed the gate above
+# (with audit log) — see the streaming dispatch block. Skip the gate
+# block entirely in that case so we don't double-log.
+# Reads:  host database into_container skip_scrub target_name db_type
+#         backup_file restore_start DATA_DIR
+# Writes: nothing
+_restore_scrub_gate() {
   if [[ -n "$host" && -n "$database" && -z "$into_container" ]]; then
     if scrub_gate_active "$host"; then
       if [[ "$skip_scrub" == "true" ]]; then
@@ -884,22 +1007,14 @@ cmd_restore() {
       log_info "--no-scrub: no scrub gate is configured for $host (flag had no effect)."
     fi
   fi
+}
 
-  local restore_dur=$(($(date +%s) - restore_start))
-  audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
-
-  echo ""
-  # On-disk size of the source backup file (not the restored DB) — gives
-  # the user a sense of throughput. Stat fallback covers both BSD (macOS)
-  # and GNU (Linux) flavors.
-  local src_size
-  src_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
-  log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
-  notify_restore_success "$backup_file" "$target_name"
-
-  # Clean up the downloaded file from --from-remote unless the user
-  # asked to keep it. Only reached on a successful restore — failure
-  # paths above all `die`, so the temp file is preserved for retry.
+# Clean up the downloaded file from --from-remote unless the user
+# asked to keep it. Only reached on a successful restore — failure
+# paths above all `die`, so the temp file is preserved for retry.
+# Reads:  remote_local_file keep_download
+# Writes: nothing
+_restore_cleanup_download() {
   if [[ -n "$remote_local_file" && "$keep_download" != "true" ]]; then
     local meta="${remote_local_file}.meta.json"
     local globals="${remote_local_file}.globals.sql"
@@ -2787,320 +2902,6 @@ cmd_update() {
     log_warn "Could not resolve the latest release tag; falling back to main"
     curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/main/install.sh" | bash
   fi
-}
-
-# Prompt for a TCP port and validate it's numeric. Re-prompts on
-# non-numeric input. Empty input returns non-zero so callers can abort.
-# Args: $1 prompt header, $2 default value. Prints the validated port.
-host_prompt_port() {
-  local header="$1" default="$2" port
-  while :; do
-    port=$(gum input --header "$header" --value "$default")
-    [[ -z "$port" ]] && return 1
-    if [[ "$port" =~ ^[0-9]+$ ]]; then
-      echo "$port"
-      return 0
-    fi
-    log_warn "Port must be a number (got: $port)"
-  done
-}
-
-# Write a host block to $CONFIG_FILE atomically via jq + temp-file.
-# Args: alias, type, user, then either:
-#   "direct" <host> <port>
-#   "tunnel" <jump_host> <target_host> <target_port>
-host_write_block() {
-  local alias="$1" type="$2" user="$3" mode="$4"
-  local tmp; tmp=$(mktemp)
-  if [[ "$mode" == "direct" ]]; then
-    local h="$5" p="$6"
-    jq --arg a "$alias" --arg t "$type" --arg u "$user" \
-       --arg h "$h" --argjson p "$p" \
-       '.hosts[$a] = {type: $t, host: $h, port: $p, user: $u, databases: {}}' \
-       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-  else
-    local jh="$5" th="$6" tp="$7"
-    jq --arg a "$alias" --arg t "$type" --arg u "$user" \
-       --arg jh "$jh" --arg th "$th" --argjson tp "$tp" \
-       '.hosts[$a] = {type: $t, user: $u, ssh_tunnel: {jump_host: $jh, target_host: $th, target_port: $tp}, databases: {}}' \
-       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-  fi
-  secure_file "$CONFIG_FILE"
-}
-
-# Delete a host block from $CONFIG_FILE. Used by the wizard's rollback path.
-host_delete_block() {
-  local alias="$1"
-  local tmp; tmp=$(mktemp)
-  jq --arg a "$alias" 'del(.hosts[$a])' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-  secure_file "$CONFIG_FILE"
-}
-
-host_add() {
-  require_config
-  require_jq
-  require_docker
-  require_gum
-
-  local alias new_type new_user
-  while :; do
-    alias=$(gum input --header "Host alias:" --placeholder "production")
-    [[ -z "$alias" ]] && { log_info "Aborted."; return 0; }
-    if ! host_alias_valid "$alias"; then
-      log_warn "Alias must start with a letter or digit and use only letters, digits, '_', or '-'."
-      continue
-    fi
-    if host_exists "$alias"; then
-      local existing_type existing_user
-      existing_type=$(get_config_value ".hosts[\"$alias\"].type")
-      existing_user=$(get_config_value ".hosts[\"$alias\"].user")
-      log_warn "Host '$alias' already exists (type=$existing_type, user=$existing_user)."
-      continue
-    fi
-    break
-  done
-
-  new_type=$(gum choose --header "Database type:" "postgres" "mysql" "mariadb")
-  [[ -z "$new_type" ]] && { log_info "Aborted."; return 0; }
-
-  new_user=$(gum input --header "Database user:" --placeholder "postgres")
-  [[ -z "$new_user" ]] && { log_info "Aborted."; return 0; }
-
-  local network_mode
-  network_mode=$(gum choose --header "How does dbx reach this database?" \
-    "Direct connection" "SSH tunnel (jump host)")
-  [[ -z "$network_mode" ]] && { log_info "Aborted."; return 0; }
-
-  local default_port direct_host direct_port
-  local tunnel_jump tunnel_target tunnel_port
-  default_port=$([[ "$new_type" == "postgres" ]] && echo "5432" || echo "3306")
-
-  if [[ "$network_mode" == "Direct connection" ]]; then
-    direct_host=$(gum input --header "Host address:" --value "localhost")
-    [[ -z "$direct_host" ]] && { log_info "Aborted."; return 0; }
-    direct_port=$(host_prompt_port "Port:" "$default_port") \
-      || { log_info "Aborted."; return 0; }
-  else
-    tunnel_jump=$(gum input --header "SSH jump host (from your ~/.ssh/config):" \
-                            --placeholder "bastion")
-    [[ -z "$tunnel_jump" ]] && { log_info "Aborted."; return 0; }
-    tunnel_target=$(gum input --header "Database hostname (as seen from the jump host):" \
-                              --placeholder "db.internal")
-    [[ -z "$tunnel_target" ]] && { log_info "Aborted."; return 0; }
-    tunnel_port=$(host_prompt_port "Database port (on the jump-side network):" "$default_port") \
-      || { log_info "Aborted."; return 0; }
-  fi
-
-  # Credentials. keychain_set persists via the active backend (Keychain on
-  # macOS, pass on Linux, age fallback) so the password never lands in
-  # config.json.
-  local existing_pass
-  existing_pass=$(get_password "$alias" 2>/dev/null || true)
-  if [[ -n "$existing_pass" ]]; then
-    local creds_choice
-    creds_choice=$(gum choose --header "Vault already has a password for '$alias'." \
-                              "Use existing" "Replace")
-    [[ -z "$creds_choice" ]] && { log_info "Aborted."; return 0; }
-    if [[ "$creds_choice" == "Replace" ]]; then
-      local new_pass
-      new_pass=$(gum input --password --header "New password for '$alias':")
-      [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
-      keychain_set "$alias" "$new_pass"
-    fi
-  else
-    local new_pass
-    new_pass=$(gum input --password --header "Password for '$alias':")
-    [[ -z "$new_pass" ]] && { log_info "Aborted."; return 0; }
-    keychain_set "$alias" "$new_pass"
-  fi
-
-  log_info "Credentials stored."
-
-  while :; do
-    log_step "Writing provisional host block and validating..."
-    if [[ "$network_mode" == "Direct connection" ]]; then
-      host_write_block "$alias" "$new_type" "$new_user" direct "$direct_host" "$direct_port"
-    else
-      host_write_block "$alias" "$new_type" "$new_user" tunnel \
-        "$tunnel_jump" "$tunnel_target" "$tunnel_port"
-    fi
-
-    if cmd_test "$alias"; then
-      log_success "Connection validated."
-      break
-    fi
-
-    log_error "Connection validation failed."
-    local recover
-    recover=$(gum choose --header "What now?" \
-      "Re-enter credentials and retry" \
-      "Re-enter host fields and retry" \
-      "Save anyway (broken host kept in config)" \
-      "Abort and roll back")
-
-    case "$recover" in
-      "Re-enter credentials and retry")
-        local new_pass
-        new_pass=$(gum input --password --header "New password for '$alias':")
-        [[ -z "$new_pass" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
-        keychain_set "$alias" "$new_pass"
-        continue
-        ;;
-      "Re-enter host fields and retry")
-        # Re-collect network branch only; identity stays.
-        network_mode=$(gum choose --header "How does dbx reach this database?" \
-          "Direct connection" "SSH tunnel (jump host)")
-        [[ -z "$network_mode" ]] && { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
-        if [[ "$network_mode" == "Direct connection" ]]; then
-          direct_host=$(gum input --header "Host address:" --value "${direct_host:-localhost}")
-          direct_port=$(host_prompt_port "Port:" "${direct_port:-$default_port}") \
-            || { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
-        else
-          tunnel_jump=$(gum input --header "SSH jump host:" --value "${tunnel_jump:-}")
-          tunnel_target=$(gum input --header "Database hostname:" --value "${tunnel_target:-}")
-          tunnel_port=$(host_prompt_port "Database port:" "${tunnel_port:-$default_port}") \
-            || { log_info "Aborted."; host_delete_block "$alias"; keychain_delete "$alias" 2>/dev/null || true; return 1; }
-        fi
-        continue
-        ;;
-      "Save anyway (broken host kept in config)")
-        log_warn "Host '$alias' saved with failing connection test. Fix it with: dbx config edit"
-        return 0
-        ;;
-      "Abort and roll back"|"")
-        log_info "Rolling back..."
-        host_delete_block "$alias"
-        keychain_delete "$alias" 2>/dev/null || true
-        log_info "Rolled back. Config and vault unchanged."
-        return 1
-        ;;
-    esac
-  done
-
-  local remote_dbs picked
-  remote_dbs=$(list_remote_databases "$alias" 2>/dev/null | grep -v '^$' || true)
-
-  if [[ -z "$remote_dbs" ]]; then
-    log_warn "No user databases found on '$alias' (or list query failed)."
-    log_info "Continuing with empty database list — edit them later via 'dbx config edit'."
-    picked=""
-  else
-    picked=$(echo "$remote_dbs" | gum choose --no-limit \
-      --header "Pick databases to back up (space to toggle, enter to confirm):")
-    if [[ -z "$picked" ]]; then
-      log_info "No databases selected."
-    fi
-  fi
-
-  # Per-database exclude tables.
-  if [[ -n "$picked" ]]; then
-    while IFS= read -r db; do
-      [[ -z "$db" ]] && continue
-      local excl
-      excl=$(gum input --header "Tables to exclude data from in '$db' (comma-separated, blank for none):")
-      local tmp; tmp=$(mktemp)
-      if [[ -n "$excl" ]]; then
-        local excl_json
-        excl_json=$(printf '%s' "$excl" | tr ',' '\n' \
-          | awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print }' \
-          | jq -R . | jq -s .)
-        jq --arg a "$alias" --arg d "$db" --argjson e "$excl_json" \
-           '.hosts[$a].databases[$d] = {exclude_data: $e}' \
-           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-      else
-        jq --arg a "$alias" --arg d "$db" \
-           '.hosts[$a].databases[$d] = {}' \
-           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-      fi
-      secure_file "$CONFIG_FILE"
-    done <<< "$picked"
-  fi
-
-  # MySQL-only: strip DEFINER clauses? Default yes.
-  if [[ "$new_type" == "mysql" ]]; then
-    local definer_value
-    if gum confirm --default=true "Strip DEFINER clauses from MySQL dumps?"; then
-      definer_value="strip"
-    else
-      definer_value="keep"
-    fi
-    local tmp; tmp=$(mktemp)
-    jq --arg a "$alias" --arg dh "$definer_value" \
-       '.hosts[$a].definer_handling = $dh' \
-       "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-    secure_file "$CONFIG_FILE"
-  fi
-
-  # Summary.
-  local db_count
-  db_count=$(printf '%s' "$picked" | grep -c . || true)
-  echo
-  log_success "Host '$alias' added."
-  log_info "  Type:      $new_type"
-  if [[ "$network_mode" == "Direct connection" ]]; then
-    log_info "  Network:   direct ($direct_host:$direct_port)"
-  else
-    log_info "  Network:   ssh tunnel via $tunnel_jump to $tunnel_target:$tunnel_port"
-  fi
-  log_info "  Databases: ${db_count:-0}"
-
-  # Storage chain (conditional). See spec: "Step 7 — Storage chain".
-  if is_storage_configured; then
-    if gum confirm --default=false "Enable auto-upload to remote storage for '$alias' backups?"; then
-      local tmp; tmp=$(mktemp)
-      jq --arg a "$alias" '.hosts[$a].auto_upload = true' \
-        "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-      secure_file "$CONFIG_FILE"
-      # With more than one named backend, let the host pick which one its
-      # auto-uploads target; otherwise it uses .defaults.storage / the only one.
-      local _backends; _backends=$(storage_list_backends)
-      if [[ "$(printf '%s\n' "$_backends" | grep -c .)" -gt 1 ]]; then
-        local _pick
-        _pick=$(printf '%s\n' "$_backends" | gum choose --header "Upload '$alias' backups to which storage?")
-        if [[ -n "$_pick" ]]; then
-          tmp=$(mktemp)
-          jq --arg a "$alias" --arg s "$_pick" '.hosts[$a].upload_storage = $s' \
-            "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-          secure_file "$CONFIG_FILE"
-          log_info "  Storage:   auto-upload enabled for $alias → $_pick"
-        else
-          log_info "  Storage:   auto-upload enabled for $alias"
-        fi
-      else
-        log_info "  Storage:   auto-upload enabled for $alias"
-      fi
-    else
-      log_info "  Storage:   configured globally (auto-upload off for $alias)"
-    fi
-  else
-    if gum confirm --default=true "Configure remote storage for these backups now?"; then
-      storage_add
-    else
-      log_info "  Storage:   not configured (skipped). Set up later with: dbx storage add"
-    fi
-  fi
-
-  log_info "Try: dbx backup $alias"
-}
-
-cmd_host() {
-  local action="${1:-}"; shift || true
-  case "$action" in
-    add)
-      host_add "$@"
-      ;;
-    remove|rm|delete|list|ls|test|edit)
-      die "host $action: not yet implemented"
-      ;;
-    ""|help)
-      die "Usage: dbx host <action>
-  Actions:
-    add        Interactively add a new backup host"
-      ;;
-    *)
-      die "Unknown host action: $action (use: add)"
-      ;;
-  esac
 }
 
 # Pre-build (or verify) the custom postgres image a backup's third-party
