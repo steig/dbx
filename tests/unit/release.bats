@@ -520,9 +520,26 @@ stub_sha() {
 }
 
 @test "update-formula: --check writes nothing" {
+  # Both branches, because --check is read-only in both and the failing one is
+  # where a bail-out could leave a partial write behind. Asserting only "the
+  # file did not change" would also pass if --check died before doing anything,
+  # so each branch pins the status it is supposed to exit with.
   stub_curl
+  local before
+
+  # Mismatch branch: stub_curl serves content whose digest cannot match the
+  # pinned one, so --check must fail — and still write nothing.
   before=$(cat "$(formula)")
   run bash "$REPO/scripts/update-formula.sh" --check
+  [ "$status" -ne 0 ]
+  [ "$(cat "$(formula)")" = "$before" ]
+
+  # Matching branch: repoint the formula at the stub's digest so --check
+  # succeeds, and confirm it still leaves the file alone.
+  edit_formula -v s="$(stub_sha)" '/^[[:space:]]*sha256 "/ { print "  sha256 \"" s "\""; next } { print }'
+  before=$(cat "$(formula)")
+  run bash "$REPO/scripts/update-formula.sh" --check
+  [ "$status" -eq 0 ]
   [ "$(cat "$(formula)")" = "$before" ]
 }
 
