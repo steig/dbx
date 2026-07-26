@@ -729,6 +729,78 @@ strip_definer() {
 }
 
 # ============================================================================
+# Engine Dispatch
+# ============================================================================
+#
+# dbx supports two engines, and every config value naming one arrives in a
+# handful of spellings: `postgres`/`postgresql` and `mysql`/`mariadb`. Before
+# these helpers each of ~18 sites re-spelled that `case` by hand, which is how
+# a fix lands on one engine only.
+#
+# The canonical key is the function-name prefix the engine libraries already
+# use — `pg` and `mysql` — chosen because it matches both naming families in
+# the tree: the `pg_*` / `mysql_*` prefix (lib/postgres.sh, lib/mysql.sh) and
+# the `*_pg` / `*_mysql` suffix (lib/scrub.sh's schema queries). One key
+# therefore composes with everything without renaming a thing.
+#
+# There is no associative-array vtable here on purpose: macOS ships bash 3.2,
+# which has none. Indirect calls through a name built from the key are the
+# portable equivalent and read no worse.
+
+# Canonical engine key for a configured db_type. Prints `pg` or `mysql`.
+# Returns 1 on an unrecognized type so callers can die with their own message
+# — the useful error names the host or the flag, which this cannot see.
+engine_for() {
+  case "$1" in
+    postgres|postgresql) printf 'pg' ;;
+    mysql|mariadb)       printf 'mysql' ;;
+    *)                   return 1 ;;
+  esac
+}
+
+# The dbx-managed container for a db_type. Returns 1 on an unknown type.
+engine_container() {
+  case "$1" in
+    postgres|postgresql) printf '%s' "$POSTGRES_CONTAINER" ;;
+    mysql|mariadb)       printf '%s' "$MYSQL_CONTAINER" ;;
+    *)                   return 1 ;;
+  esac
+}
+
+# Canonical engine key for a *container*, for the paths that hold a container
+# name rather than a configured db_type. The name is the strong signal
+# (postgres-dbx / mysql-dbx); the image tag is the fallback, which is what
+# covers the non-standard container names the integration tests use. Pass the
+# image as $2 when the caller already has it, to save a `docker inspect`.
+# Prints `pg` or `mysql`; returns 1 when neither identifies an engine.
+engine_for_container() {
+  local container="$1" image="${2:-}"
+  case "$container" in
+    *postgres*) printf 'pg';    return 0 ;;
+    *mysql*)    printf 'mysql'; return 0 ;;
+  esac
+  [[ -n "$image" ]] || image=$(container_image "$container")
+  case "$image" in
+    postgres:*|pgvector/*|postgis/*|timescale/*|dbx-pg*) printf 'pg' ;;
+    mysql:*|mariadb:*)                                   printf 'mysql' ;;
+    *)                                                   return 1 ;;
+  esac
+}
+
+# Dispatch to an engine implementation: engine_call <db_type> <op> [args...]
+# calls pg_<op> or mysql_<op>. Both engines must accept the same arguments for
+# an op — where a flag applies to only one of them, the other absorbs it and
+# warns, rather than the caller branching. `die` on an unknown type, because
+# every call site treats that as fatal.
+engine_call() {
+  local db_type="$1" op="$2"
+  shift 2
+  local engine
+  engine=$(engine_for "$db_type") || die "Unknown database type: $db_type"
+  "${engine}_${op}" "$@"
+}
+
+# ============================================================================
 # Audit Logging
 # ============================================================================
 
@@ -1601,23 +1673,12 @@ ensure_container_image() {
   [[ "$current_image" == "$desired_image" ]] && return 0
 
   # Mismatch. Check for user DBs.
-  # Detect the DB type from the container name first, then fall back to
-  # the current image tag (covers non-standard names used in tests).
   local has_dbs="false"
-  local _db_type=""
-  case "$container" in
-    *postgres*) _db_type="postgres" ;;
-    *mysql*)    _db_type="mysql" ;;
-    *)
-      case "$current_image" in
-        postgres:*|pgvector/*|postgis/*|timescale/*|dbx-pg*) _db_type="postgres" ;;
-        mysql:*|mariadb:*)                           _db_type="mysql" ;;
-      esac
-      ;;
-  esac
-  case "$_db_type" in
-    postgres) pg_container_has_user_dbs "$container" && has_dbs="true" ;;
-    mysql)    mysql_container_has_user_dbs "$container" && has_dbs="true" ;;
+  local _engine=""
+  _engine=$(engine_for_container "$container" "$current_image") || _engine=""
+  case "$_engine" in
+    pg)    pg_container_has_user_dbs "$container" && has_dbs="true" ;;
+    mysql) mysql_container_has_user_dbs "$container" && has_dbs="true" ;;
   esac
 
   if [[ "$has_dbs" == "false" ]]; then
@@ -1694,21 +1755,10 @@ _recreate_container() {
 # Detects DB type from the container name, with fallback to the running image.
 _list_user_dbs() {
   local container="$1"
-  local _db_type=""
-  case "$container" in
-    *postgres*) _db_type="postgres" ;;
-    *mysql*)    _db_type="mysql" ;;
-    *)
-      local _img
-      _img=$(container_image "$container")
-      case "$_img" in
-        postgres:*|pgvector/*|postgis/*|timescale/*|dbx-pg*) _db_type="postgres" ;;
-        mysql:*|mariadb:*)                           _db_type="mysql" ;;
-      esac
-      ;;
-  esac
-  case "$_db_type" in
-    postgres)
+  local _engine=""
+  _engine=$(engine_for_container "$container") || _engine=""
+  case "$_engine" in
+    pg)
       PGPASSWORD="${DBX_PG_PASSWORD:-devpassword}" docker exec -e PGPASSWORD "$container" \
         psql -U postgres -tA -c \
         "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres','template0','template1') ORDER BY datname" \

@@ -39,7 +39,9 @@ mysql_stderr_filter() {
 # `type: "mysql"`.
 # Args: $1=host alias, $2=database name, $3=output base path,
 #       $4=verbose ("true"/"false"), $5=backup mode
-#       ("" full, "schema" schema-only, "data" data-only)
+#       ("" full, "schema" schema-only, "data" data-only),
+#       $6=globals flag (postgres-only; accepted and warned about here so the
+#          two engines share one signature — see engine_call in lib/core.sh)
 mysql_backup() {
   local host="$1"
   local database="$2"
@@ -47,6 +49,12 @@ mysql_backup() {
   local verbose="${4:-false}"
   # "" (full = both passes), "schema" (pass 1 only), or "data" (pass 2 only).
   local backup_mode="${5:-}"
+  # There is no MySQL analogue of pg_dumpall --globals-only: users and grants
+  # live in the `mysql` system schema, which is not part of a per-database
+  # dump. Taking the flag rather than making the caller branch is what lets
+  # `dbx backup` dispatch without a case.
+  local globals_flag="${6:-}"
+  [[ -n "$globals_flag" ]] && log_warn "--globals/--no-globals is postgres-only; ignored for mysql"
 
   local start_time
   start_time=$(date +%s)
@@ -436,9 +444,14 @@ mysql_ensure_image_for_backup() {
   ensure_container_image "$MYSQL_CONTAINER" "$desired_image" "$recreate"
 }
 
+# Args: $1=backup file path, $2=target database name,
+#       $3=with_globals (postgres-only; accepted and warned about here so the
+#          two engines share one signature — see engine_call in lib/core.sh)
 mysql_restore_backup() {
   local backup_file="$1"
   local target_db="$2"
+  local with_globals="${3:-false}"
+  [[ "$with_globals" == "true" ]] && log_warn "--with-globals is postgres-only; ignored for mysql"
 
   log_step "Restoring MySQL backup to: $target_db"
 

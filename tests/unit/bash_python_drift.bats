@@ -327,49 +327,45 @@ PY
 #   vs  wizard-server.py:_FLAVOR_TO_CONTAINER
 # ----------------------------------------------------------------------------
 
-# core.sh's container-name defaults with the env overrides cleared. The
-# wizard's map is a literal, so the defaults are what it has to match. Run in
-# a subshell: core.sh only assigns at top level, nothing to clean up.
-core_container_defaults() (
+# bash's flavor -> container mapping, obtained by calling the function that
+# owns it (engine_container, lib/core.sh) once per flavor named on stdin.
+# This used to scrape the `ho_container="$VAR"` case arms out of dbx's
+# --hooks-only path, because that was the only place bash wrote the mapping
+# down; #143 gave it a single home, so the test can exercise the real thing
+# instead of pattern-matching source. Env overrides are cleared because the
+# wizard's map is a literal, so the defaults are what it has to match.
+# Emits "<flavor> <container>", or "<flavor> UNMAPPED" when bash rejects it.
+# Runs in a subshell: core.sh only assigns at top level, nothing to clean up.
+bash_flavor_containers() (
   unset DBX_POSTGRES_CONTAINER DBX_MYSQL_CONTAINER
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/core.sh"
-  printf 'POSTGRES_CONTAINER %s\nMYSQL_CONTAINER %s\n' \
-    "$POSTGRES_CONTAINER" "$MYSQL_CONTAINER"
+  local flavor container
+  while IFS= read -r flavor; do
+    [ -n "$flavor" ] || continue
+    if container=$(engine_container "$flavor"); then
+      printf '%s %s\n' "$flavor" "$container"
+    else
+      printf '%s UNMAPPED\n' "$flavor"
+    fi
+  done
 )
 
-# bash's flavor -> container-variable mapping, read from the case arms in
-# dbx's --hooks-only path — the one place bash writes the mapping out.
-# Emits "<flavor> <VARNAME>" lines.
-bash_flavor_map() {
-  awk '
-    /ho_container="\$[A-Z_]+"/ {
-      line = $0
-      sub(/^[[:space:]]+/, "", line)
-      split(line, arm, ")")
-      match(line, /\$[A-Z_]+/)
-      var = substr(line, RSTART + 1, RLENGTH - 1)
-      n = split(arm[1], flavors, "|")
-      for (i = 1; i <= n; i++) print flavors[i], var
-    }
-  ' "$DBX_REPO_ROOT/dbx"
-}
-
 @test "drift: wizard flavor map resolves to the containers bash would use" {
-  local defaults bash_map py_map line flavor var want got failures=0
-  defaults=$(core_container_defaults)
-  bash_map=$(bash_flavor_map)
-  [ -n "$bash_map" ] || {
-    echo "could not read a flavor -> container case arm out of dbx."
-    echo "The --hooks-only path was probably restructured; re-point bash_flavor_map()."
-    return 1
-  }
+  local py_map bash_map line flavor want got failures=0
 
   py_map=$(wizard_py <<'PY'
 for flavor, container in sorted(ws._FLAVOR_TO_CONTAINER.items()):
     print(flavor, container)
 PY
 )
+  [ -n "$py_map" ] || {
+    echo "wizard-server.py exposed no _FLAVOR_TO_CONTAINER entries to compare."
+    return 1
+  }
+
+  # Ask bash for a container for exactly the flavors the wizard claims to know.
+  bash_map=$(printf '%s\n' "$py_map" | awk '{print $1}' | bash_flavor_containers)
 
   local -a entries=()
   while IFS= read -r line; do
@@ -379,15 +375,14 @@ PY
   for line in "${entries[@]}"; do
     flavor="${line%% *}"
     got="${line#* }"
-    var=$(printf '%s\n' "$bash_map" | awk -v f="$flavor" '$1 == f { print $2; exit }')
-    if [ -z "$var" ]; then
-      echo "DRIFT: the wizard maps flavor '$flavor' but no case arm in dbx handles it"
+    want=$(printf '%s\n' "$bash_map" | awk -v f="$flavor" '$1 == f { print $2; exit }')
+    if [ "$want" = "UNMAPPED" ]; then
+      echo "DRIFT: the wizard maps flavor '$flavor' but engine_container rejects it"
       failures=$((failures + 1))
       continue
     fi
-    want=$(printf '%s\n' "$defaults" | awk -v v="$var" '$1 == v { print $2; exit }')
     if [ "$got" != "$want" ]; then
-      echo "DRIFT: flavor '$flavor' — wizard says '$got', bash uses \$$var ('$want')"
+      echo "DRIFT: flavor '$flavor' — wizard says '$got', engine_container says '$want'"
       failures=$((failures + 1))
     fi
   done
