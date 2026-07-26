@@ -33,8 +33,8 @@ analyze_subshell() {
     has_ssh_tunnel() { return 1; }
     create_ssh_tunnel() { :; }
     get_password() { printf ""; }
-    analyze_postgres() { :; }
-    analyze_mysql()    { :; }
+    pg_analyze()    { :; }
+    mysql_analyze() { :; }
     _scrub_query_live_schema_tsv() { printf "%s" "$SCHEMA_TSV"; }
     cmd_analyze "$@"
   ' bash "$@"

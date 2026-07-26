@@ -1756,17 +1756,7 @@ cmd_analyze() {
     _analyze_write_scrub_suggestion "$host" "$database" "$manifest_output"
   fi
 
-  case "$db_type" in
-    mysql|mariadb)
-      analyze_mysql "$host" "$database"
-      ;;
-    postgres|postgresql)
-      analyze_postgres "$host" "$database"
-      ;;
-    *)
-      die "Unknown database type: $db_type"
-      ;;
-  esac
+  engine_call "$db_type" analyze "$host" "$database"
 }
 
 # Print the PII pre-scan summary block. Empty TSV → "No PII candidates".

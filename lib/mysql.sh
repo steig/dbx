@@ -730,7 +730,15 @@ mysql_run_sql_stream() {
 # MySQL Analysis (Interactive table exclusion picker)
 # ============================================================================
 
-analyze_mysql() {
+# Fetch table stats and hand them to the shared exclusion picker.
+# Everything after the query is engine-agnostic and lives in
+# analyze_interactive_exclusions (lib/core.sh); this function's whole job is
+# to produce "table<TAB>rows<TAB>size_bytes", largest first.
+#
+# The query now reports DATA_LENGTH + INDEX_LENGTH in bytes rather than the
+# pre-rounded MB it used to, so both engines speak the same unit and the
+# rounding happens once, in the shared presentation code.
+mysql_analyze() {
   local host="$1"
   local database="$2"
 
@@ -744,9 +752,8 @@ analyze_mysql() {
 
   log_step "Analyzing tables in $database@$host..."
 
-  # Create secure credential file. Per-invocation unique container path
-  # avoids races with other backups/restores/analyze runs against the
-  # same mysql-dbx container.
+  # Per-invocation credential file. The unique container path avoids racing
+  # other backups/restores/analyze runs against the same mysql-dbx container.
   local tmpdir
   tmpdir=$(mktemp -d)
   chmod 700 "$tmpdir"
@@ -757,156 +764,28 @@ analyze_mysql() {
   local cred_file
   cred_file=$(create_mysql_credential_file "$db_user" "$db_pass" "$db_host" "$db_port")
   mv "$cred_file" "$tmpdir/my.cnf"
-  cred_file="$tmpdir/my.cnf"
-  docker cp "$cred_file" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
+  docker cp "$tmpdir/my.cnf" "$MYSQL_CONTAINER:$container_cnf" 2>/dev/null
   docker exec "$MYSQL_CONTAINER" chmod 600 "$container_cnf" 2>/dev/null
 
-  # Get current exclusions
-  local current_exclusions
-  current_exclusions=$(jq -r ".hosts[\"$host\"].databases[\"$database\"].exclude_data // [] | .[]" "$CONFIG_FILE" 2>/dev/null | tr '\n' '|')
-
-  # Query table stats
   local stats_query="
-    SELECT
-      TABLE_NAME as tbl,
-      TABLE_ROWS as rows,
-      ROUND(DATA_LENGTH / 1024 / 1024, 2) as data_mb,
-      ROUND(INDEX_LENGTH / 1024 / 1024, 2) as idx_mb,
-      ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) as total_mb,
-      TABLE_TYPE as type
+    SELECT TABLE_NAME,
+           COALESCE(TABLE_ROWS, 0),
+           COALESCE(DATA_LENGTH + INDEX_LENGTH, 0)
     FROM information_schema.TABLES
     WHERE TABLE_SCHEMA = '$database'
     ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC;
   "
 
-  local tmpfile="$tmpdir/stats.txt"
-
+  local tmpfile="$tmpdir/stats.tsv"
   docker exec "$MYSQL_CONTAINER" \
-    mysql --defaults-extra-file=$container_cnf \
-    -N -e "$stats_query" 2>/dev/null > "$tmpfile"
+    mysql --defaults-extra-file="$container_cnf" \
+    -N -B -e "$stats_query" 2>/dev/null > "$tmpfile"
 
   if [[ ! -s "$tmpfile" ]]; then
-    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
     die "Failed to get table stats. Check connection and permissions."
   fi
 
-  # Calculate totals
-  local total_rows total_size table_count
-  total_rows=$(awk '{sum += $2} END {print sum}' "$tmpfile")
-  total_size=$(awk '{sum += $5} END {printf "%.2f", sum}' "$tmpfile")
-  table_count=$(wc -l < "$tmpfile" | tr -d ' ')
-
-  echo ""
-  echo -e "${BOLD}Database: $database${NC}"
-  echo -e "Tables: $table_count | Total Size: ${total_size}MB | Total Rows: $total_rows"
-  echo ""
-
-  # Check if fzf is available for interactive mode
-  if ! command -v fzf &>/dev/null; then
-    echo -e "${BOLD}Table Stats (largest first):${NC}"
-    echo ""
-    printf "%-40s %12s %10s %10s %s\n" "TABLE" "ROWS" "DATA_MB" "TOTAL_MB" "EXCLUDED"
-    printf "%-40s %12s %10s %10s %s\n" "-----" "----" "-------" "--------" "--------"
-
-    while IFS=$'\t' read -r tbl rows data_mb idx_mb total_mb ttype; do
-      local excluded=""
-      if echo "$current_exclusions" | grep -q "^${tbl}|" || echo "$current_exclusions" | grep -q "|${tbl}|" || echo "$current_exclusions" | grep -q "|${tbl}$" || [[ "$current_exclusions" == "${tbl}|" ]]; then
-        excluded="[EXCLUDED]"
-      fi
-      printf "%-40s %12s %10s %10s %s\n" "$tbl" "$rows" "$data_mb" "$total_mb" "$excluded"
-    done < "$tmpfile"
-
-    echo ""
-    log_info "Install fzf for interactive table selection"
-    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
-    return
-  fi
-
-  # Interactive mode with fzf
-  echo -e "${YELLOW}Select tables to EXCLUDE from data backup (schema always included)${NC}"
-  echo -e "Use TAB to select multiple, ENTER to confirm"
-  echo ""
-
-  # Format for fzf with pre-selection of currently excluded tables
-  local formatted="$tmpdir/formatted.txt"
-
-  while IFS=$'\t' read -r tbl rows data_mb idx_mb total_mb ttype; do
-    local marker=""
-    # Check if already excluded
-    if echo "|$current_exclusions" | grep -q "|${tbl}|" || [[ "$current_exclusions" == "${tbl}|" ]] || echo "$current_exclusions" | grep -q "^${tbl}|"; then
-      marker="*"  # Pre-select marker
-    fi
-    printf "%s%-45s %12s rows %10sMB\n" "$marker" "$tbl" "$rows" "$total_mb"
-  done < "$tmpfile" > "$formatted"
-
-  # Run fzf for selection
-  local selected
-  selected=$(cat "$formatted" | fzf --multi \
-    --header="TAB=select  ENTER=confirm  ESC=cancel" \
-    --prompt="Exclude tables> " \
-    --height=80% \
-    --layout=reverse \
-    --preview="echo 'Selected tables will have schema backed up but DATA excluded.
-This reduces backup size for large/regenerable tables.
-
-Common exclusions:
-  - Session tables (regenerated)
-  - Log tables (historical, large)
-  - Cache tables (regenerated)
-  - Search index tables (rebuilt)
-  - Report/analytics tables (can rebuild)'" \
-    --preview-window=right:40%:wrap \
-    --bind='ctrl-a:select-all' \
-    --bind='ctrl-d:deselect-all' \
-    | awk '{print $1}' | sed 's/^\*//' | grep -v '^$')
-
-  if [[ -z "$selected" ]]; then
-    log_info "No changes made"
-    docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
-    return
-  fi
-
-  # Convert to JSON array
-  local exclude_json
-  exclude_json=$(echo "$selected" | jq -R -s 'split("\n") | map(select(. != ""))')
-
-  # Calculate excluded size (using secure credential file already in container)
-  local excluded_size=0
-  while IFS= read -r tbl; do
-    [[ -z "$tbl" ]] && continue
-    local tbl_size
-    tbl_size=$(docker exec "$MYSQL_CONTAINER" \
-      mysql --defaults-extra-file=$container_cnf -N \
-      -e "SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$database' AND TABLE_NAME='$tbl'" 2>/dev/null)
-    excluded_size=$(awk "BEGIN {print $excluded_size + ${tbl_size:-0}}")
-  done <<< "$selected"
-
-  # Clean up credential file in container
-  docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
-
-  echo ""
-  echo -e "${BOLD}Selected for exclusion:${NC}"
-  echo "$selected" | while read -r t; do [[ -n "$t" ]] && echo "  - $t"; done
-  echo ""
-  echo -e "Estimated backup reduction: ${CYAN}${excluded_size}MB${NC}"
-  echo ""
-
-  # Confirm and save
-  echo -n "Save this exclusion profile? [y/N] "
-  read -r confirm
-  if [[ "$confirm" =~ ^[Yy] ]]; then
-    # Update config
-    local tmp_config
-    tmp_config=$(mktemp)
-
-    jq ".hosts[\"$host\"].databases[\"$database\"].exclude_data = $exclude_json" "$CONFIG_FILE" > "$tmp_config"
-    mv "$tmp_config" "$CONFIG_FILE"
-
-    log_success "Exclusion profile saved to config"
-    log_info "Run 'dbx backup $host $database' to backup with these exclusions"
-  else
-    log_info "Changes discarded"
-  fi
+  analyze_interactive_exclusions "$host" "$database" "$tmpfile"
 }
 
 # ============================================================================
