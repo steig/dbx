@@ -57,6 +57,8 @@ git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
 ```
 
+Or with Nix — `nix run github:steig/dbx -- version`, `nix profile install github:steig/dbx`, plus a contributor devShell. See [Nix](docs/nix.md).
+
 Once installed, `dbx update` upgrades in place when a new release is out. To remove dbx, see [Uninstall](docs/install.md#uninstall).
 
 The installer checks everything it downloads against the release's `SHASUMS256.txt` before installing any of it — see [Integrity verification](docs/install.md#integrity-verification) for what that does and does not protect against.
