@@ -13,6 +13,8 @@ git clone https://github.com/steig/dbx.git
 export PATH="$PWD/dbx:$PATH"
 ```
 
+Or with [Nix](nix.md): `nix profile install github:steig/dbx`.
+
 Once installed, `dbx update` upgrades in place when a new release is out.
 
 ## Integrity verification
