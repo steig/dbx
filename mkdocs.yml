@@ -131,6 +131,7 @@ nav:
   - Home: index.md
   - Getting started:
       - Install: install.md
+      - Homebrew: homebrew.md
       - Quick start: quick-start.md
       - Configuration: configuration.md
       - Cloud-hosted Postgres: cloud-postgres.md

@@ -61,6 +61,11 @@ ubuntu + macOS matrix and checks:
 7. **Integration tests** (docker) — ubuntu only
 8. **Container image** — builds `docker/Dockerfile` and smoke-tests it
 
+A second workflow, `.github/workflows/formula.yml`, runs only when
+`Formula/dbx.rb` changes (plus a weekly canary): it verifies the pinned tarball
+digest and runs `brew install` + `brew test` on macOS. It is path-filtered, so
+it must not be made a required check.
+
 ## Commit and PR conventions
 
 - **Conventional Commits.** Commit messages and PR titles follow
@@ -128,6 +133,27 @@ git tag vX.Y.Z
 git push && git push --tags   # the tag fires release-image.yml → GHCR image
 gh release create vX.Y.Z --title "vX.Y.Z" --notes "<the new CHANGELOG section>"
 ```
+
+### Then repoint the Homebrew formula
+
+`Formula/dbx.rb` pins the sha256 of its own tag's source tarball — and that
+tarball contains the formula, so the release commit *cannot* bump it. It is
+updated in a second commit, after the tag is pushed:
+
+```bash
+scripts/update-formula.sh     # downloads the tarball, writes the real digest
+git commit -am "chore(homebrew): dbx X.Y.Z"
+git push
+```
+
+Never hand-edit the digest. Homebrew reads formulae from `main`, not from a tag,
+so until that commit lands `brew install` serves the previous release — a
+few minutes of lag, and a much better failure mode than a digest that doesn't
+resolve. `scripts/check-release-consistency.sh` checks offline that the pinned
+tag was actually released and the digest isn't a placeholder;
+`.github/workflows/formula.yml` runs `scripts/update-formula.sh --check`
+against the live tarball plus `brew install` and `brew test` on macOS. Details
+in [docs/homebrew.md](docs/homebrew.md#for-maintainers).
 
 Deliberately *not* bumped: `install.sh`'s `MAN_PAGES` and lib lists (curated
 order — the guard checks them as sets on every PR but never regenerates them),

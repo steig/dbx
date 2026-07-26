@@ -48,6 +48,8 @@ A reasonable production setup uses both: managed PITR for the "we lost the box a
 curl -fsSL https://raw.githubusercontent.com/steig/dbx/main/install.sh | bash
 ```
 
+Or via [Homebrew](docs/homebrew.md) — `brew tap steig/dbx https://github.com/steig/dbx && brew install dbx`.
+
 Or clone:
 
 ```bash
