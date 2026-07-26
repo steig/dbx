@@ -231,10 +231,20 @@ mc_configure() {
     https://*) scheme="https://"; host="${endpoint#https://}" ;;
     *) die "S3 storage${_STORAGE_NAME:+ '$_STORAGE_NAME'} endpoint must start with http:// or https:// — got: $endpoint" ;;
   esac
-  export "MC_HOST_$(mc_alias_name)=${scheme}${access_key}:${secret_key}@${host}"
-
-  # Held for redact_secret, which scrubs mc's stderr where dbx re-logs it.
+  # Held (not exported) for mc_run and for redact_secret, which scrubs mc's
+  # stderr where dbx re-logs it.
+  _MC_HOST_URL="${scheme}${access_key}:${secret_key}@${host}"
   _MC_SECRET="$secret_key"
+}
+
+# Run mc with the credential in its environment and nowhere else. The export
+# happens inside a subshell, so the secret is gone the moment the command
+# returns rather than being inherited by every later child of this shell —
+# post_restore hooks and password_cmd invocations included. Same scoping the
+# PGPASSWORD sites use (#127, #217).
+mc_run() {
+  ( export "MC_HOST_$(mc_alias_name)=${_MC_HOST_URL:?mc_configure has not run}"
+    mc "$@" )
 }
 
 mc_upload() {
@@ -251,7 +261,7 @@ mc_upload() {
   local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Uploading to: $full_path"
-  if mc cp "$local_file" "$full_path" >/dev/null; then
+  if mc_run cp "$local_file" "$full_path" >/dev/null; then
     log_success "Upload complete"
     return 0
   else
@@ -274,7 +284,7 @@ mc_download() {
   local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Downloading from: $full_path"
-  if mc cp "$full_path" "$local_file" >/dev/null; then
+  if mc_run cp "$full_path" "$local_file" >/dev/null; then
     log_success "Download complete"
     return 0
   else
@@ -297,7 +307,7 @@ mc_list() {
 
   # mc's stderr is left alone: an empty listing and an unreachable bucket look
   # the same on stdout, and the caller decides whether to show the difference.
-  mc ls "$full_path"
+  mc_run ls "$full_path"
 }
 
 mc_delete() {
@@ -314,7 +324,7 @@ mc_delete() {
 
   log_info "Deleting: $full_path"
   local rm_err
-  if rm_err=$(mc rm "$full_path" 2>&1 >/dev/null); then
+  if rm_err=$(mc_run rm "$full_path" 2>&1 >/dev/null); then
     log_success "Deleted"
     return 0
   else
@@ -798,9 +808,9 @@ storage_sync_download() {
         local local_file="$DATA_DIR/$relative"
         mkdir -p "$(dirname "$local_file")"
         log_info "Downloading: $relative"
-        mc cp "$remote_file" "$local_file" >/dev/null
+        mc_run cp "$remote_file" "$local_file" >/dev/null
         ((count++)) || true
-      done < <(mc find "$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")" --name "*.sql.zst*" 2>/dev/null)
+      done < <(mc_run find "$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")" --name "*.sql.zst*" 2>/dev/null)
       ;;
     aws)
       aws_configure_env
