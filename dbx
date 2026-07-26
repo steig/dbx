@@ -209,18 +209,8 @@ cmd_backup() {
   local backup_file="$backup_dir/${database}_${ts}.sql.zst"
 
   local backup_rc=0
-  case "$db_type" in
-    postgres|postgresql)
-      pg_backup "$host" "$database" "$backup_file" "$verbose" "$backup_mode" "$globals" || backup_rc=$?
-      ;;
-    mysql|mariadb)
-      [[ -n "$globals" ]] && log_warn "--globals/--no-globals is postgres-only; ignored for $db_type"
-      mysql_backup "$host" "$database" "$backup_file" "$verbose" "$backup_mode" || backup_rc=$?
-      ;;
-    *)
-      die "Unknown database type: $db_type"
-      ;;
-  esac
+  engine_call "$db_type" backup \
+    "$host" "$database" "$backup_file" "$verbose" "$backup_mode" "$globals" || backup_rc=$?
 
   if [[ $backup_rc -ne 0 ]]; then
     notify_backup_failure "$host" "$database" "Backup process exited with code $backup_rc"
@@ -583,11 +573,8 @@ _restore_hooks_only() {
 
   # --hooks-only is a validation flow — never auto-provision a container.
   local ho_container exists
-  case "$ho_dbtype" in
-    postgres|postgresql) ho_container="$POSTGRES_CONTAINER" ;;
-    mysql|mariadb)       ho_container="$MYSQL_CONTAINER" ;;
-    *) die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype" ;;
-  esac
+  ho_container=$(engine_container "$ho_dbtype") \
+    || die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype"
   if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
     die "--hooks-only: container '$ho_container' does not exist. Run a real restore first to create it."
   fi
@@ -918,18 +905,7 @@ _restore_dispatch() {
         ;;
     esac
   else
-    case "$db_type" in
-      postgres|postgresql)
-        pg_restore_backup "$backup_file" "$target_name" "$with_globals"
-        ;;
-      mysql|mariadb)
-        [[ "$with_globals" == "true" ]] && log_warn "--with-globals is postgres-only; ignored for $db_type"
-        mysql_restore_backup "$backup_file" "$target_name"
-        ;;
-      *)
-        die "Unknown database type: $db_type"
-        ;;
-    esac
+    engine_call "$db_type" restore_backup "$backup_file" "$target_name" "$with_globals"
   fi
 }
 
@@ -2482,11 +2458,10 @@ _scrub_query_live_schema_tsv() {
   fi
   local dbtype
   dbtype=$(get_db_type "$host")
-  case "$dbtype" in
-    postgres|postgresql) scrub_schema_query_pg "$host" "$db" ;;
-    mysql|mariadb)       scrub_schema_query_mysql "$host" "$db" ;;
-    *) die "scrub: unknown database type for host '$host': $dbtype" ;;
-  esac
+  local engine
+  engine=$(engine_for "$dbtype") \
+    || die "scrub: unknown database type for host '$host': $dbtype"
+  "scrub_schema_query_${engine}" "$host" "$db"
 }
 
 _cmd_scrub_init() {
@@ -2808,18 +2783,12 @@ cmd_test() {
   fi
 
   # Test 2: Docker container
-  case "$db_type" in
-    postgres|postgresql)
-      log_info "Checking PostgreSQL container..."
-      require_container "$POSTGRES_CONTAINER"
-      log_success "Container ready: $POSTGRES_CONTAINER"
-      ;;
-    mysql|mariadb)
-      log_info "Checking MySQL container..."
-      require_container "$MYSQL_CONTAINER"
-      log_success "Container ready: $MYSQL_CONTAINER"
-      ;;
-  esac
+  local test_container
+  if test_container=$(engine_container "$db_type"); then
+    log_info "Checking container for $db_type..."
+    require_container "$test_container"
+    log_success "Container ready: $test_container"
+  fi
 
   # Test 3: Credentials
   local db_pass

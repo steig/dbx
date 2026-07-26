@@ -1223,13 +1223,10 @@ scrub_local_schema_tsv() {
   local db="$1"
   local engine
   engine=$(scrub_local_db_engine "$db")
-  case "$engine" in
-    postgres) scrub_schema_query_pg_local "$db" ;;
-    mysql)    scrub_schema_query_mysql_local "$db" ;;
-    *)
-      die "scrub: database '$db' not found in ${POSTGRES_CONTAINER:-postgres-dbx} or ${MYSQL_CONTAINER:-mysql-dbx} (restore it first, or pass a configured <host>)"
-      ;;
-  esac
+  local key
+  key=$(engine_for "$engine") \
+    || die "scrub: database '$db' not found in ${POSTGRES_CONTAINER:-postgres-dbx} or ${MYSQL_CONTAINER:-mysql-dbx} (restore it first, or pass a configured <host>)"
+  "scrub_schema_query_${key}_local" "$db"
 }
 
 # ============================================================================
@@ -1442,15 +1439,13 @@ scrub_run_gate() {
 
   # 1. Drift check against the just-restored target's actual schema.
   local tsv schema manifest report
-  case "$engine" in
-    postgres|postgresql) tsv=$(scrub_schema_query_pg_local "$target") ;;
-    mysql|mariadb)       tsv=$(scrub_schema_query_mysql_local "$target") ;;
-    *)
-      log_error "scrub gate: unknown engine '$engine' — dropping target as fail-safe"
-      scrub_drop_local_db "$target" "$engine"
-      return 1
-      ;;
-  esac
+  local gate_key
+  if ! gate_key=$(engine_for "$engine"); then
+    log_error "scrub gate: unknown engine '$engine' — dropping target as fail-safe"
+    scrub_drop_local_db "$target" "$engine"
+    return 1
+  fi
+  tsv=$("scrub_schema_query_${gate_key}_local" "$target")
   schema=$(printf '%s\n' "$tsv" | scrub_schema_tsv_to_json)
   manifest=$(scrub_read_manifest "$host")
   report=$(scrub_check_diff "$schema" "$manifest")

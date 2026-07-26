@@ -202,9 +202,10 @@ _process_post_restore_entry() {
 _run_hook_stream() {
   local db_type="$1" target_db="$2"
   shift 2
-  case "$db_type" in
-    postgres|postgresql) pg_run_sql_stream "$target_db" "$@" ;;
-    mysql|mariadb)       mysql_run_sql_stream "$target_db" "$@" ;;
-    *) log_error "post_restore: unknown db_type: $db_type"; return 1 ;;
-  esac
+  local engine
+  engine=$(engine_for "$db_type") || {
+    log_error "post_restore: unknown db_type: $db_type"
+    return 1
+  }
+  "${engine}_run_sql_stream" "$target_db" "$@"
 }
