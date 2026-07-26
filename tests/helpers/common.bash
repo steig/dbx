@@ -31,6 +31,8 @@ source_dbx_libs() {
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/core.sh"
   # shellcheck source=/dev/null
+  source "$DBX_REPO_ROOT/lib/host.sh"
+  # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/tunnel.sh"
   # shellcheck source=/dev/null
   source "$DBX_REPO_ROOT/lib/encrypt.sh"
