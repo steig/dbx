@@ -1,4 +1,4 @@
-.TH DBX 1 "2026-07-25" "dbx 0.39.1" "User Commands"
+.TH DBX 1 "2026-07-26" "dbx 0.40.0" "User Commands"
 .SH NAME
 dbx \- database backup and restore utility
 .SH SYNOPSIS
@@ -109,8 +109,11 @@ Print shell completion script (bash | zsh | fish). See
 .BR dbx-completion (1).
 .SS Self-maintenance
 .TP
-.B update
-Check for and install a newer release from GitHub.
+.B update [--force]
+Install a newer release from GitHub. Does nothing when the installed version is
+already the latest; pass
+.B --force
+to re-install anyway.
 .TP
 .B version
 Print the installed version.

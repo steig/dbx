@@ -25,7 +25,7 @@
 | `dbx storage upload\|download\|list\|sync\|info\|delete` | Cloud [storage](storage.md). |
 | `dbx wizard` | Browser-based config + operations wizard. See [wizards](wizards.md). |
 | `dbx completion <bash\|zsh\|fish>` | Print a shell completion script. |
-| `dbx update` | Re-run `install.sh` to upgrade to the latest release. |
+| `dbx update` | Upgrade to the latest release. No-op when already current; `--force` re-installs anyway. |
 | `dbx version` | Print version. |
 | `dbx help` | One-screen reference (links here for full docs). |
 

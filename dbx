@@ -4,7 +4,7 @@
 # Uses Docker containers for pg_dump/mysqldump (no local install needed)
 # Supports SSH tunnels for remote databases (AWS RDS, EC2, etc.)
 #
-VERSION="0.39.1"
+VERSION="0.40.0"
 #
 # Usage:
 #   dbx backup [-v] [--upload] <host> [database]
@@ -2881,6 +2881,18 @@ cmd_test() {
 
 
 cmd_update() {
+  local force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      -h|--help)
+        echo "Usage: dbx update [--force]"
+        echo "  --force  Re-install even when already on the latest release"
+        return 0 ;;
+      *) die "Unknown update argument: $1" ;;
+    esac
+  done
+
   log_step "Updating dbx..."
   # Install from the latest release TAG, not main. raw.githubusercontent.com
   # serves main through a CDN that can lag a freshly-pushed release by several
@@ -2895,6 +2907,12 @@ cmd_update() {
   [[ -z "$ver" ]] && ver=$(fetch_latest_release 2>/dev/null || true)
   [[ -z "$ver" ]] && ver=$(fetch_latest_tag_git 2>/dev/null || true)
   if [[ -n "$ver" ]]; then
+    # Nothing to do when the running build is already at or ahead of the latest
+    # release — re-running install.sh would just re-download the same bytes.
+    if [[ $force -eq 0 ]] && ! version_gt "$ver" "$VERSION"; then
+      log_success "dbx $VERSION is already the latest release"
+      return 0
+    fi
     ref="v$ver"
     log_info "Installing $ref from ${DBX_REPO_SLUG}"
     curl -fsSL "https://raw.githubusercontent.com/${DBX_REPO_SLUG}/${ref}/install.sh" | DBX_REF="$ref" bash
@@ -3168,7 +3186,7 @@ main() {
       echo "dbx $VERSION"
       ;;
     update|self-update|upgrade)
-      cmd_update
+      cmd_update "$@"
       ;;
     completion)
       local shell="${1:-bash}"
