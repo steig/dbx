@@ -407,9 +407,19 @@ stub_sha() {
 @test "formula: the guard stays green when the formula lags a fresh release" {
   # The state every release commit is in: VERSION bumped, formula still on the
   # previous tag because the new one has not been pushed yet.
+  #
+  # Compare the formula against its OWN value from before the bump, not against
+  # $CURRENT. $CURRENT is read from the working tree's VERSION in setup(), so
+  # asserting formula == $CURRENT quietly requires the formula to be level with
+  # VERSION — true at rest, false on a release commit, which is precisely the
+  # state this test exists to cover. It made the test fail on the one commit
+  # where it mattered.
+  local formula_before
+  formula_before=$(formula_version)
+
   release "$NEXT"
   [ "$status" -eq 0 ]
-  [ "$(formula_version)" = "$CURRENT" ]
+  [ "$(formula_version)" = "$formula_before" ]
   [ "$(dbx_version)" = "$NEXT" ]
 
   run bash "$REPO/scripts/check-release-consistency.sh"
