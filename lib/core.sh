@@ -801,6 +801,130 @@ engine_call() {
 }
 
 # ============================================================================
+# Analyze — shared exclusion picker
+# ============================================================================
+
+# The whole of `dbx analyze` after the numbers are in hand: totals, the table
+# listing, the optional fzf exclusion picker, and writing the chosen
+# exclude_data profile back to config.
+#
+# The two engines differ only in how they obtain the numbers, so they hand
+# this a canonical TSV and it owns everything downstream. Sizes are bytes —
+# the engine converts, so the presentation is decided in exactly one place.
+#
+# Args: $1 host, $2 database,
+#       $3 path to a TSV of "table<TAB>rows<TAB>size_bytes", largest first
+analyze_interactive_exclusions() {
+  local host="$1" database="$2" tmpfile="$3"
+
+  local current_exclusions
+  current_exclusions=$(jq -r ".hosts[\"$host\"].databases[\"$database\"].exclude_data // [] | .[]" "$CONFIG_FILE" 2>/dev/null | tr '\n' '|')
+
+  local total_rows total_size table_count
+  total_rows=$(awk -F'\t' '{sum += $2} END {print sum+0}' "$tmpfile")
+  total_size=$(awk -F'\t' '{sum += $3} END {printf "%.2f", sum/1024/1024}' "$tmpfile")
+  table_count=$(grep -c '' "$tmpfile" | tr -d ' ')
+
+  echo ""
+  echo -e "${BOLD}Database: $database${NC}"
+  echo -e "Tables: $table_count | Total Size: ${total_size}MB | Total Rows: $total_rows"
+  echo ""
+
+  # Non-interactive fallback. One awk pass rather than a subshell per row —
+  # the old per-table `awk BEGIN` for the MB conversion cost a fork per table.
+  if ! command -v fzf &>/dev/null; then
+    echo -e "${BOLD}Table Stats (largest first):${NC}"
+    echo ""
+    awk -F'\t' -v excl="|$current_exclusions" '
+      BEGIN {
+        printf "%-50s %12s %12s %s\n", "TABLE", "ROWS", "SIZE_MB", "EXCLUDED"
+        printf "%-50s %12s %12s %s\n", "-----", "----", "-------", "--------"
+      }
+      $1 != "" {
+        printf "%-50s %12s %12.2f %s\n", $1, $2, $3/1024/1024,
+          (index(excl, "|" $1 "|") > 0 ? "[EXCLUDED]" : "")
+      }' "$tmpfile"
+    echo ""
+    log_info "Install fzf for interactive table selection"
+    return
+  fi
+
+  echo -e "${YELLOW}Select tables to EXCLUDE from data backup (schema always included)${NC}"
+  echo -e "Use TAB to select multiple, ENTER to confirm"
+  echo ""
+
+  # Already-excluded tables are marked with a leading `*` so the operator can
+  # see the current profile; the marker is stripped back off after fzf.
+  local formatted
+  formatted=$(mktemp)
+  awk -F'\t' -v excl="|$current_exclusions" '
+    $1 != "" {
+      printf "%s%-55s %12s rows %10.2fMB\n",
+        (index(excl, "|" $1 "|") > 0 ? "*" : ""), $1, $2, $3/1024/1024
+    }' "$tmpfile" > "$formatted"
+
+  local selected
+  selected=$(fzf --multi \
+    --header="TAB=select  ENTER=confirm  ESC=cancel  Ctrl-A=all  Ctrl-D=none" \
+    --prompt="Exclude tables> " \
+    --height=80% \
+    --layout=reverse \
+    --preview="echo 'Selected tables will have schema backed up but DATA excluded.
+This reduces backup size for large/regenerable tables.
+
+Common exclusions:
+  - Session tables (regenerated)
+  - Log tables (historical, large)
+  - Cache tables (regenerated)
+  - Search index tables (rebuilt)
+  - Report/analytics tables (can rebuild)
+  - django_celery_* (task history)
+  - Audit/history tables'" \
+    --preview-window=right:40%:wrap \
+    --bind='ctrl-a:select-all' \
+    --bind='ctrl-d:deselect-all' \
+    < "$formatted" \
+    | awk '{print $1}' | sed 's/^\*//' | grep -v '^$') || true
+
+  rm -f "$formatted"
+
+  if [[ -z "$selected" ]]; then
+    log_info "No changes made"
+    return
+  fi
+
+  local exclude_json
+  exclude_json=$(echo "$selected" | jq -R -s 'split("\n") | map(select(. != ""))')
+
+  # Summed straight out of the TSV. Both engines used to re-query the server
+  # once per selected table for a number they had already fetched.
+  local excluded_size
+  excluded_size=$(awk -F'\t' -v sel="|$(echo "$selected" | tr '\n' '|')" '
+    index(sel, "|" $1 "|") > 0 { sum += $3 }
+    END { printf "%.2f", sum/1024/1024 }' "$tmpfile")
+
+  echo ""
+  echo -e "${BOLD}Selected for exclusion:${NC}"
+  echo "$selected" | while read -r t; do [[ -n "$t" ]] && echo "  - $t"; done
+  echo ""
+  echo -e "Estimated backup reduction: ${CYAN}${excluded_size}MB${NC}"
+  echo ""
+
+  echo -n "Save this exclusion profile? [y/N] "
+  read -r confirm
+  if [[ "$confirm" =~ ^[Yy] ]]; then
+    local tmp_config
+    tmp_config=$(mktemp)
+    jq ".hosts[\"$host\"].databases[\"$database\"].exclude_data = $exclude_json" "$CONFIG_FILE" > "$tmp_config"
+    mv "$tmp_config" "$CONFIG_FILE"
+    log_success "Exclusion profile saved to config"
+    log_info "Run 'dbx backup $host $database' to backup with these exclusions"
+  else
+    log_info "Changes discarded"
+  fi
+}
+
+# ============================================================================
 # Audit Logging
 # ============================================================================
 

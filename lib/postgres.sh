@@ -920,7 +920,11 @@ pg_detect_extensions() {
     2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
 
-analyze_postgres() {
+# Fetch table stats and hand them to the shared exclusion picker.
+# Everything after the query is engine-agnostic and lives in
+# analyze_interactive_exclusions (lib/core.sh); this function's whole job is
+# to produce "table<TAB>rows<TAB>size_bytes", largest first.
+pg_analyze() {
   local host="$1"
   local database="$2"
 
@@ -934,11 +938,6 @@ analyze_postgres() {
 
   log_step "Analyzing tables in $database@$host..."
 
-  # Get current exclusions
-  local current_exclusions
-  current_exclusions=$(jq -r ".hosts[\"$host\"].databases[\"$database\"].exclude_data // [] | .[]" "$CONFIG_FILE" 2>/dev/null | tr '\n' '|')
-
-  # Query table stats (tab-separated for parsing)
   local stats_query="
     SELECT
       schemaname || '.' || relname,
@@ -950,137 +949,15 @@ analyze_postgres() {
 
   local tmpfile
   tmpfile=$(mktemp)
+  trap "rm -f '$tmpfile'" RETURN
 
   PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
     psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
     -t -A -F $'\t' -c "$stats_query" 2>/dev/null > "$tmpfile"
 
   if [[ ! -s "$tmpfile" ]]; then
-    rm -f "$tmpfile"
     die "Failed to get table stats. Check connection and permissions."
   fi
 
-  # Calculate totals
-  local total_rows total_size table_count
-  total_rows=$(awk -F'\t' '{sum += $2} END {print sum+0}' "$tmpfile")
-  total_size=$(awk -F'\t' '{sum += $3} END {printf "%.2f", sum/1024/1024}' "$tmpfile")
-  table_count=$(wc -l < "$tmpfile" | tr -d ' ')
-
-  echo ""
-  echo -e "${BOLD}Database: $database${NC}"
-  echo -e "Tables: $table_count | Total Size: ${total_size}MB | Total Rows: $total_rows"
-  echo ""
-
-  # Check if fzf is available for interactive mode
-  if ! command -v fzf &>/dev/null; then
-    echo -e "${BOLD}Table Stats (largest first):${NC}"
-    echo ""
-    printf "%-50s %12s %12s %s\n" "TABLE" "ROWS" "SIZE_MB" "EXCLUDED"
-    printf "%-50s %12s %12s %s\n" "-----" "----" "-------" "--------"
-
-    while IFS=$'\t' read -r tbl rows size_bytes; do
-      [[ -z "$tbl" ]] && continue
-      local size_mb
-      size_mb=$(awk "BEGIN {printf \"%.2f\", $size_bytes/1024/1024}")
-      local excluded=""
-      if echo "|${current_exclusions}" | grep -q "|${tbl}|" || [[ "$current_exclusions" == "${tbl}|" ]]; then
-        excluded="[EXCLUDED]"
-      fi
-      printf "%-50s %12s %12s %s\n" "$tbl" "$rows" "$size_mb" "$excluded"
-    done < "$tmpfile"
-
-    echo ""
-    log_info "Install fzf for interactive table selection"
-    rm -f "$tmpfile"
-    return
-  fi
-
-  # Interactive mode with fzf
-  echo -e "${YELLOW}Select tables to EXCLUDE from data backup (schema always included)${NC}"
-  echo -e "Use TAB to select multiple, ENTER to confirm"
-  echo ""
-
-  # Format for fzf with pre-selection of currently excluded tables
-  local formatted
-  formatted=$(mktemp)
-
-  while IFS=$'\t' read -r tbl rows size_bytes; do
-    [[ -z "$tbl" ]] && continue
-    local size_mb
-    size_mb=$(awk "BEGIN {printf \"%.2f\", $size_bytes/1024/1024}")
-    local marker=""
-    # Check if already excluded
-    if echo "|${current_exclusions}" | grep -q "|${tbl}|" || [[ "$current_exclusions" == "${tbl}|" ]]; then
-      marker="*"
-    fi
-    printf "%s%-55s %12s rows %10sMB\n" "$marker" "$tbl" "$rows" "$size_mb"
-  done < "$tmpfile" > "$formatted"
-
-  # Run fzf for selection
-  local selected
-  selected=$(cat "$formatted" | fzf --multi \
-    --header="TAB=select  ENTER=confirm  ESC=cancel  Ctrl-A=all  Ctrl-D=none" \
-    --prompt="Exclude tables> " \
-    --height=80% \
-    --layout=reverse \
-    --preview="echo 'Selected tables will have schema backed up but DATA excluded.
-This reduces backup size for large/regenerable tables.
-
-Common exclusions:
-  - Session tables (regenerated)
-  - Log tables (historical, large)
-  - Cache tables (regenerated)
-  - Search index tables (rebuilt)
-  - django_celery_* (task history)
-  - Audit/history tables'" \
-    --preview-window=right:40%:wrap \
-    --bind='ctrl-a:select-all' \
-    --bind='ctrl-d:deselect-all' \
-    | awk '{print $1}' | sed 's/^\*//' | grep -v '^$')
-
-  rm -f "$tmpfile" "$formatted"
-
-  if [[ -z "$selected" ]]; then
-    log_info "No changes made"
-    return
-  fi
-
-  # Convert to JSON array
-  local exclude_json
-  exclude_json=$(echo "$selected" | jq -R -s 'split("\n") | map(select(. != ""))')
-
-  # Calculate excluded size
-  local excluded_size=0
-  while IFS= read -r tbl; do
-    [[ -z "$tbl" ]] && continue
-    local tbl_size
-    tbl_size=$(PGPASSWORD="$db_pass" docker exec -e PGPASSWORD "$POSTGRES_CONTAINER" \
-      psql -h "$db_host" -p "$db_port" -U "$db_user" -d "$database" \
-      -t -A -c "SELECT ROUND(pg_total_relation_size('$tbl') / 1024.0 / 1024.0, 2)" 2>/dev/null)
-    excluded_size=$(awk "BEGIN {print $excluded_size + ${tbl_size:-0}}")
-  done <<< "$selected"
-
-  echo ""
-  echo -e "${BOLD}Selected for exclusion:${NC}"
-  echo "$selected" | while read -r t; do [[ -n "$t" ]] && echo "  - $t"; done
-  echo ""
-  echo -e "Estimated backup reduction: ${CYAN}${excluded_size}MB${NC}"
-  echo ""
-
-  # Confirm and save
-  echo -n "Save this exclusion profile? [y/N] "
-  read -r confirm
-  if [[ "$confirm" =~ ^[Yy] ]]; then
-    # Update config
-    local tmp_config
-    tmp_config=$(mktemp)
-
-    jq ".hosts[\"$host\"].databases[\"$database\"].exclude_data = $exclude_json" "$CONFIG_FILE" > "$tmp_config"
-    mv "$tmp_config" "$CONFIG_FILE"
-
-    log_success "Exclusion profile saved to config"
-    log_info "Run 'dbx backup $host $database' to backup with these exclusions"
-  else
-    log_info "Changes discarded"
-  fi
+  analyze_interactive_exclusions "$host" "$database" "$tmpfile"
 }

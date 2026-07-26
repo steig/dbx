@@ -616,7 +616,7 @@ scrub_validate_table() {
 #
 # These wrappers run inside the local postgres-dbx / mysql-dbx container
 # but connect OUT to the source host (mirroring the pattern used by
-# pg_backup / mysql_backup / analyze_postgres). They honor SSH tunnels
+# pg_backup / mysql_backup / pg_analyze). They honor SSH tunnels
 # via get_effective_host / get_effective_port.
 #
 # Output shape is TSV with these columns, one row per column:
