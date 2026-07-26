@@ -283,6 +283,115 @@ cmd_restore() {
   local with_globals=false
   local verbose=false
 
+  _restore_parse_args "$@"
+
+  require_config
+  require_jq
+
+  _restore_early_into_gate
+
+  require_docker
+
+  if [[ "$hooks_only" == "true" ]]; then
+    _restore_hooks_only
+    return 0
+  fi
+
+  local remote_local_file=""
+  _restore_fetch_remote
+
+  local backup_file=""
+  local host=""
+  local database=""
+  # Set by _restore_resolve_source when the user escapes out of the fzf picker.
+  local restore_cancelled=false
+
+  _restore_resolve_source
+  if [[ "$restore_cancelled" == "true" ]]; then
+    return 0
+  fi
+
+  [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
+
+  _restore_verify_checksum
+
+  # Per-host safety enforcement. If the SOURCE host (the one this backup
+  # came from) is marked safety=prod AND the user is using --into to
+  # write back into a sidecar container, refuse: that's the one path
+  # where a prod-source restore can mutate a live DB the operator might
+  # not realize is also prod. Plain restores (no --into) land in the
+  # managed postgres-dbx / mysql-dbx and are fine — those are dev clones.
+  if [[ -n "$into_container" && -n "$host" ]]; then
+    require_writable_host_for_restore_into "$host"
+  fi
+
+  _restore_target_name
+
+  local db_type=""
+  _restore_detect_db_type
+
+  log_info "Restoring: $(basename "$backup_file")"
+  log_info "Target database: $target_name"
+
+  # Baseline: last successful restore's duration. The restore audit row
+  # doesn't carry db_host/database, so we don't filter on them — this is
+  # a global "your last restore took N" hint, not per-source-DB.
+  local last_dur
+  last_dur=$(audit_last_duration "restore" "" "")
+  if [[ -n "$last_dur" ]]; then
+    log_info "Last restore took $(format_duration "$last_dur")"
+  fi
+
+  local restore_start
+  restore_start=$(date +%s)
+
+  _restore_scrub_preflight
+
+  _restore_dispatch
+
+  _restore_run_hooks
+
+  _restore_scrub_gate
+
+  local restore_dur=$(($(date +%s) - restore_start))
+  audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
+
+  echo ""
+  # On-disk size of the source backup file (not the restored DB) — gives
+  # the user a sense of throughput. Stat fallback covers both BSD (macOS)
+  # and GNU (Linux) flavors.
+  local src_size
+  src_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
+  notify_restore_success "$backup_file" "$target_name"
+
+  _restore_cleanup_download
+}
+
+# ----------------------------------------------------------------------------
+# cmd_restore steps
+#
+# Each _restore_* helper below is one step of cmd_restore. They read and write
+# cmd_restore's locals by name (bash dynamic scoping) rather than taking
+# arguments and echoing results: the flag set is wide, several steps produce
+# more than one value, and `die` has to terminate dbx rather than just a
+# command substitution's subshell. Every helper lists the caller locals it
+# reads and writes.
+#
+# cmd_restore calls all of them unconditionally so `set -e` keeps applying
+# inside each one exactly as it did inline. A step that has to stop the
+# restore early sets a caller local (restore_cancelled) instead of returning
+# non-zero, for the same reason.
+# ----------------------------------------------------------------------------
+
+# Parse the restore argv, expand the s3:// shorthand and reject incompatible
+# flag combinations.
+# Reads:  the argv it is given
+# Writes: source target_name from_remote keep_download restore_storage
+#         skip_hooks hooks_only skip_scrub skip_verify transform_script
+#         transform_inherit_env into_container with_globals verbose
+#         (and exports DBX_VERBOSE / DBX_RECREATE_CONTAINER)
+_restore_parse_args() {
   # Mixed flag/positional parse: `source` is the only positional and
   # may appear before or after flags (or be absent entirely when the
   # user uses --from-remote).
@@ -418,17 +527,18 @@ cmd_restore() {
       command -v "$transform_script" >/dev/null 2>&1 || die "--transform: '$transform_script' is not on PATH and is not an absolute executable path"
     fi
   fi
+}
 
-  require_config
-  require_jq
-
-  # Early safety gate: if --into is set, derive the source host from the
-  # source string (cheaply, without docker) and refuse the prod-source ->
-  # sidecar combo before we even check for docker. Two reasons to do this
-  # early: (1) the user gets a fast, clear refusal — no docker prereq
-  # check first, no container spinup. (2) it lets the CLI test suite
-  # exercise this branch on hosts that don't have docker (notably the
-  # macOS CI runner).
+# Early safety gate: if --into is set, derive the source host from the
+# source string (cheaply, without docker) and refuse the prod-source ->
+# sidecar combo before we even check for docker. Two reasons to do this
+# early: (1) the user gets a fast, clear refusal — no docker prereq
+# check first, no container spinup. (2) it lets the CLI test suite
+# exercise this branch on hosts that don't have docker (notably the
+# macOS CI runner).
+# Reads:  into_container source DATA_DIR
+# Writes: nothing
+_restore_early_into_gate() {
   if [[ -n "$into_container" && -n "$source" ]]; then
     local _early_host=""
     # Path-shape source ("<host>/<db>/<selector>"): host is the first
@@ -453,75 +563,77 @@ cmd_restore() {
     fi
     require_writable_host_for_restore_into "$_early_host"
   fi
+}
 
-  require_docker
+# Run only the configured post-restore hooks against an existing database.
+# Reads:  target_name source POSTGRES_CONTAINER MYSQL_CONTAINER
+# Writes: nothing
+_restore_hooks_only() {
+  [[ -z "$target_name" ]] && die "--hooks-only requires --name <existing-db>"
+  [[ -z "$source" || "$source" != */* ]] && \
+    die "--hooks-only requires a <host>/<database> source path so dbx knows which hooks to run"
 
-  # ---- --hooks-only: run only the configured hooks against an existing DB --
-  if [[ "$hooks_only" == "true" ]]; then
-    [[ -z "$target_name" ]] && die "--hooks-only requires --name <existing-db>"
-    [[ -z "$source" || "$source" != */* ]] && \
-      die "--hooks-only requires a <host>/<database> source path so dbx knows which hooks to run"
+  local ho_host ho_db ho_dbtype
+  ho_host=$(echo "$source" | cut -d'/' -f1)
+  ho_db=$(echo "$source" | cut -d'/' -f2)
+  [[ -z "$ho_host" || -z "$ho_db" ]] && \
+    die "--hooks-only: could not parse host/database from '$source'"
 
-    local ho_host ho_db ho_dbtype
-    ho_host=$(echo "$source" | cut -d'/' -f1)
-    ho_db=$(echo "$source" | cut -d'/' -f2)
-    [[ -z "$ho_host" || -z "$ho_db" ]] && \
-      die "--hooks-only: could not parse host/database from '$source'"
+  ho_dbtype=$(get_db_type "$ho_host")
+  [[ -z "$ho_dbtype" ]] && die "--hooks-only: host '$ho_host' not found in config (or missing 'type')"
 
-    ho_dbtype=$(get_db_type "$ho_host")
-    [[ -z "$ho_dbtype" ]] && die "--hooks-only: host '$ho_host' not found in config (or missing 'type')"
-
-    # --hooks-only is a validation flow — never auto-provision a container.
-    local ho_container exists
-    case "$ho_dbtype" in
-      postgres|postgresql) ho_container="$POSTGRES_CONTAINER" ;;
-      mysql|mariadb)       ho_container="$MYSQL_CONTAINER" ;;
-      *) die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype" ;;
-    esac
-    if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
-      die "--hooks-only: container '$ho_container' does not exist. Run a real restore first to create it."
-    fi
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
-      docker start "$ho_container" >/dev/null || die "--hooks-only: failed to start container '$ho_container'"
-    fi
-    # count(*) returns "0" or "1" — never empty — so we don't have to
-    # distinguish "DB missing" from "query produced no output for some
-    # reason". stderr is dropped on purpose; a non-zero exit code from
-    # docker/psql/mysql is the only failure signal we care about.
-    # Use inline SQL with shell-side quote-doubling. We control $target_name
-    # (it comes from --name); psql `-v` substitution was unreliable across
-    # versions, so we just escape and interpolate directly.
-    local sq=\'
-    local esc_name="${target_name//$sq/$sq$sq}"
-    case "$ho_dbtype" in
-      postgres|postgresql)
-        exists=$(docker exec "$ho_container" psql -U postgres -tA \
-          -c "SELECT count(*) FROM pg_database WHERE datname = '$esc_name'" 2>/dev/null) \
-          || die "--hooks-only: could not query $ho_container (psql failed)"
-        [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
-        ;;
-      mysql|mariadb)
-        exists=$(docker exec "$ho_container" mysql -u root -NB \
-          -e "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>/dev/null) \
-          || die "--hooks-only: could not query $ho_container (mysql failed)"
-        [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
-        ;;
-    esac
-
-    log_step "Running post-restore hooks against $target_name (--hooks-only)"
-    if ! run_post_restore_hooks "$ho_host" "$ho_db" "$target_name" "$ho_dbtype" \
-                                 "$ho_host" "$ho_db" "" ""; then
-      die "Post-restore hooks failed against '$target_name'."
-    fi
-    log_success "Post-restore hooks complete against $target_name"
-    return 0
+  # --hooks-only is a validation flow — never auto-provision a container.
+  local ho_container exists
+  case "$ho_dbtype" in
+    postgres|postgresql) ho_container="$POSTGRES_CONTAINER" ;;
+    mysql|mariadb)       ho_container="$MYSQL_CONTAINER" ;;
+    *) die "--hooks-only: unknown database type for host '$ho_host': $ho_dbtype" ;;
+  esac
+  if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
+    die "--hooks-only: container '$ho_container' does not exist. Run a real restore first to create it."
   fi
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$ho_container"; then
+    docker start "$ho_container" >/dev/null || die "--hooks-only: failed to start container '$ho_container'"
+  fi
+  # count(*) returns "0" or "1" — never empty — so we don't have to
+  # distinguish "DB missing" from "query produced no output for some
+  # reason". stderr is dropped on purpose; a non-zero exit code from
+  # docker/psql/mysql is the only failure signal we care about.
+  # Use inline SQL with shell-side quote-doubling. We control $target_name
+  # (it comes from --name); psql `-v` substitution was unreliable across
+  # versions, so we just escape and interpolate directly.
+  local sq=\'
+  local esc_name="${target_name//$sq/$sq$sq}"
+  case "$ho_dbtype" in
+    postgres|postgresql)
+      exists=$(docker exec "$ho_container" psql -U postgres -tA \
+        -c "SELECT count(*) FROM pg_database WHERE datname = '$esc_name'" 2>/dev/null) \
+        || die "--hooks-only: could not query $ho_container (psql failed)"
+      [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
+      ;;
+    mysql|mariadb)
+      exists=$(docker exec "$ho_container" mysql -u root -NB \
+        -e "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$esc_name'" 2>/dev/null) \
+        || die "--hooks-only: could not query $ho_container (mysql failed)"
+      [[ "$exists" == "1" ]] || die "--hooks-only: database '$target_name' not found in $ho_container. Restore it first, or pick a different --name."
+      ;;
+  esac
 
-  # Remote-fetch path: download into a tempdir under $DATA_DIR/.remote/
-  # then fall through to the normal local-file restore code below.
-  # On success the file is deleted unless --keep-download was passed.
-  # On failure we deliberately leave it so the user can retry.
-  local remote_local_file=""
+  log_step "Running post-restore hooks against $target_name (--hooks-only)"
+  if ! run_post_restore_hooks "$ho_host" "$ho_db" "$target_name" "$ho_dbtype" \
+                               "$ho_host" "$ho_db" "" ""; then
+    die "Post-restore hooks failed against '$target_name'."
+  fi
+  log_success "Post-restore hooks complete against $target_name"
+}
+
+# Remote-fetch path: download into a tempdir under $DATA_DIR/.remote/
+# then fall through to the normal local-file restore code below.
+# On success the file is deleted unless --keep-download was passed.
+# On failure we deliberately leave it so the user can retry.
+# Reads:  from_remote restore_storage
+# Writes: remote_local_file source
+_restore_fetch_remote() {
   if [[ -n "$from_remote" ]]; then
     if ! is_storage_configured "$restore_storage"; then
       die "Cloud storage is not configured. Run 'dbx storage info' for setup help."
@@ -534,11 +646,15 @@ cmd_restore() {
       || die "Failed to fetch remote backup: $resolved"
     source="$remote_local_file"
   fi
+}
 
-  local backup_file=""
-  local host=""
-  local database=""
-
+# Turn $source into a concrete backup file, plus the host/database it came
+# from where the path carries them.
+# Reads:  source DATA_DIR
+# Writes: backup_file host database restore_cancelled
+# The trailing `return 0` keeps a false `[[ -z "$backup_file" ... ]] && die`
+# in the last branch from becoming this function's exit status.
+_restore_resolve_source() {
   # Fuzzy selection if no source provided or just a host
   if [[ -z "$source" ]] || { [[ -n "$source" ]] && [[ ! -f "$source" ]] && [[ "$source" != */* ]]; }; then
     if ! command -v fzf &>/dev/null; then
@@ -587,6 +703,7 @@ cmd_restore() {
 
     if [[ -z "$selected" ]]; then
       log_info "Selection cancelled"
+      restore_cancelled=true
       return 0
     fi
 
@@ -641,13 +758,16 @@ cmd_restore() {
   else
     die "Invalid source: $source"
   fi
+  return 0
+}
 
-  [[ ! -f "$backup_file" ]] && die "Backup file not found: $backup_file"
-
-  # Verify the backup's SHA-256 against its .meta.json before importing.
-  # For --from-remote this runs after the download (backup_file points at
-  # the fetched file). Non-fatal when no metadata or no checksum is present
-  # (warns); aborts only on a real mismatch.
+# Verify the backup's SHA-256 against its .meta.json before importing.
+# For --from-remote this runs after the download (backup_file points at
+# the fetched file). Non-fatal when no metadata or no checksum is present
+# (warns); aborts only on a real mismatch.
+# Reads:  skip_verify backup_file
+# Writes: nothing
+_restore_verify_checksum() {
   if [[ "$skip_verify" == "false" ]]; then
     log_step "Verifying backup checksum: $(basename "$backup_file")"
     if ! verify_backup_checksum "$backup_file"; then
@@ -656,18 +776,12 @@ cmd_restore() {
   else
     log_warn "--skip-verify: skipping backup checksum verification for $backup_file"
   fi
+}
 
-  # Per-host safety enforcement. If the SOURCE host (the one this backup
-  # came from) is marked safety=prod AND the user is using --into to
-  # write back into a sidecar container, refuse: that's the one path
-  # where a prod-source restore can mutate a live DB the operator might
-  # not realize is also prod. Plain restores (no --into) land in the
-  # managed postgres-dbx / mysql-dbx and are fine — those are dev clones.
-  if [[ -n "$into_container" && -n "$host" ]]; then
-    require_writable_host_for_restore_into "$host"
-  fi
-
-  # Determine target database name
+# Derive the target database name when --name was not given.
+# Reads:  target_name database backup_file POSTGRES_CONTAINER MYSQL_CONTAINER
+# Writes: target_name
+_restore_target_name() {
   if [[ -z "$target_name" ]]; then
     local base_name="${database:-$(basename "$backup_file")}"
     base_name="${base_name%.sql.zst.age}"
@@ -691,12 +805,15 @@ cmd_restore() {
       fi
     done
   fi
+}
 
-  # Determine database type. Try metadata first, then host config, then
-  # fall back to content sniffing. Metadata may not include a .type
-  # field for older or postgres backups, so an empty result there should
-  # fall through rather than terminate the chain.
-  local db_type=""
+# Determine database type. Try metadata first, then host config, then
+# fall back to content sniffing. Metadata may not include a .type
+# field for older or postgres backups, so an empty result there should
+# fall through rather than terminate the chain.
+# Reads:  backup_file host
+# Writes: db_type
+_restore_detect_db_type() {
   local meta_file="${backup_file}.meta.json"
   [[ -f "$meta_file" ]] && db_type=$(jq -r '.type // empty' "$meta_file")
   [[ -z "$db_type" && -n "$host" ]] && db_type=$(get_db_type "$host")
@@ -718,28 +835,17 @@ cmd_restore() {
       db_type="mysql"
     fi
   fi
+}
 
-  log_info "Restoring: $(basename "$backup_file")"
-  log_info "Target database: $target_name"
-
-  # Baseline: last successful restore's duration. The restore audit row
-  # doesn't carry db_host/database, so we don't filter on them — this is
-  # a global "your last restore took N" hint, not per-source-DB.
-  local last_dur
-  last_dur=$(audit_last_duration "restore" "" "")
-  if [[ -n "$last_dur" ]]; then
-    log_info "Last restore took $(format_duration "$last_dur")"
-  fi
-
-  local restore_start
-  restore_start=$(date +%s)
-
-  # Pre-restore PII scrub drift check. Reads schema captured in the
-  # backup's meta.json (added at backup time) and diffs against the
-  # host's manifest. On drift: abort BEFORE the engine restore so no
-  # data ever lands in the local container. Older backups (no
-  # captured schema) fall through and get checked by the post-restore
-  # gate. Bypassed by --no-scrub or when no gate is configured.
+# Pre-restore PII scrub drift check. Reads schema captured in the
+# backup's meta.json (added at backup time) and diffs against the
+# host's manifest. On drift: abort BEFORE the engine restore so no
+# data ever lands in the local container. Older backups (no
+# captured schema) fall through and get checked by the post-restore
+# gate. Bypassed by --no-scrub or when no gate is configured.
+# Reads:  skip_scrub host backup_file target_name
+# Writes: nothing
+_restore_scrub_preflight() {
   if [[ "$skip_scrub" == "false" && -n "$host" ]] && scrub_gate_active "$host"; then
     local pre_meta="${backup_file}.meta.json"
     [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.zst}.meta.json"
@@ -756,9 +862,15 @@ cmd_restore() {
       die "scrub: pre-restore drift check failed. No data was restored."
     fi
   fi
+}
 
-  # --transform / --into take the streaming code path. --into is
-  # postgres-only; MySQL --into is rejected below.
+# --transform / --into take the streaming code path. --into is
+# postgres-only; MySQL --into is rejected below.
+# Reads:  transform_script into_container db_type backup_file target_name
+#         host database transform_inherit_env with_globals
+#         POSTGRES_CONTAINER MYSQL_CONTAINER
+# Writes: nothing
+_restore_dispatch() {
   if [[ -n "$transform_script" || -n "$into_container" ]]; then
     local target_container="" target_user="postgres" target_pass=""
     if [[ -n "$into_container" ]]; then
@@ -822,13 +934,18 @@ cmd_restore() {
         ;;
     esac
   fi
+}
 
-  # Hooks skipped for ad-hoc file restores (no host/db in path).
-  # Hooks also skipped when --into targets an external container: the
-  # hook runners (pg_run_sql_stream / mysql_run_sql_stream) hardcode the
-  # local POSTGRES_CONTAINER / MYSQL_CONTAINER, so running them after an
-  # --into restore would mutate the wrong DB. The operator uses
-  # --transform for sanitization in the --into flow.
+# Hooks skipped for ad-hoc file restores (no host/db in path).
+# Hooks also skipped when --into targets an external container: the
+# hook runners (pg_run_sql_stream / mysql_run_sql_stream) hardcode the
+# local POSTGRES_CONTAINER / MYSQL_CONTAINER, so running them after an
+# --into restore would mutate the wrong DB. The operator uses
+# --transform for sanitization in the --into flow.
+# Reads:  skip_hooks host database into_container backup_file target_name
+#         db_type restore_start
+# Writes: nothing
+_restore_run_hooks() {
   if [[ "$skip_hooks" == "false" && -n "$host" && -n "$database" && -z "$into_container" ]]; then
     local backup_basename backup_ts
     backup_basename=$(basename "$backup_file")
@@ -848,15 +965,20 @@ cmd_restore() {
     # already happened.
     log_warn "Ad-hoc file restore: any configured post_restore hooks are skipped (no host/db context in the source path)."
   fi
+}
 
-  # PII scrub gate. Fires when hosts.<host>.scrub.required is true. The
-  # gate is fail-closed: any drift / UPDATE error / sniff failure drops
-  # the target DB rather than leaving it for inspection (a half-scrubbed
-  # clone is more dangerous than no clone).
-  #
-  # When --into <container> is set we ALREADY bypassed the gate above
-  # (with audit log) — see the streaming dispatch block. Skip the gate
-  # block entirely in that case so we don't double-log.
+# PII scrub gate. Fires when hosts.<host>.scrub.required is true. The
+# gate is fail-closed: any drift / UPDATE error / sniff failure drops
+# the target DB rather than leaving it for inspection (a half-scrubbed
+# clone is more dangerous than no clone).
+#
+# When --into <container> is set we ALREADY bypassed the gate above
+# (with audit log) — see the streaming dispatch block. Skip the gate
+# block entirely in that case so we don't double-log.
+# Reads:  host database into_container skip_scrub target_name db_type
+#         backup_file restore_start DATA_DIR
+# Writes: nothing
+_restore_scrub_gate() {
   if [[ -n "$host" && -n "$database" && -z "$into_container" ]]; then
     if scrub_gate_active "$host"; then
       if [[ "$skip_scrub" == "true" ]]; then
@@ -885,22 +1007,14 @@ cmd_restore() {
       log_info "--no-scrub: no scrub gate is configured for $host (flag had no effect)."
     fi
   fi
+}
 
-  local restore_dur=$(($(date +%s) - restore_start))
-  audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
-
-  echo ""
-  # On-disk size of the source backup file (not the restored DB) — gives
-  # the user a sense of throughput. Stat fallback covers both BSD (macOS)
-  # and GNU (Linux) flavors.
-  local src_size
-  src_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
-  log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
-  notify_restore_success "$backup_file" "$target_name"
-
-  # Clean up the downloaded file from --from-remote unless the user
-  # asked to keep it. Only reached on a successful restore — failure
-  # paths above all `die`, so the temp file is preserved for retry.
+# Clean up the downloaded file from --from-remote unless the user
+# asked to keep it. Only reached on a successful restore — failure
+# paths above all `die`, so the temp file is preserved for retry.
+# Reads:  remote_local_file keep_download
+# Writes: nothing
+_restore_cleanup_download() {
   if [[ -n "$remote_local_file" && "$keep_download" != "true" ]]; then
     local meta="${remote_local_file}.meta.json"
     local globals="${remote_local_file}.globals.sql"
