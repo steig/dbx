@@ -93,6 +93,68 @@ prime_reuse_socket() {
   grep -q -- "-S $DBX_RUNTIME_DIR/dbx-tunnels/" "$SSH_LOG"
 }
 
+@test "create: the forward spec matches the configured target (#148)" {
+  run_create
+  [ "$status" -eq 0 ]
+  grep -qE '(^| )-L [0-9]+:db:5432( |$)' "$SSH_LOG"
+}
+
+@test "create: target_host defaults to localhost when unconfigured (#148)" {
+  write_config '{"hosts":{"prod":{"ssh_tunnel":{"jump_host":"jump","target_port":"5432"}}}}'
+  run_create
+  [ "$status" -eq 0 ]
+  grep -qE '(^| )-L [0-9]+:localhost:5432( |$)' "$SSH_LOG"
+}
+
+@test "create: the chosen port is recorded in a 0600 sidecar (#148)" {
+  # The sidecar is what a later run reads to decide whether to reuse, so it
+  # has to hold the port actually forwarded and stay private to this user.
+  # Inspected inside the subshell: the registered cleanup_tunnel deletes it
+  # again when that shell exits.
+  run env PATH="$STUBDIR:$PATH" SSH_LOG="$SSH_LOG" \
+    DBX_DATA_DIR="$DBX_DATA_DIR" DBX_CONFIG_DIR="$DBX_CONFIG_DIR" \
+    DBX_AUDIT_DIR="$DBX_AUDIT_DIR" DBX_RUNTIME_DIR="$DBX_RUNTIME_DIR" \
+    bash -c '
+      set -uo pipefail
+      source "'"$REPO"'/lib/core.sh"; source "'"$REPO"'/lib/tunnel.sh"
+      create_ssh_tunnel prod >/dev/null
+      pf="${TUNNEL_CONTROL_PATH%.sock}.port"
+      echo "SIDECAR PORT=$TUNNEL_LOCAL_PORT FILE=$(cat "$pf") MODE=$(stat -c %a "$pf" 2>/dev/null || stat -f %Lp "$pf")"
+    '
+  [ "$status" -eq 0 ]
+  port="${output##*SIDECAR PORT=}"; port="${port%% *}"
+  [[ "$port" =~ ^[0-9]+$ ]]
+  [[ "$output" == *"FILE=$port MODE=600"* ]]
+  grep -qE "(^| )-L $port:db:5432( |\$)" "$SSH_LOG"
+}
+
+@test "create: every candidate port occupied → dies without starting a master (#148)" {
+  # LSOF_FREE_RC=0 makes the pre-bind probe report every port as taken.
+  run_create LSOF_FREE_RC=0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Failed to create SSH tunnel after 5 attempts"* ]]
+  ! ssh_logged_flag -M
+}
+
+@test "create: a failing ssh master is retried on other ports, then fatal (#148)" {
+  run_create SSH_CREATE_RC=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Failed to create SSH tunnel after 5 attempts"* ]]
+  [ "$(grep -cE '(^| )-L [0-9]+:db:5432( |$)' "$SSH_LOG")" -eq 5 ]
+}
+
+@test "create: a leftover socket with no live master is cleared first (#148)" {
+  # A crashed run leaves the socket file behind; `ssh -M` refuses to create
+  # over it, so it must be exited + removed before the retry loop starts.
+  mkdir -p "$DBX_RUNTIME_DIR/dbx-tunnels"; chmod 700 "$DBX_RUNTIME_DIR/dbx-tunnels"
+  : > "$(ctl_path)"
+  run_create   # SSH_CHECK_RC defaults to 1 — no live master
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REUSED=false"* ]]
+  ssh_logged_flag '-O exit'
+  ssh_logged_flag -M
+}
+
 @test "regression: no ps-grep tunnel discovery remains in tunnel.sh (#128)" {
   ! grep -qE 'ps -eo pid,command' "$REPO/lib/tunnel.sh"
 }
