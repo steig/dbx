@@ -239,7 +239,7 @@ cmd_backup() {
   # line — that's the per-engine confirmation. This summary at the
   # cmd_backup layer is the user-facing one with timing.
   local completed_size duration
-  completed_size=$(stat -f%z "$completed_file" 2>/dev/null || stat -c%s "$completed_file" 2>/dev/null || echo "0")
+  completed_size=$(file_size_bytes "$completed_file")
   duration=$(($(date +%s) - start_epoch))
   log_success "Backup complete in $(format_duration "$duration") — $(human_size "$completed_size") → $completed_file"
 
@@ -358,10 +358,9 @@ cmd_restore() {
 
   echo ""
   # On-disk size of the source backup file (not the restored DB) — gives
-  # the user a sense of throughput. Stat fallback covers both BSD (macOS)
-  # and GNU (Linux) flavors.
+  # the user a sense of throughput.
   local src_size
-  src_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  src_size=$(file_size_bytes "$backup_file")
   log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
   notify_restore_success "$backup_file" "$target_name"
 
@@ -847,10 +846,8 @@ _restore_detect_db_type() {
 # Writes: nothing
 _restore_scrub_preflight() {
   if [[ "$skip_scrub" == "false" && -n "$host" ]] && scrub_gate_active "$host"; then
-    local pre_meta="${backup_file}.meta.json"
-    [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.zst}.meta.json"
-    [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.age}.meta.json"
-    [[ ! -f "$pre_meta" ]] && pre_meta="${backup_file%.gpg}.meta.json"
+    local pre_meta
+    pre_meta=$(backup_meta_path "$backup_file")
     # Suppress set -e so we can branch on the specific exit code; the
     # preflight returns 2 specifically for drift (vs 1 for error / 0
     # for clean-or-legacy-backup).
@@ -1167,7 +1164,7 @@ cmd_clean() {
           # OS does not decide the flavour. A macOS box with GNU coreutils
           # first on PATH (nix, homebrew gnubin) took the BSD branch and died
           # on `stat: invalid option -- '%'`, leaving an empty operand. Same
-          # idiom as the `stat -f%z || stat -c%s` size probe below.
+          # idiom as file_size_bytes.
           local file_age_days mtime
           mtime=$(stat -f%m "$backup" 2>/dev/null || stat -c%Y "$backup" 2>/dev/null || echo "")
           # An unreadable mtime must never read as "infinitely old" — that
@@ -1179,7 +1176,7 @@ cmd_clean() {
           file_age_days=$(( ($(date +%s) - mtime) / 86400 ))
           if [[ $file_age_days -gt $older_than_days ]]; then
             local size meta_file globals_file
-            size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
+            size=$(file_size_bytes "$backup")
             total_freed=$((total_freed + size))
             meta_file="${backup}.meta.json"
             globals_file="${backup}.globals.sql"
@@ -1196,7 +1193,7 @@ cmd_clean() {
         local to_remove=("${backups[@]:$effective_keep}")
         for backup in "${to_remove[@]}"; do
           local size meta_file globals_file
-          size=$(stat -f%z "$backup" 2>/dev/null || stat -c%s "$backup")
+          size=$(file_size_bytes "$backup")
           total_freed=$((total_freed + size))
           # Metadata is written at "<backup_filename>.meta.json" regardless
           # of encryption suffix (see pg_backup / mysql_backup). The globals
@@ -2942,10 +2939,8 @@ cmd_build_image() {
   done
 
   if [[ -n "$from_backup" ]]; then
-    local meta_file="${from_backup%.zst}.meta.json"
-    [[ ! -f "$meta_file" ]] && meta_file="${from_backup}.meta.json"
-    [[ ! -f "$meta_file" ]] && meta_file="${from_backup%.age}.meta.json"
-    [[ ! -f "$meta_file" ]] && meta_file="${from_backup%.gpg}.meta.json"
+    local meta_file
+    meta_file=$(backup_meta_path "$from_backup")
     [[ -f "$meta_file" ]] || die "No .meta.json found for: $from_backup"
     major=$(jq -r '.source_major_version // "unknown"' "$meta_file")
     exts=$(jq -r '.source_extensions // [] | join(" ")' "$meta_file")

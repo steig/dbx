@@ -246,11 +246,11 @@ pg_backup() {
 
   # Calculate checksum and create metadata file
   local file_size checksum
-  file_size=$(stat -f%z "$partial_file" 2>/dev/null || stat -c%s "$partial_file" 2>/dev/null || echo "0")
+  file_size=$(file_size_bytes "$partial_file")
   if [[ "$verbose" == "true" ]]; then
     log_step_elapsed "$start_time" "pg_dump + compress + encrypt done — $(human_size "$file_size") on disk"
   fi
-  checksum=$(sha256sum "$partial_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$partial_file" 2>/dev/null | cut -d' ' -f1)
+  checksum=$(file_sha256 "$partial_file")
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "sha256 done"
 
   # Detect source server version + extensions for restore-time image picking.
@@ -447,11 +447,8 @@ pg_ensure_custom_image() {
 pg_ensure_image_for_backup() {
   local backup_file="$1"
   local src_major src_exts override desired_image
-  local meta_file="${backup_file%.zst}.meta.json"
-  [[ ! -f "$meta_file" ]] && meta_file="${backup_file}.meta.json"
-  # Handle .age/.gpg suffixes too (they sit on top of .zst).
-  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.age}.meta.json"
-  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.gpg}.meta.json"
+  local meta_file
+  meta_file=$(backup_meta_path "$backup_file")
 
   if [[ -f "$meta_file" ]]; then
     src_major=$(jq -r '.source_major_version // "unknown"' "$meta_file")
@@ -530,7 +527,7 @@ pg_restore_backup() {
   # encrypted variants, and threading pv into the encrypted path would
   # bypass its require_age / require_gpg checks.
   local src_size_bytes=0
-  src_size_bytes=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  src_size_bytes=$(file_size_bytes "$backup_file")
   if command -v pv >/dev/null 2>&1 \
        && [[ "$src_size_bytes" -gt 0 ]] \
        && ! is_file_encrypted "$backup_file" \

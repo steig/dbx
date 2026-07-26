@@ -328,11 +328,11 @@ mysql_backup() {
   local end_time duration file_size checksum
   end_time=$(date +%s)
   duration=$((end_time - start_time))
-  file_size=$(stat -f%z "$partial_file" 2>/dev/null || stat -c%s "$partial_file" 2>/dev/null || echo "0")
+  file_size=$(file_size_bytes "$partial_file")
   if [[ "$verbose" == "true" ]]; then
     log_step_elapsed "$start_time" "compress + encrypt done — $(human_size "$file_size") on disk"
   fi
-  checksum=$(sha256sum "$partial_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$partial_file" 2>/dev/null | cut -d' ' -f1)
+  checksum=$(file_sha256 "$partial_file")
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "sha256 done"
 
   # Capture information_schema.columns for the pre-restore scrub drift
@@ -416,10 +416,8 @@ mysql_backup() {
 mysql_ensure_image_for_backup() {
   local backup_file="$1"
   local src_flavor src_major src_minor override desired_image
-  local meta_file="${backup_file%.zst}.meta.json"
-  [[ ! -f "$meta_file" ]] && meta_file="${backup_file}.meta.json"
-  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.age}.meta.json"
-  [[ ! -f "$meta_file" ]] && meta_file="${backup_file%.gpg}.meta.json"
+  local meta_file
+  meta_file=$(backup_meta_path "$backup_file")
 
   if [[ -f "$meta_file" ]]; then
     src_flavor=$(jq -r '.source_flavor // "mysql"' "$meta_file")
@@ -465,7 +463,7 @@ mysql_restore_backup() {
 
   # Get file size for progress
   local file_size
-  file_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null || echo "0")
+  file_size=$(file_size_bytes "$backup_file")
   local human_size
   human_size=$(numfmt --to=iec "$file_size" 2>/dev/null || echo "${file_size} bytes")
 

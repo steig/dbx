@@ -673,6 +673,41 @@ human_size() {
   fi
 }
 
+# Byte size of a file. Probes both stat dialects rather than branching on
+# the OS: a macOS box with GNU coreutils first on PATH takes the BSD branch
+# and dies on `stat: invalid option -- '%'`. Prints 0 when neither works, so
+# arithmetic callers never see an empty operand.
+file_size_bytes() {
+  stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo "0"
+}
+
+# SHA-256 of a file, bare hex digest. sha256sum (GNU) first, shasum (macOS)
+# as the fallback.
+file_sha256() {
+  sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# Resolve a backup file's sibling .meta.json, tolerating the compression /
+# encryption suffix layering. pg_backup and mysql_backup both write metadata
+# at "<full backup path>.meta.json" — suffix included — so the unstripped
+# candidate is checked first; the stripped variants cover older layouts.
+# When nothing exists, prints the unstripped path so the caller can use it
+# in an error message or as a write target. Always returns 0; callers test
+# the result with -f.
+backup_meta_path() {
+  local backup_file="$1" candidate
+  for candidate in "${backup_file}.meta.json" \
+                   "${backup_file%.zst}.meta.json" \
+                   "${backup_file%.age}.meta.json" \
+                   "${backup_file%.gpg}.meta.json"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s' "${backup_file}.meta.json"
+}
+
 # Strip MySQL DEFINER clauses for clean restores. Uses POSIX
 # [[:space:]] rather than \s so the regex works under BSD sed (macOS).
 strip_definer() {
@@ -1138,7 +1173,7 @@ verify_backup() {
   # Calculate actual checksum
   log_info "Calculating checksum..."
   local actual_checksum
-  actual_checksum=$(sha256sum "$backup_file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$backup_file" 2>/dev/null | cut -d' ' -f1)
+  actual_checksum=$(file_sha256 "$backup_file")
 
   # Compare
   if [[ "$expected_checksum" == "$actual_checksum" ]]; then
