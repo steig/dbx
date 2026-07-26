@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#
+# pre-push — refuse to publish a release payload that contradicts itself.
+#
+# v0.40.0 shipped a SHASUMS256.txt that did not match its own `dbx` and
+# man/man1/dbx.1, so install.sh rejected every download and `dbx update` was
+# dead for all users. scripts/release.sh had done its job: it regenerated the
+# manifest and ran the drift guard as its final gate. The feature commit that
+# invalidated the manifest landed *after* that gate, and nothing re-checked
+# before the tag was pushed.
+#
+# That is the gap this hook closes: it is the last thing to run before bytes
+# leave the machine. It gates pushes to main and to v* tags — the two refs a
+# release travels on.
+#
+# Limitation: the guard inspects the working tree, not the commit range being
+# pushed. Pushing from a dirty tree can therefore fail on changes you have not
+# committed. That is the conservative direction, and release.sh already refuses
+# to run against a dirty tree.
+#
+# Lives in .githooks/ rather than hooks/ because .gitignore reserves a
+# top-level /hooks/ for restore-prep operator artifacts.
+#
+# Install: scripts/install-hooks.sh
+# Bypass:  git push --no-verify   (you had better be sure)
+
+set -euo pipefail
+
+ROOT=$(git rev-parse --show-toplevel)
+
+# stdin gives one line per pushed ref: <local ref> <local sha> <remote ref> <remote sha>
+gating=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/tags/v*|refs/heads/main) gating=1 ;;
+  esac
+done
+
+[[ $gating -eq 1 ]] || exit 0
+
+if ! bash "$ROOT/scripts/check-release-consistency.sh"; then
+  cat >&2 <<'MSG'
+
+pre-push: refusing to push — the release payload is inconsistent (see above).
+
+  scripts/gen-shasums.sh    # regenerate the manifest
+  git commit -am "chore: regenerate SHASUMS256.txt"
+
+MSG
+  exit 1
+fi
