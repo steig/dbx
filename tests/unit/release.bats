@@ -19,7 +19,7 @@ setup() {
   export GIT_COMMITTER_NAME=dbx GIT_COMMITTER_EMAIL=dbx@test
 
   REPO="$BATS_TEST_TMPDIR/repo"
-  mkdir -p "$REPO/man/man1" "$REPO/scripts" "$REPO/lib"
+  mkdir -p "$REPO/man/man1" "$REPO/scripts" "$REPO/lib" "$REPO/Formula"
   cp "$DBX_REPO_ROOT/dbx" "$REPO/dbx"
   cp "$DBX_REPO_ROOT/CHANGELOG.md" "$DBX_REPO_ROOT/install.sh" \
      "$DBX_REPO_ROOT/SHASUMS256.txt" "$REPO/"
@@ -30,6 +30,9 @@ setup() {
   cp "$DBX_REPO_ROOT"/lib/*.sh "$DBX_REPO_ROOT"/lib/*.html \
      "$DBX_REPO_ROOT/lib/wizard-server.py" "$REPO/lib/"
   cp "$DBX_REPO_ROOT"/scripts/*.sh "$REPO/scripts/"
+  # The drift guard's check 6 reads the Homebrew formula, so the fixture needs
+  # one — an absent formula is itself a drift the guard reports.
+  cp "$DBX_REPO_ROOT/Formula/dbx.rb" "$REPO/Formula/dbx.rb"
   git -C "$REPO" init -q
   # Belt and braces for git < 2.32, which ignores GIT_CONFIG_GLOBAL.
   git -C "$REPO" config core.fsmonitor false
@@ -335,4 +338,194 @@ released_sections() {
 
   run bash "$REPO/scripts/check-release-consistency.sh"
   [ "$status" -eq 0 ]
+}
+
+# ----------------------------------------------------------------------------
+# Homebrew formula — check 6 and scripts/update-formula.sh
+#
+# The formula pins the sha256 of its own tag's source tarball, so it can never
+# name the version being cut (the tarball contains the formula; there is no
+# fixed point). It lags by one release and is repointed post-tag. These tests
+# pin that asymmetry down, because the obvious "== VERSION" assumption would
+# turn every release commit red.
+# ----------------------------------------------------------------------------
+
+formula() { echo "$REPO/Formula/dbx.rb"; }
+formula_version() {
+  grep -E '^[[:space:]]*url "' "$(formula)" |
+    grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 |
+    awk '{ sub(/^\/v/, ""); sub(/\.tar\.gz$/, ""); print }'
+}
+formula_sha() { grep -E '^[[:space:]]*sha256 "' "$(formula)" | head -1 | cut -d'"' -f2; }
+
+# Rewrite the formula through awk. Args are passed to awk verbatim, so `-v`
+# assignments can precede the program.
+edit_formula() {
+  awk "$@" "$(formula)" > "$(formula).new"
+  mv "$(formula).new" "$(formula)"
+}
+
+# A `curl` earlier on PATH that ignores the URL and writes fixed bytes to -o.
+# update-formula.sh's only network call is the tarball download, so this makes
+# the digest it computes deterministic and the test offline.
+stub_curl() {
+  mkdir -p "$REPO/stub"
+  cat > "$REPO/stub/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""
+while [ $# -gt 0 ]; do
+  [ "$1" = "-o" ] && { out="$2"; shift; }
+  shift
+done
+printf 'fixture tarball\n' > "$out"
+EOF
+  chmod +x "$REPO/stub/curl"
+  PATH="$REPO/stub:$PATH"
+}
+
+# The digest of what stub_curl serves, hashed the way the scripts hash.
+stub_sha() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf 'fixture tarball\n' | sha256sum | cut -d' ' -f1
+  else
+    printf 'fixture tarball\n' | shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
+@test "formula: parses as Ruby" {
+  command -v ruby >/dev/null 2>&1 || skip "ruby not installed"
+  run ruby -c "$DBX_REPO_ROOT/Formula/dbx.rb"
+  [ "$status" -eq 0 ]
+}
+
+@test "formula: the checked-in formula pins a released tag (guard is green as committed)" {
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Formula/dbx.rb: v$(formula_version)"* ]]
+}
+
+@test "formula: the guard stays green when the formula lags a fresh release" {
+  # The state every release commit is in: VERSION bumped, formula still on the
+  # previous tag because the new one has not been pushed yet.
+  release "$NEXT"
+  [ "$status" -eq 0 ]
+  [ "$(formula_version)" = "$CURRENT" ]
+  [ "$(dbx_version)" = "$NEXT" ]
+
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "formula: release.sh does not touch it" {
+  before=$(cat "$(formula)")
+  release "$NEXT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$(formula)")" = "$before" ]
+}
+
+@test "check-release-consistency: fails when the formula is missing" {
+  rm "$(formula)"
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Formula/dbx.rb is missing"* ]]
+}
+
+@test "check-release-consistency: fails on a placeholder sha256" {
+  edit_formula '/^[[:space:]]*sha256 "/ { print "  sha256 \"TODO\""; next } { print }'
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a 64-character hex digest"* ]]
+}
+
+@test "check-release-consistency: fails when the formula pins a tag that was never cut" {
+  edit_formula '{ gsub(/\/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz/, "/v99.99.99.tar.gz"); print }'
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"v99.99.99"* ]]
+  [[ "$output" == *"never cut"* ]]
+}
+
+@test "check-release-consistency: fails when the url is not a tag tarball" {
+  edit_formula '/^[[:space:]]*url "/ { print "  url \"https://example.com/dbx.zip\""; next } { print }'
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not name a vX.Y.Z source tarball"* ]]
+}
+
+@test "update-formula: rewrites url and sha256 from the downloaded tarball" {
+  stub_curl
+  run bash "$REPO/scripts/update-formula.sh" "$NEXT"
+  [ "$status" -eq 0 ]
+  [ "$(formula_version)" = "$NEXT" ]
+  [ "$(formula_sha)" = "$(stub_sha)" ]
+  [[ "$(grep -c '^  url "' "$(formula)")" = "1" ]]
+}
+
+@test "update-formula: with no argument uses VERSION from dbx" {
+  stub_curl
+  run bash "$REPO/scripts/update-formula.sh"
+  [ "$status" -eq 0 ]
+  [ "$(formula_version)" = "$CURRENT" ]
+}
+
+@test "update-formula: accepts a leading v and rejects a non-semver version" {
+  stub_curl
+  run bash "$REPO/scripts/update-formula.sh" "v$NEXT"
+  [ "$status" -eq 0 ]
+  [ "$(formula_version)" = "$NEXT" ]
+
+  run bash "$REPO/scripts/update-formula.sh" 1.2
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid version"* ]]
+}
+
+@test "update-formula: leaves the formula parseable and the guard green" {
+  command -v ruby >/dev/null 2>&1 || skip "ruby not installed"
+  stub_curl
+  # A version that exists in the CHANGELOG, so check 6 stays satisfied.
+  run bash "$REPO/scripts/update-formula.sh" "$CURRENT"
+  [ "$status" -eq 0 ]
+
+  run ruby -c "$(formula)"
+  [ "$status" -eq 0 ]
+
+  run bash "$REPO/scripts/check-release-consistency.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "update-formula: --check passes when the pinned digest matches" {
+  stub_curl
+  edit_formula -v s="$(stub_sha)" '/^[[:space:]]*sha256 "/ { print "  sha256 \"" s "\""; next } { print }'
+  run bash "$REPO/scripts/update-formula.sh" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK: $(stub_sha)"* ]]
+}
+
+@test "update-formula: --check fails, loudly, when the pinned digest is wrong" {
+  stub_curl
+  run bash "$REPO/scripts/update-formula.sh" --check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sha256 mismatch"* ]]
+  [[ "$output" == *"Every \`brew install\` of this tap is failing"* ]]
+}
+
+@test "update-formula: --check writes nothing" {
+  stub_curl
+  before=$(cat "$(formula)")
+  run bash "$REPO/scripts/update-formula.sh" --check
+  [ "$(cat "$(formula)")" = "$before" ]
+}
+
+@test "update-formula: argument handling" {
+  run bash "$REPO/scripts/update-formula.sh" --check 0.1.0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--check takes no version"* ]]
+
+  run bash "$REPO/scripts/update-formula.sh" --nope
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown option"* ]]
+
+  run bash "$REPO/scripts/update-formula.sh" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage:"* ]]
 }

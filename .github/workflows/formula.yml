@@ -1,0 +1,93 @@
+# Homebrew formula checks.
+#
+# Separate from ci.yml because these are the only jobs that need the network to
+# do their job (the pinned digest can only be checked against the tarball GitHub
+# actually serves) and the only ones that want a macOS runner with a real
+# Homebrew. Path-filtered so they run on the ~1-per-release commit that touches
+# the formula, plus a weekly canary.
+#
+# NOTE: because of the paths filter these must NOT be made required status
+# checks — a PR that doesn't touch Formula/ would never report them and would
+# block forever.
+name: Homebrew formula
+
+on:
+  pull_request:
+    paths:
+      - 'Formula/**'
+      - 'scripts/update-formula.sh'
+      - '.github/workflows/formula.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Formula/**'
+      - 'scripts/update-formula.sh'
+  # The digest is of a tarball GitHub generates on demand. It is documented as
+  # stable per tag, but Homebrew has been burned by that assumption before
+  # (the January 2023 gzip change invalidated thousands of checksums), and a
+  # broken tap is invisible until a user reports it. Weekly canary.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    name: Pinned tarball digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Cheap and always available: a formula that doesn't parse can't be
+      # diagnosed by anything downstream.
+      - name: Formula parses as Ruby
+        run: ruby -c Formula/dbx.rb
+
+      # The half of the invariant scripts/check-release-consistency.sh cannot
+      # cover offline. A mismatch means every `brew install` of the tap fails.
+      - name: Verify the pinned sha256 against the real tarball
+        run: bash scripts/update-formula.sh --check
+
+  install:
+    name: brew install + brew test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    # The canary above is enough for the weekly run; this job exists to gate
+    # changes to the formula, and macOS runner minutes cost 10x.
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+
+      # Homebrew refuses to evaluate a formula that isn't in a tap, so the
+      # checked-out formula is copied into a throwaway one. This installs the
+      # tarball the formula pins — which is the previous release, by design —
+      # so it exercises the install/test blocks, not the working tree.
+      - name: Install the formula from a scratch tap
+        run: |
+          set -euo pipefail
+          brew tap-new dbxci/local
+          cp Formula/dbx.rb "$(brew --repository dbxci/local)/Formula/dbx.rb"
+          brew install --build-from-source --verbose dbxci/local/dbx
+
+      # Runs the formula's `test do` block: dbx version matches the formula's
+      # version, dbx help works, dbx config init writes a config. No Docker.
+      - name: brew test
+        run: brew test --verbose dbxci/local/dbx
+
+      # Man pages and completions are installed by the formula but nothing in
+      # `test do` looks at them, and a rename under man/man1/ would silently
+      # stop shipping them.
+      - name: Man pages and completions landed
+        run: |
+          set -euo pipefail
+          prefix="$(brew --prefix dbxci/local/dbx)"
+          count=$(ls "$prefix"/share/man/man1/*.1 | wc -l | tr -d ' ')
+          expected=$(ls man/man1/*.1 | wc -l | tr -d ' ')
+          echo "man pages: $count (repo has $expected)"
+          [ "$count" = "$expected" ]
+          test -s "$prefix/etc/bash_completion.d/dbx"
+          test -s "$prefix/share/zsh/site-functions/_dbx"
+          test -s "$prefix/share/fish/vendor_completions.d/dbx.fish"

@@ -2,7 +2,7 @@
 #
 # check-release-consistency.sh — fail if release-synchronized files have drifted.
 #
-# Guards five drift classes that a manual release (or a feature PR that adds a
+# Guards six drift classes that a manual release (or a feature PR that adds a
 # command/lib) can silently desync:
 #
 #   1. install.sh MAN_PAGES vs the actual man/man1/*.1 files  (set, order-insensitive)
@@ -10,6 +10,7 @@
 #   3. install.sh's lib download list vs the actual lib/*.sh files  (set)
 #   4. install.sh's wizard asset list vs the actual lib/*.html files  (set)
 #   5. SHASUMS256.txt vs the bytes of every file install.sh downloads
+#   6. Formula/dbx.rb pinning a tag that has actually been released
 #
 # Set comparisons are deliberate: MAN_PAGES and the lib list are curated in a
 # non-alphabetical order that controls fetch order, so they must NOT be sorted
@@ -61,6 +62,24 @@ release_payload_files() (
   done
 )
 
+# The Homebrew formula. Shared with scripts/update-formula.sh so the checker and
+# the rewriter agree on where it lives.
+RELEASE_FORMULA="Formula/dbx.rb"
+
+# The tag Formula/dbx.rb pins, without the leading v. Empty when the url line is
+# absent or malformed, which check 6 reports.
+release_formula_version() {
+  grep -E '^[[:space:]]*url "' "$RELEASE_FORMULA" 2>/dev/null |
+    grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 |
+    awk '{ sub(/^\/v/, ""); sub(/\.tar\.gz$/, ""); print }' || true
+}
+
+# The sha256 Formula/dbx.rb pins for that tarball.
+release_formula_sha256() {
+  grep -E '^[[:space:]]*sha256 "' "$RELEASE_FORMULA" 2>/dev/null |
+    head -1 | cut -d'"' -f2 || true
+}
+
 # sha256 of $1 as a bare hex digest, portable across coreutils and macOS.
 # Hashing stdin rather than the path keeps the filename column out of the
 # output. install.sh carries its own copy of this — it is fetched standalone by
@@ -110,7 +129,7 @@ compare_sets() {
 
 check_release_consistency() {
   local version declared_man actual_man declared_lib actual_lib f token
-  local declared_asset actual_asset regenerated
+  local declared_asset actual_asset regenerated formula_version formula_sha
   fail=0
 
   version="$(release_version)"
@@ -156,6 +175,39 @@ check_release_consistency() {
       problem "SHASUMS256.txt is stale — regenerate it with scripts/gen-shasums.sh:"
       diff -u SHASUMS256.txt <(printf '%s\n' "$regenerated") | sed 's/^/  /' >&2 || true
     fi
+  fi
+
+  # --- 6. Formula/dbx.rb pins a tag that has actually been released ---
+  # The formula is the one release artifact that cannot carry the version being
+  # cut: it pins the sha256 of the tag's own source tarball, and that tarball
+  # contains the formula, so there is no fixed point. It names the PREVIOUS
+  # release until scripts/update-formula.sh repoints it after the tag is pushed,
+  # which is why this is not a "== VERSION" check like the ones above — such a
+  # check would fail on every release commit.
+  #
+  # What is checkable without a network: that it names a version which has
+  # actually shipped. A CHANGELOG heading is the offline proxy for "the tag
+  # exists" — scripts/release.sh writes one for every release and nothing else
+  # does, so a pinned version with no heading is a tag that was never cut, and
+  # `brew install` would 404. The digest itself needs the tarball, and is
+  # verified by `scripts/update-formula.sh --check` in CI.
+  if [ ! -f "$RELEASE_FORMULA" ]; then
+    problem "$RELEASE_FORMULA is missing — the Homebrew tap installs from it"
+  else
+    formula_version="$(release_formula_version)"
+    formula_sha="$(release_formula_sha256)"
+    if [ -z "$formula_version" ]; then
+      problem "$RELEASE_FORMULA: url does not name a vX.Y.Z source tarball"
+    # Literal prefix match via awk, not grep: the version's dots would be regex
+    # wildcards, and a heading is only a heading at the start of the line.
+    elif ! awk -v h="## [$formula_version] - " \
+           'index($0, h) == 1 { hit = 1; exit } END { exit !hit }' CHANGELOG.md; then
+      problem "$RELEASE_FORMULA pins v$formula_version, which has no CHANGELOG.md release heading — that tag was never cut. Re-run scripts/update-formula.sh."
+    fi
+    if ! printf '%s' "$formula_sha" | grep -qE '^[0-9a-f]{64}$'; then
+      problem "$RELEASE_FORMULA: sha256 is not a 64-character hex digest (placeholder left in?). Run scripts/update-formula.sh."
+    fi
+    echo "$RELEASE_FORMULA: v${formula_version:-?} (Homebrew tap; repointed after the tag is pushed, so it may trail VERSION)"
   fi
 
   if [ "$fail" -ne 0 ]; then
