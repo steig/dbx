@@ -4,6 +4,8 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-07-25
+
 ### Security
 
 - **The S3 secret key is kept out of `mc`'s argv (#217).** `mc_configure` ran `mc alias set <alias> <endpoint> <access-key> <secret-key>`, so for the length of that call the secret sat in `/proc/PID/cmdline`, readable by every other local user — the same exposure #127 closed for `PGPASSWORD`, `MYSQL_PWD` and the GPG passphrase, on the one path that sweep never reached. `mc` takes an alias straight from the environment, so the alias is now supplied as `MC_HOST_<alias>=scheme://ACCESS:SECRET@host` and `mc alias set` is gone entirely rather than merely rearranged. The value is still visible to *this* user through the process's own environment, which is the tradeoff already accepted for `PGPASSWORD`; what it is no longer visible to is everybody else on the host. As a side effect dbx also stops writing the secret to `~/.mc/config.json` (0600, but a copy of a vaulted credential living outside the vault all the same) — aliases written by earlier versions stay behind, and can be dropped with `mc alias remove dbx-storage` / `mc alias remove dbx-storage-<backend>`. The secret is spliced in raw: `mc` splits the userinfo on the last `@` instead of URL-decoding it, so percent-encoding would be sent verbatim and fail the signature check on any real AWS or R2 key. Verified against MinIO with a secret containing `/`, `+` and `@`.
