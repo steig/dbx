@@ -40,11 +40,14 @@ storage_vault_key() {
 }
 
 # mc alias for the active backend (kept distinct so backends don't clobber).
+# The alias doubles as the suffix of the MC_HOST_<alias> variable that carries
+# the credentials (#217), so it has to be a shell identifier: backend names are
+# allowed a '.' or '-', which cannot appear in a variable name.
 mc_alias_name() {
   if [[ -n "${_STORAGE_NAME:-}" ]]; then
-    echo "dbx-storage-${_STORAGE_NAME}"
+    echo "dbx_storage_${_STORAGE_NAME//[^A-Za-z0-9_]/_}"
   else
-    echo "dbx-storage"
+    echo "dbx_storage"
   fi
 }
 
@@ -160,10 +163,12 @@ require_s3_client() {
 # MinIO Client (mc) Operations
 # ============================================================================
 
-# Blank out every occurrence of the secret in text destined for the log. The
-# secret is on `mc alias set`'s argv, and mc quotes its arguments back in some
-# errors — this repo does not print secrets (#127). Pattern quoted so a secret
-# containing glob characters is matched literally.
+# Blank out every occurrence of the secret in text destined for the log — this
+# repo does not print secrets (#127). Since #217 the secret reaches mc through
+# MC_HOST_<alias> instead of argv, and mc strips the userinfo out of every URL
+# it names; this is the backstop for the one place dbx captures mc's stderr and
+# re-emits it as a log line. Pattern quoted so a secret containing glob
+# characters is matched literally.
 redact_secret() {
   local text="$1" secret="$2"
   if [[ -z "$secret" ]]; then
@@ -209,15 +214,37 @@ mc_configure() {
     die "S3 storage${_STORAGE_NAME:+ '$_STORAGE_NAME'} not fully configured — missing: ${missing[*]}"
   fi
 
-  # 2>&1 >/dev/null keeps mc's diagnostic and drops its chatter. Discarding
-  # both is what made "mc not installed", "wrong credentials" and "endpoint
-  # unreachable" indistinguishable (#212).
-  local alias_err
-  if ! alias_err=$(mc alias set "$(mc_alias_name)" "$endpoint" "$access_key" "$secret_key" --api S3v4 2>&1 >/dev/null); then
-    log_error "mc could not connect to $endpoint"
-    log_client_error "$(redact_secret "$alias_err" "$secret_key")"
-    return 1
-  fi
+  # mc reads an alias straight from the environment, so `mc alias set` — which
+  # took the secret as a positional argument, where `ps` showed it to every
+  # other user on the host — is not needed at all (#217). It also stopped
+  # writing the credential to ~/.mc/config.json. The value is still readable
+  # via /proc/<pid>/environ, but only by this user: the same tradeoff already
+  # taken for PGPASSWORD (#127).
+  #
+  # The secret goes in raw. mc splits the userinfo on the last '@' rather than
+  # URL-decoding it, so percent-encoding would be sent verbatim and fail the
+  # signature check on any real AWS or R2 key (they routinely contain '/'
+  # and '+').
+  local scheme host
+  case "$endpoint" in
+    http://*)  scheme="http://";  host="${endpoint#http://}" ;;
+    https://*) scheme="https://"; host="${endpoint#https://}" ;;
+    *) die "S3 storage${_STORAGE_NAME:+ '$_STORAGE_NAME'} endpoint must start with http:// or https:// — got: $endpoint" ;;
+  esac
+  # Held (not exported) for mc_run and for redact_secret, which scrubs mc's
+  # stderr where dbx re-logs it.
+  _MC_HOST_URL="${scheme}${access_key}:${secret_key}@${host}"
+  _MC_SECRET="$secret_key"
+}
+
+# Run mc with the credential in its environment and nowhere else. The export
+# happens inside a subshell, so the secret is gone the moment the command
+# returns rather than being inherited by every later child of this shell —
+# post_restore hooks and password_cmd invocations included. Same scoping the
+# PGPASSWORD sites use (#127, #217).
+mc_run() {
+  ( export "MC_HOST_$(mc_alias_name)=${_MC_HOST_URL:?mc_configure has not run}"
+    mc "$@" )
 }
 
 mc_upload() {
@@ -234,7 +261,7 @@ mc_upload() {
   local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Uploading to: $full_path"
-  if mc cp "$local_file" "$full_path" >/dev/null; then
+  if mc_run cp "$local_file" "$full_path" >/dev/null; then
     log_success "Upload complete"
     return 0
   else
@@ -257,7 +284,7 @@ mc_download() {
   local full_path="$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")"
 
   log_info "Downloading from: $full_path"
-  if mc cp "$full_path" "$local_file" >/dev/null; then
+  if mc_run cp "$full_path" "$local_file" >/dev/null; then
     log_success "Download complete"
     return 0
   else
@@ -280,7 +307,7 @@ mc_list() {
 
   # mc's stderr is left alone: an empty listing and an unreachable bucket look
   # the same on stdout, and the caller decides whether to show the difference.
-  mc ls "$full_path"
+  mc_run ls "$full_path"
 }
 
 mc_delete() {
@@ -297,12 +324,12 @@ mc_delete() {
 
   log_info "Deleting: $full_path"
   local rm_err
-  if rm_err=$(mc rm "$full_path" 2>&1 >/dev/null); then
+  if rm_err=$(mc_run rm "$full_path" 2>&1 >/dev/null); then
     log_success "Deleted"
     return 0
   else
     log_error "Delete failed"
-    log_client_error "$rm_err"
+    log_client_error "$(redact_secret "$rm_err" "${_MC_SECRET:-}")"
     return 1
   fi
 }
@@ -781,9 +808,9 @@ storage_sync_download() {
         local local_file="$DATA_DIR/$relative"
         mkdir -p "$(dirname "$local_file")"
         log_info "Downloading: $relative"
-        mc cp "$remote_file" "$local_file" >/dev/null
+        mc_run cp "$remote_file" "$local_file" >/dev/null
         ((count++)) || true
-      done < <(mc find "$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")" --name "*.sql.zst*" 2>/dev/null)
+      done < <(mc_run find "$(mc_alias_name)/$(storage_join "$bucket" "$prefix" "$remote_path")" --name "*.sql.zst*" 2>/dev/null)
       ;;
     aws)
       aws_configure_env
