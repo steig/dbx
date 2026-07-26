@@ -187,6 +187,10 @@ setup() {
 @test "transform_exec_argv default: PGPASSWORD is NOT passed through" {
   export PGPASSWORD="secret123"
   run transform_exec_argv "false" "/path/to/script.sh"
+  # Status + a positive control first: a negative assertion alone passes when
+  # the function is simply broken and emits nothing.
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '/path/to/script.sh'
   ! echo "$output" | grep -q "PGPASSWORD"
   ! echo "$output" | grep -q "secret123"
   unset PGPASSWORD
@@ -195,6 +199,8 @@ setup() {
 @test "transform_exec_argv default: DBX_SCRUB_SEED is NOT passed through" {
   export DBX_SCRUB_SEED="salty"
   run transform_exec_argv "false" "/path/to/script.sh"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '/path/to/script.sh'
   ! echo "$output" | grep -q "DBX_SCRUB_SEED"
   ! echo "$output" | grep -q "salty"
   unset DBX_SCRUB_SEED
@@ -218,6 +224,8 @@ setup() {
 @test "transform_exec_argv default: missing allowlist var is skipped (no empty value)" {
   unset TMPDIR
   run transform_exec_argv "false" "/path/to/script.sh"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '/path/to/script.sh'
   ! echo "$output" | grep -q "^TMPDIR=$"
 }
 
