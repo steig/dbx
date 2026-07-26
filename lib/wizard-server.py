@@ -2431,6 +2431,18 @@ def make_handler(args):
             argv.append(database)
         return argv, None
 
+    def validate_scrub_target(body: dict):
+        """Return (target, error_or_None) for the `<host>/<database>` argument
+        /api/scrub/init and /api/scrub/check both take."""
+        host = body.get("host")
+        database = body.get("database")
+        if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
+            if host not in ("local", "localhost"):
+                return None, "host must match the alias shape or be 'local'"
+        if not isinstance(database, str) or not IDENT_RE.match(database):
+            return None, "database must match the db-name shape"
+        return f"{host}/{database}", None
+
     def spawn_dbx(subcommand: str, argv_tail: list[str]) -> str:
         """Spawn `dbx <subcommand> <argv_tail>` as a tracked job."""
         argv = [args.dbx_bin, subcommand, *argv_tail]
@@ -2499,6 +2511,43 @@ def make_handler(args):
     def send_json(handler, code, payload):
         handler._send(code, json.dumps(payload), "application/json")
 
+    def read_json_body(handler, max_len, json_errors=False,
+                       object_error="body must be a JSON object"):
+        """Read, size-check and JSON-parse a request body.
+
+        Returns the decoded object, or None after having already sent the 400 —
+        so every caller is `body = read_json_body(...)` / `if body is None:
+        return`. `max_len` is mandatory rather than defaulted: an uncapped
+        Content-Length is a one-request DoS on a server that `dbx serve` may
+        expose beyond loopback, and a per-route cap keeps the limit visible at
+        the call site. Bodies are read only after the cap check, so an
+        oversized declaration is refused without reading a byte.
+
+        Error responses are the ones the endpoints already emitted: 400 "bad
+        length" for a missing/zero/oversized Content-Length, 400 "invalid json:
+        <e>" for undecodable or malformed input, both as text/plain. The
+        non-object rejection differs per endpoint — pass json_errors=True for
+        the `{"error": ...}` form, and object_error to override the message.
+        A non-numeric Content-Length still raises, exactly as before.
+        """
+        length = int(handler.headers.get("Content-Length", 0))
+        if length <= 0 or length > max_len:
+            handler._send(400, "bad length")
+            return None
+        raw = handler.rfile.read(length)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            handler._send(400, f"invalid json: {e}")
+            return None
+        if not isinstance(body, dict):
+            if json_errors:
+                send_json(handler, 400, {"error": object_error})
+            else:
+                handler._send(400, object_error)
+            return None
+        return body
+
     class H(http.server.BaseHTTPRequestHandler):
         def end_headers(self):
             # #123: defense-in-depth against the token leaking via Referer on
@@ -2515,949 +2564,868 @@ def make_handler(args):
             if body:
                 self.wfile.write(body if isinstance(body, bytes) else body.encode())
 
-        def do_GET(self):
+        # ---- Routing ---------------------------------------------------
+        #
+        # Both verbs run the same gates in the same order they always have:
+        # Host allowlist (#126) -> auth token (#123/#124) -> route lookup.
+        # The Host check stays first because under --no-auth it is the only
+        # per-request gate there is. Neither gate depends on which route
+        # matches, so an unknown path is still rejected by the gates before
+        # it can 404 — exactly as the if/elif chains did.
+
+        def _dispatch(self, routes, patterns, forbidden_msg):
             path = urllib.parse.urlparse(self.path).path
             if not host_header_allowed(self, args):
                 self._send(403, "bad host")
                 return
             if not valid_token(self):
-                self._send(403, "missing or bad token")
+                self._send(403, forbidden_msg)
                 return
-            if path == "/":
-                try:
-                    html = compose_html()
-                except Exception as e:
-                    self._send(500, f"compose failed: {e}")
-                    return
-                # #123: when the token bootstrapped via the URL, mint the
-                # HttpOnly session cookie on this load. The page then scrubs
-                # ?token= from the address bar and authenticates by cookie.
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                if (not args.no_auth and args.token is not None
-                        and parse_query(self.path).get("token", [None])[0]):
-                    self.send_header(
-                        "Set-Cookie",
-                        f"{COOKIE_NAME}={args.token}; HttpOnly; SameSite=Strict; Path=/",
-                    )
-                self.end_headers()
-                self.wfile.write(html.encode())
+            handler = routes.get(path)
+            if handler is not None:
+                handler(self)
                 return
-            if path == "/api/backups":
-                send_json(self, 200, list_backups(args.data_dir, args.config_path))
-                return
-            if path == "/api/backups/download":
-                qs = parse_query(self.path)
-                raw = (qs.get("path", [""]) or [""])[0]
-                resolved, err = _resolve_backup_path(args.data_dir, raw)
-                if resolved is None:
-                    self._send(400, err or "invalid backup path")
+            for pattern, handler in patterns:
+                m = pattern.match(path)
+                if m:
+                    handler(self, *m.groups())
                     return
-                try:
-                    size = os.path.getsize(resolved)
-                    fname = os.path.basename(resolved).replace('"', "").replace("\n", "")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/octet-stream")
-                    self.send_header("Content-Length", str(size))
-                    self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
-                    self.send_header("Cache-Control", "no-store")
-                    self.end_headers()
-                    with open(resolved, "rb") as fh:
-                        shutil.copyfileobj(fh, self.wfile)
-                except (OSError, BrokenPipeError, ConnectionResetError):
-                    pass
-                return
-            if path == "/api/audit-log":
-                qs = parse_query(self.path)
-                # Optional `action` filter. Empty / missing means "all actions".
-                action = (qs.get("action", [""]) or [""])[0]
-                if action and action not in AUDIT_ACTION_ALLOWLIST:
-                    send_json(self, 400, {"error": f"action must be one of: {sorted(AUDIT_ACTION_ALLOWLIST)} or empty"})
-                    return
-                # `limit` defaults to 50, capped at 500. Reject out-of-range or
-                # non-integer values so the caller can't ask the server to
-                # tail-bound an audit log that's gigabytes long.
-                limit_raw = (qs.get("limit", ["50"]) or ["50"])[0]
-                try:
-                    limit = int(limit_raw)
-                except ValueError:
-                    send_json(self, 400, {"error": "limit must be an integer"})
-                    return
-                if limit < 1 or limit > 500:
-                    send_json(self, 400, {"error": "limit must be between 1 and 500"})
-                    return
-                # Optional outcome filter (allowlisted: 'success' | 'failure').
-                outcome = (qs.get("outcome", [""]) or [""])[0]
-                if outcome and outcome not in AUDIT_OUTCOME_ALLOWLIST:
-                    send_json(self, 400, {"error": f"outcome must be one of: {sorted(AUDIT_OUTCOME_ALLOWLIST)} or empty"})
-                    return
-                # Optional date range. Bare YYYY-MM-DD becomes anchored to
-                # start/end of day; malformed input is silently treated as
-                # "no filter" via _parse_audit_date_bound returning None.
-                from_raw = (qs.get("from", [""]) or [""])[0]
-                to_raw = (qs.get("to", [""]) or [""])[0]
-                from_ts = _parse_audit_date_bound(from_raw, end_of_day=False)
-                to_ts = _parse_audit_date_bound(to_raw, end_of_day=True)
-                # Optional regex over stringified entries. The UI sends the
-                # user's raw input; the server compiles it under Python re.
-                # On compile error: 400. On invalid-but-syntactically-OK
-                # patterns: the regex just won't match anything (caller's
-                # problem). Capped at AUDIT_REGEX_MAX_LEN to bound ReDoS.
-                q_raw = (qs.get("q", [""]) or [""])[0]
-                pattern = None
-                if q_raw:
-                    if len(q_raw) > AUDIT_REGEX_MAX_LEN:
-                        send_json(self, 400, {"error": f"q pattern too long (max {AUDIT_REGEX_MAX_LEN} chars)"})
-                        return
-                    try:
-                        pattern = re.compile(q_raw)
-                    except re.error as e:
-                        send_json(self, 400, {"error": f"invalid regex: {e}"})
-                        return
-                # Backwards-compat shape: only the legacy params (`action`,
-                # `limit`) means "return bare array" — that's what the old
-                # tests + any external consumers depend on. The moment any of
-                # the new filter params (or the explicit `format=v2` opt-in)
-                # show up, we return the envelope `{entries,total,filtered}`
-                # so the UI can render "Showing M of N".
-                use_envelope = (
-                    bool(from_raw) or bool(to_raw) or bool(q_raw)
-                    or bool(outcome) or qs.get("format", [""])[0] == "v2"
-                )
-                result = list_audit_log(
-                    args.audit_dir, action, limit,
-                    from_ts=from_ts, to_ts=to_ts,
-                    pattern=pattern, outcome=outcome or None,
-                )
-                if use_envelope:
-                    send_json(self, 200, result)
-                else:
-                    send_json(self, 200, result["entries"])
-                return
-            if path == "/api/containers":
-                send_json(self, 200, list_containers())
-                return
-            if path == "/api/restore/diff":
-                # Guided-restore step-3 preview. Resolves the source backup,
-                # reads its meta.json for flavor, then asks docker whether
-                # the target db exists in the managed container. Silent
-                # docker failures degrade to "target will be CREATED" — no
-                # docker is required for the endpoint to return useful info.
-                qs = parse_query(self.path)
-                source = (qs.get("source", [""]) or [""])[0]
-                target = (qs.get("target", [""]) or [""])[0]
-                payload, err = compute_restore_diff(
-                    source, target, args.data_dir, args.config_path,
-                )
-                if err is not None:
-                    send_json(self, 400, {"error": err})
-                    return
-                send_json(self, 200, payload)
-                return
-            if path == "/api/schedules":
-                try:
-                    state = read_schedule_state(args.lib_dir, args.config_path, args.data_dir, args.audit_dir)
-                except RuntimeError as e:
-                    send_json(self, 500, {"error": str(e)})
-                    return
-                send_json(self, 200, state)
-                return
-            if path == "/api/storage/usage":
-                send_json(self, 200, compute_storage_usage(args.data_dir))
-                return
-            if path == "/api/storage/test":
-                qs = parse_query(self.path)
-                name = (qs.get("name", [""]) or [""])[0]
-                if name and not IDENT_RE.match(name):
-                    send_json(self, 400, {"error": "invalid storage name"})
-                    return
-                rc, out, err = run_storage_test(args.dbx_bin, name)
-                lines = [ln for ln in (err or out or "").strip().splitlines() if ln.strip()]
-                send_json(self, 200, {"ok": rc == 0,
-                                      "message": (lines[-1] if lines else ("ok" if rc == 0 else "failed"))})
-                return
-            if path == "/api/storage/clean-preview":
-                qs = parse_query(self.path)
-                keep_raw = (qs.get("keep", [""]) or [""])[0]
-                older_raw = (qs.get("older_than", [""]) or [""])[0]
-                if not keep_raw and not older_raw:
-                    send_json(self, 400, {"error": "at least one of keep or older_than is required"})
-                    return
-                keep_n = None
-                older_n = None
-                if keep_raw:
-                    try:
-                        keep_n = int(keep_raw)
-                    except ValueError:
-                        send_json(self, 400, {"error": "keep must be an integer"})
-                        return
-                    if keep_n < 1 or keep_n > 1000:
-                        send_json(self, 400, {"error": "keep must be between 1 and 1000"})
-                        return
-                if older_raw:
-                    try:
-                        older_n = int(older_raw)
-                    except ValueError:
-                        send_json(self, 400, {"error": "older_than must be an integer"})
-                        return
-                    if older_n < 1 or older_n > 3650:
-                        send_json(self, 400, {"error": "older_than must be between 1 and 3650"})
-                        return
-                would_delete, reclaim_bytes, reclaim_count = compute_clean_preview(
-                    args.data_dir, keep_n, older_n
-                )
-                send_json(self, 200, {
-                    "would_delete": would_delete,
-                    "reclaim_bytes": reclaim_bytes,
-                    "reclaim_count": reclaim_count,
-                })
-                return
-            if path == "/api/dashboard":
-                # Composed view: host/db pairs from DATA_DIR + per-pair
-                # last_success/last_failure from audit.log + schedules[]
-                # from config.json. Always returns 200; missing audit log
-                # / config / data dir all degrade to empty payloads rather
-                # than 5xx.
-                send_json(self, 200, compute_dashboard(
-                    args.data_dir, args.audit_dir, args.config_path
-                ))
-                return
-            if path == "/api/config":
-                # Used by the Config view to pre-populate the form with the
-                # user's existing config.json instead of starting blank.
-                if not os.path.isfile(args.config_path):
-                    send_json(self, 200, {})
-                    return
-                try:
-                    with open(args.config_path) as f:
-                        cfg = json.load(f)
-                except (OSError, json.JSONDecodeError) as e:
-                    send_json(self, 500, {"error": f"could not read config: {e}"})
-                    return
-                send_json(self, 200, cfg if isinstance(cfg, dict) else {})
-                return
-            if path == "/api/vault/list":
-                # Shell out to `dbx vault list` for the keys + `dbx vault info`
-                # for the backend label. Audit log gives `last_set` per key
-                # via a single full-log scan (cheap; audit logs are tiny).
-                keys = _list_vault_keys(args.dbx_bin)
-                backend = _detect_vault_backend(args.dbx_bin)
-                last_set_map = _vault_last_set_map(args.audit_dir)
-                rows = [
-                    {
-                        "key": k,
-                        "backend": backend,
-                        "last_set": last_set_map.get(k),
-                    }
-                    for k in keys
-                ]
-                send_json(self, 200, rows)
-                return
-            if path == "/api/vault/get":
-                # #124: this returns a cleartext secret in the response body.
-                # Refuse it whenever the token gate is off (--no-auth/--no-token),
-                # and to any non-loopback client — even token-authed, the value
-                # would travel over plaintext (non-TLS) HTTP. Net effect: works
-                # for a local `dbx wizard` and for an SSH-tunnelled session (both
-                # read as loopback); a remote `dbx serve` client gets 403.
-                if args.no_auth or not is_loopback_client(self.client_address[0]):
-                    send_json(self, 403, {
-                        "error": "vault/get is restricted to a loopback client with "
-                                 "auth enabled; reach it over an SSH tunnel "
-                                 "(ssh -L) rather than a remote bind"
-                    })
-                    return
-                qs = parse_query(self.path)
-                key = (qs.get("key", [""]) or [""])[0]
-                if not VAULT_KEY_RE.match(key):
-                    send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
-                    return
-                # capture_output=True keeps stdout in memory so the value
-                # never lands on the wizard's stderr/log. The CLI's own
-                # `audit_vault "get"` is not emitted by cmd_vault get
-                # today, but if added later we won't be double-counting.
-                try:
-                    result = subprocess.run(
-                        [args.dbx_bin, "vault", "get", key],
-                        capture_output=True, text=True, timeout=10, check=False,
-                    )
-                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
-                    send_json(self, 500, {"error": f"dbx vault get failed to spawn: {e}"})
-                    return
-                if result.returncode != 0:
-                    # Surface a generic error — stderr may carry the CLI's
-                    # 'No credentials found for: <key>' message; pass it
-                    # through trimmed so the UI can show it.
-                    err = (result.stderr or "").strip().splitlines()
-                    msg = err[-1] if err else f"exit {result.returncode}"
-                    send_json(self, 404, {"error": msg})
-                    return
-                # dbx vault get prints `echo "$pass"` — strip the trailing
-                # newline that echo adds. Do NOT strip whitespace because a
-                # legitimate password could be space-padded.
-                value = result.stdout
-                if value.endswith("\n"):
-                    value = value[:-1]
-                send_json(self, 200, {"key": key, "value": value})
-                return
-            if path == "/api/vault/age-recipients":
-                path_to_file = _age_recipients_path()
-                recipients, err = _read_age_recipients(path_to_file)
-                if err is not None:
-                    send_json(self, 500, {"error": err})
-                    return
-                send_json(self, 200, {"path": path_to_file, "recipients": recipients})
-                return
-            if path == "/api/scrub/status":
-                send_json(self, 200, scrub_status(args.config_path))
-                return
-            if path == "/api/scrub/manifest":
-                qs = parse_query(self.path)
-                host = (qs.get("host", [""]) or [""])[0]
-                if not host or not HOST_ALIAS_RE.match(host):
-                    send_json(self, 400, {"error": "host is required and must match the alias shape"})
-                    return
-                manifest, resolved, err = read_scrub_manifest(args.config_path, host)
-                if err is not None:
-                    send_json(self, 400, {"error": err})
-                    return
-                send_json(self, 200, {
-                    "host": host,
-                    "manifest_path": resolved,
-                    "manifest": manifest,
-                })
-                return
-            m = re.match(r"^/api/jobs/([0-9a-f]{32})/events$", path)
-            if m:
-                with JOBS_LOCK:
-                    job = JOBS.get(m.group(1))
-                if job is None:
-                    self._send(404, "no such job")
-                    return
-                stream_job_events(self, job)
-                return
             self._send(404, "not found")
 
+        def do_GET(self):
+            self._dispatch(self.GET_ROUTES, self.GET_PATTERNS,
+                           "missing or bad token")
+
         def do_POST(self):
-            path = urllib.parse.urlparse(self.path).path
-            if not host_header_allowed(self, args):
-                self._send(403, "bad host")
-                return
-            if not valid_token(self):
-                self._send(403, "forbidden")
-                return
+            self._dispatch(self.POST_ROUTES, self.POST_PATTERNS, "forbidden")
 
-            if path in ("/save", "/api/config-save"):
-                # /save           = write config + signal done-marker (bash exits)
-                # /api/config-save = write config, keep the wizard running
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 1_000_000:
-                    self._send(400, "bad length")
+        # ---- GET handlers ----------------------------------------------
+
+        def _get_index(self):
+            try:
+                html = compose_html()
+            except Exception as e:
+                self._send(500, f"compose failed: {e}")
+                return
+            # #123: when the token bootstrapped via the URL, mint the
+            # HttpOnly session cookie on this load. The page then scrubs
+            # ?token= from the address bar and authenticates by cookie.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            if (not args.no_auth and args.token is not None
+                    and parse_query(self.path).get("token", [None])[0]):
+                self.send_header(
+                    "Set-Cookie",
+                    f"{COOKIE_NAME}={args.token}; HttpOnly; SameSite=Strict; Path=/",
+                )
+            self.end_headers()
+            self.wfile.write(html.encode())
+
+        def _get_backups(self):
+            send_json(self, 200, list_backups(args.data_dir, args.config_path))
+
+        def _get_backups_download(self):
+            qs = parse_query(self.path)
+            raw = (qs.get("path", [""]) or [""])[0]
+            resolved, err = _resolve_backup_path(args.data_dir, raw)
+            if resolved is None:
+                self._send(400, err or "invalid backup path")
+                return
+            try:
+                size = os.path.getsize(resolved)
+                fname = os.path.basename(resolved).replace('"', "").replace("\n", "")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with open(resolved, "rb") as fh:
+                    shutil.copyfileobj(fh, self.wfile)
+            except (OSError, BrokenPipeError, ConnectionResetError):
+                pass
+
+        def _get_audit_log(self):
+            qs = parse_query(self.path)
+            # Optional `action` filter. Empty / missing means "all actions".
+            action = (qs.get("action", [""]) or [""])[0]
+            if action and action not in AUDIT_ACTION_ALLOWLIST:
+                send_json(self, 400, {"error": f"action must be one of: {sorted(AUDIT_ACTION_ALLOWLIST)} or empty"})
+                return
+            # `limit` defaults to 50, capped at 500. Reject out-of-range or
+            # non-integer values so the caller can't ask the server to
+            # tail-bound an audit log that's gigabytes long.
+            limit_raw = (qs.get("limit", ["50"]) or ["50"])[0]
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                send_json(self, 400, {"error": "limit must be an integer"})
+                return
+            if limit < 1 or limit > 500:
+                send_json(self, 400, {"error": "limit must be between 1 and 500"})
+                return
+            # Optional outcome filter (allowlisted: 'success' | 'failure').
+            outcome = (qs.get("outcome", [""]) or [""])[0]
+            if outcome and outcome not in AUDIT_OUTCOME_ALLOWLIST:
+                send_json(self, 400, {"error": f"outcome must be one of: {sorted(AUDIT_OUTCOME_ALLOWLIST)} or empty"})
+                return
+            # Optional date range. Bare YYYY-MM-DD becomes anchored to
+            # start/end of day; malformed input is silently treated as
+            # "no filter" via _parse_audit_date_bound returning None.
+            from_raw = (qs.get("from", [""]) or [""])[0]
+            to_raw = (qs.get("to", [""]) or [""])[0]
+            from_ts = _parse_audit_date_bound(from_raw, end_of_day=False)
+            to_ts = _parse_audit_date_bound(to_raw, end_of_day=True)
+            # Optional regex over stringified entries. The UI sends the
+            # user's raw input; the server compiles it under Python re.
+            # On compile error: 400. On invalid-but-syntactically-OK
+            # patterns: the regex just won't match anything (caller's
+            # problem). Capped at AUDIT_REGEX_MAX_LEN to bound ReDoS.
+            q_raw = (qs.get("q", [""]) or [""])[0]
+            pattern = None
+            if q_raw:
+                if len(q_raw) > AUDIT_REGEX_MAX_LEN:
+                    send_json(self, 400, {"error": f"q pattern too long (max {AUDIT_REGEX_MAX_LEN} chars)"})
                     return
-                raw = self.rfile.read(length)
                 try:
-                    form_cfg = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
+                    pattern = re.compile(q_raw)
+                except re.error as e:
+                    send_json(self, 400, {"error": f"invalid regex: {e}"})
                     return
-                if not isinstance(form_cfg, dict):
-                    self._send(400, "body must be a JSON object")
+            # Backwards-compat shape: only the legacy params (`action`,
+            # `limit`) means "return bare array" — that's what the old
+            # tests + any external consumers depend on. The moment any of
+            # the new filter params (or the explicit `format=v2` opt-in)
+            # show up, we return the envelope `{entries,total,filtered}`
+            # so the UI can render "Showing M of N".
+            use_envelope = (
+                bool(from_raw) or bool(to_raw) or bool(q_raw)
+                or bool(outcome) or qs.get("format", [""])[0] == "v2"
+            )
+            result = list_audit_log(
+                args.audit_dir, action, limit,
+                from_ts=from_ts, to_ts=to_ts,
+                pattern=pattern, outcome=outcome or None,
+            )
+            if use_envelope:
+                send_json(self, 200, result)
+            else:
+                send_json(self, 200, result["entries"])
+
+        def _get_containers(self):
+            send_json(self, 200, list_containers())
+
+        def _get_restore_diff(self):
+            # Guided-restore step-3 preview. Resolves the source backup,
+            # reads its meta.json for flavor, then asks docker whether
+            # the target db exists in the managed container. Silent
+            # docker failures degrade to "target will be CREATED" — no
+            # docker is required for the endpoint to return useful info.
+            qs = parse_query(self.path)
+            source = (qs.get("source", [""]) or [""])[0]
+            target = (qs.get("target", [""]) or [""])[0]
+            payload, err = compute_restore_diff(
+                source, target, args.data_dir, args.config_path,
+            )
+            if err is not None:
+                send_json(self, 400, {"error": err})
+                return
+            send_json(self, 200, payload)
+
+        def _get_schedules(self):
+            try:
+                state = read_schedule_state(args.lib_dir, args.config_path, args.data_dir, args.audit_dir)
+            except RuntimeError as e:
+                send_json(self, 500, {"error": str(e)})
+                return
+            send_json(self, 200, state)
+
+        def _get_storage_usage(self):
+            send_json(self, 200, compute_storage_usage(args.data_dir))
+
+        def _get_storage_test(self):
+            qs = parse_query(self.path)
+            name = (qs.get("name", [""]) or [""])[0]
+            if name and not IDENT_RE.match(name):
+                send_json(self, 400, {"error": "invalid storage name"})
+                return
+            rc, out, err = run_storage_test(args.dbx_bin, name)
+            lines = [ln for ln in (err or out or "").strip().splitlines() if ln.strip()]
+            send_json(self, 200, {"ok": rc == 0,
+                                  "message": (lines[-1] if lines else ("ok" if rc == 0 else "failed"))})
+
+        def _get_storage_clean_preview(self):
+            qs = parse_query(self.path)
+            keep_raw = (qs.get("keep", [""]) or [""])[0]
+            older_raw = (qs.get("older_than", [""]) or [""])[0]
+            if not keep_raw and not older_raw:
+                send_json(self, 400, {"error": "at least one of keep or older_than is required"})
+                return
+            keep_n = None
+            older_n = None
+            if keep_raw:
+                try:
+                    keep_n = int(keep_raw)
+                except ValueError:
+                    send_json(self, 400, {"error": "keep must be an integer"})
                     return
-                # Merge form payload into existing config.json so non-form
-                # top-level keys (schedules, scrub, vault, ...) survive. Form-
-                # managed keys are replaced with what the form sent — including
-                # being DELETED if the form omitted them (e.g., user unchecked
-                # storage.enabled). Keys outside the form-managed list are
-                # preserved verbatim.
-                FORM_MANAGED = {"hosts", "defaults", "storage", "storages", "notifications"}
-                # Serialize the read-merge-write so a concurrent save (another
-                # tab, or another `dbx serve` client) can't lost-update the
-                # block we merged or collide on the tmp file.
-                with CONFIG_LOCK:
-                    try:
-                        if os.path.isfile(args.config_path):
-                            with open(args.config_path) as f:
-                                existing = json.load(f)
-                            if not isinstance(existing, dict):
-                                existing = {}
-                        else:
+                if keep_n < 1 or keep_n > 1000:
+                    send_json(self, 400, {"error": "keep must be between 1 and 1000"})
+                    return
+            if older_raw:
+                try:
+                    older_n = int(older_raw)
+                except ValueError:
+                    send_json(self, 400, {"error": "older_than must be an integer"})
+                    return
+                if older_n < 1 or older_n > 3650:
+                    send_json(self, 400, {"error": "older_than must be between 1 and 3650"})
+                    return
+            would_delete, reclaim_bytes, reclaim_count = compute_clean_preview(
+                args.data_dir, keep_n, older_n
+            )
+            send_json(self, 200, {
+                "would_delete": would_delete,
+                "reclaim_bytes": reclaim_bytes,
+                "reclaim_count": reclaim_count,
+            })
+
+        def _get_dashboard(self):
+            # Composed view: host/db pairs from DATA_DIR + per-pair
+            # last_success/last_failure from audit.log + schedules[]
+            # from config.json. Always returns 200; missing audit log
+            # / config / data dir all degrade to empty payloads rather
+            # than 5xx.
+            send_json(self, 200, compute_dashboard(
+                args.data_dir, args.audit_dir, args.config_path
+            ))
+
+        def _get_config(self):
+            # Used by the Config view to pre-populate the form with the
+            # user's existing config.json instead of starting blank.
+            if not os.path.isfile(args.config_path):
+                send_json(self, 200, {})
+                return
+            try:
+                with open(args.config_path) as f:
+                    cfg = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                send_json(self, 500, {"error": f"could not read config: {e}"})
+                return
+            send_json(self, 200, cfg if isinstance(cfg, dict) else {})
+
+        def _get_vault_list(self):
+            # Shell out to `dbx vault list` for the keys + `dbx vault info`
+            # for the backend label. Audit log gives `last_set` per key
+            # via a single full-log scan (cheap; audit logs are tiny).
+            keys = _list_vault_keys(args.dbx_bin)
+            backend = _detect_vault_backend(args.dbx_bin)
+            last_set_map = _vault_last_set_map(args.audit_dir)
+            rows = [
+                {
+                    "key": k,
+                    "backend": backend,
+                    "last_set": last_set_map.get(k),
+                }
+                for k in keys
+            ]
+            send_json(self, 200, rows)
+
+        def _get_vault_get(self):
+            # #124: this returns a cleartext secret in the response body.
+            # Refuse it whenever the token gate is off (--no-auth/--no-token),
+            # and to any non-loopback client — even token-authed, the value
+            # would travel over plaintext (non-TLS) HTTP. Net effect: works
+            # for a local `dbx wizard` and for an SSH-tunnelled session (both
+            # read as loopback); a remote `dbx serve` client gets 403.
+            if args.no_auth or not is_loopback_client(self.client_address[0]):
+                send_json(self, 403, {
+                    "error": "vault/get is restricted to a loopback client with "
+                             "auth enabled; reach it over an SSH tunnel "
+                             "(ssh -L) rather than a remote bind"
+                })
+                return
+            qs = parse_query(self.path)
+            key = (qs.get("key", [""]) or [""])[0]
+            if not VAULT_KEY_RE.match(key):
+                send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
+                return
+            # capture_output=True keeps stdout in memory so the value
+            # never lands on the wizard's stderr/log. The CLI's own
+            # `audit_vault "get"` is not emitted by cmd_vault get
+            # today, but if added later we won't be double-counting.
+            try:
+                result = subprocess.run(
+                    [args.dbx_bin, "vault", "get", key],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+                send_json(self, 500, {"error": f"dbx vault get failed to spawn: {e}"})
+                return
+            if result.returncode != 0:
+                # Surface a generic error — stderr may carry the CLI's
+                # 'No credentials found for: <key>' message; pass it
+                # through trimmed so the UI can show it.
+                err = (result.stderr or "").strip().splitlines()
+                msg = err[-1] if err else f"exit {result.returncode}"
+                send_json(self, 404, {"error": msg})
+                return
+            # dbx vault get prints `echo "$pass"` — strip the trailing
+            # newline that echo adds. Do NOT strip whitespace because a
+            # legitimate password could be space-padded.
+            value = result.stdout
+            if value.endswith("\n"):
+                value = value[:-1]
+            send_json(self, 200, {"key": key, "value": value})
+
+        def _get_vault_age_recipients(self):
+            path_to_file = _age_recipients_path()
+            recipients, err = _read_age_recipients(path_to_file)
+            if err is not None:
+                send_json(self, 500, {"error": err})
+                return
+            send_json(self, 200, {"path": path_to_file, "recipients": recipients})
+
+        def _get_scrub_status(self):
+            send_json(self, 200, scrub_status(args.config_path))
+
+        def _get_scrub_manifest(self):
+            qs = parse_query(self.path)
+            host = (qs.get("host", [""]) or [""])[0]
+            if not host or not HOST_ALIAS_RE.match(host):
+                send_json(self, 400, {"error": "host is required and must match the alias shape"})
+                return
+            manifest, resolved, err = read_scrub_manifest(args.config_path, host)
+            if err is not None:
+                send_json(self, 400, {"error": err})
+                return
+            send_json(self, 200, {
+                "host": host,
+                "manifest_path": resolved,
+                "manifest": manifest,
+            })
+
+        def _get_job_events(self, job_id):
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+            if job is None:
+                self._send(404, "no such job")
+                return
+            stream_job_events(self, job)
+
+        # ---- POST handlers ---------------------------------------------
+
+        def _post_save(self):
+            # /save = write config + signal the done-marker (bash then exits).
+            self._config_save(signal_done=True)
+
+        def _post_config_save(self):
+            # /api/config-save = write config, keep the wizard running.
+            self._config_save(signal_done=False)
+
+        def _config_save(self, signal_done):
+            form_cfg = read_json_body(self, 1_000_000)
+            if form_cfg is None:
+                return
+            # Merge form payload into existing config.json so non-form
+            # top-level keys (schedules, scrub, vault, ...) survive. Form-
+            # managed keys are replaced with what the form sent — including
+            # being DELETED if the form omitted them (e.g., user unchecked
+            # storage.enabled). Keys outside the form-managed list are
+            # preserved verbatim.
+            FORM_MANAGED = {"hosts", "defaults", "storage", "storages", "notifications"}
+            # Serialize the read-merge-write so a concurrent save (another
+            # tab, or another `dbx serve` client) can't lost-update the
+            # block we merged or collide on the tmp file.
+            with CONFIG_LOCK:
+                try:
+                    if os.path.isfile(args.config_path):
+                        with open(args.config_path) as f:
+                            existing = json.load(f)
+                        if not isinstance(existing, dict):
                             existing = {}
-                    except (OSError, json.JSONDecodeError):
+                    else:
                         existing = {}
-                    merged = {k: v for k, v in existing.items() if k not in FORM_MANAGED}
-                    for k in FORM_MANAGED:
-                        if k in form_cfg:
-                            merged[k] = form_cfg[k]
-                    # #125: never let a wizard client set an eval-bearing field
-                    # (password_cmd, *_cmd, command templates) — restore each
-                    # from the trusted on-disk config or drop it.
-                    stripped = scrub_eval_fields(merged, existing)
-                    if stripped:
-                        print(
-                            "dbx wizard: refused client-supplied eval field(s) on "
-                            f"config-save: {', '.join(stripped)}",
-                            file=sys.stderr,
-                        )
-                    try:
-                        os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
-                        tmp_path = f"{args.config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
-                        with open(tmp_path, "w") as f:
-                            json.dump(merged, f, indent=2)
-                            f.write("\n")
-                        os.chmod(tmp_path, 0o600)
-                        os.replace(tmp_path, args.config_path)
-                    except OSError as e:
-                        self._send(500, f"write failed: {e}")
-                        return
-                if path == "/save" and args.done_marker:
-                    with open(args.done_marker, "w") as f:
-                        f.write("ok\n")
-                self._send(200, '{"ok":true}', "application/json")
-                return
-
-            if path == "/api/restore":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 64_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    self._send(400, "body must be a JSON object")
-                    return
-                argv_tail, err = validate_restore_body(body, list_containers())
-                if err is not None:
-                    send_json(self, 400, {"error": err})
-                    return
-                assert argv_tail is not None
-                try:
-                    job_id = spawn_dbx("restore", argv_tail)
-                except OSError as e:
-                    self._send(500, f"spawn failed: {e}")
-                    return
-                send_json(self, 200, {"job_id": job_id})
-                return
-
-            if path == "/api/backup":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    self._send(400, "body must be a JSON object")
-                    return
-                configured = list_configured_hosts()
-                if not configured:
-                    send_json(self, 400, {"error": "no hosts configured in config.json"})
-                    return
-                argv_tail, err = validate_backup_body(body, configured)
-                if err is not None:
-                    send_json(self, 400, {"error": err})
-                    return
-                assert argv_tail is not None
-                try:
-                    job_id = spawn_dbx("backup", argv_tail)
-                except OSError as e:
-                    self._send(500, f"spawn failed: {e}")
-                    return
-                send_json(self, 200, {"job_id": job_id})
-                return
-
-            if path == "/api/host-test":
-                # PR-Y4: per-host connection test from the dashboard. Wraps
-                # `dbx test <host>` as a streaming job so the UI can show the
-                # 4-step staged check (ssh / container / creds / query) live.
-                # Host must match IDENT_RE AND appear in the configured-hosts
-                # allowlist — same shape as /api/backup, since we're spawning
-                # the same kind of dbx subprocess against an alias the user
-                # claimed they own.
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    self._send(400, "body must be a JSON object")
-                    return
-                host = body.get("host")
-                if not isinstance(host, str) or not host:
-                    send_json(self, 400, {"error": "host is required"})
-                    return
-                if not HOST_ALIAS_RE.match(host):
-                    send_json(self, 400, {"error": "host has invalid characters"})
-                    return
-                configured = list_configured_hosts()
-                if host not in configured:
-                    send_json(self, 400, {"error": f"host '{host}' is not configured"})
-                    return
-                try:
-                    job_id = spawn_dbx("test", [host])
-                except OSError as e:
-                    self._send(500, f"spawn failed: {e}")
-                    return
-                send_json(self, 200, {"job_id": job_id})
-                return
-
-            if path == "/api/storage/clean":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                keep_v = body.get("keep")
-                older_v = body.get("older_than")
-                # Same shape validation the GET preview uses — keep them in
-                # lockstep so a preview that succeeds also spawns cleanly.
-                if keep_v is None and older_v is None:
-                    send_json(self, 400, {"error": "at least one of keep or older_than is required"})
-                    return
-                argv = []
-                if keep_v is not None:
-                    if not isinstance(keep_v, int) or isinstance(keep_v, bool):
-                        send_json(self, 400, {"error": "keep must be an integer"})
-                        return
-                    if keep_v < 1 or keep_v > 1000:
-                        send_json(self, 400, {"error": "keep must be between 1 and 1000"})
-                        return
-                    argv += ["--keep", str(keep_v)]
-                if older_v is not None:
-                    if not isinstance(older_v, int) or isinstance(older_v, bool):
-                        send_json(self, 400, {"error": "older_than must be an integer"})
-                        return
-                    if older_v < 1 or older_v > 3650:
-                        send_json(self, 400, {"error": "older_than must be between 1 and 3650"})
-                        return
-                    argv += ["--older-than", str(older_v)]
-                dry = body.get("dry_run")
-                if dry is True:
-                    argv.append("--dry-run")
-                elif dry is not None and dry is not False:
-                    send_json(self, 400, {"error": "dry_run must be a boolean"})
-                    return
-                try:
-                    job_id = spawn_dbx("clean", argv)
-                except OSError as e:
-                    self._send(500, f"spawn failed: {e}")
-                    return
-                send_json(self, 200, {"job_id": job_id})
-                return
-
-            if path == "/api/schedules":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 256_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict) or "schedules" not in body:
-                    send_json(self, 400, {"error": "body must be {schedules: [...]}"})
-                    return
-                ok, err = write_schedules_block(args.config_path, body["schedules"])
-                if not ok:
-                    send_json(self, 400, {"error": err})
-                    return
-                send_json(self, 200, {"ok": True})
-                return
-
-            if path == "/api/backups/delete":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                ok, err = delete_backup(args.data_dir, body.get("path"))
-                if not ok:
-                    send_json(self, 400, {"error": err})
-                    return
-                send_json(self, 200, {"ok": True})
-                return
-
-            if path == "/api/vault/set":
-                length = int(self.headers.get("Content-Length", 0))
-                # Body cap: 8KB is plenty for key + 4KB value + JSON braces.
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                key = body.get("key")
-                value = body.get("value")
-                if not isinstance(key, str) or not VAULT_KEY_RE.match(key):
-                    send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
-                    return
-                if not isinstance(value, str):
-                    send_json(self, 400, {"error": "value must be a string"})
-                    return
-                # Length cap in BYTES (UTF-8) — the spec quotes 4096 bytes,
-                # which differs from Python len() for any non-ASCII content.
-                if len(value.encode("utf-8")) > VAULT_VALUE_MAX_BYTES:
-                    send_json(self, 400, {"error": f"value exceeds {VAULT_VALUE_MAX_BYTES} bytes"})
-                    return
-                if not value:
-                    send_json(self, 400, {"error": "value must not be empty"})
-                    return
-                # `dbx vault set <key>` does `read -rs password` from stdin.
-                # We pipe via stdin=PIPE so the value never enters argv (it
-                # would be visible to `ps`). capture_output=True keeps both
-                # streams in memory so nothing leaks to the wizard's log.
-                try:
-                    proc = subprocess.run(
-                        [args.dbx_bin, "vault", "set", key],
-                        input=value + "\n", capture_output=True, text=True,
-                        timeout=15, check=False,
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+                merged = {k: v for k, v in existing.items() if k not in FORM_MANAGED}
+                for k in FORM_MANAGED:
+                    if k in form_cfg:
+                        merged[k] = form_cfg[k]
+                # #125: never let a wizard client set an eval-bearing field
+                # (password_cmd, *_cmd, command templates) — restore each
+                # from the trusted on-disk config or drop it.
+                stripped = scrub_eval_fields(merged, existing)
+                if stripped:
+                    print(
+                        "dbx wizard: refused client-supplied eval field(s) on "
+                        f"config-save: {', '.join(stripped)}",
+                        file=sys.stderr,
                     )
-                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
-                    send_json(self, 500, {"error": f"dbx vault set failed to spawn: {e}"})
+                try:
+                    os.makedirs(os.path.dirname(args.config_path), exist_ok=True)
+                    tmp_path = f"{args.config_path}.wizard-tmp.{os.getpid()}.{secrets.token_hex(4)}"
+                    with open(tmp_path, "w") as f:
+                        json.dump(merged, f, indent=2)
+                        f.write("\n")
+                    os.chmod(tmp_path, 0o600)
+                    os.replace(tmp_path, args.config_path)
+                except OSError as e:
+                    self._send(500, f"write failed: {e}")
                     return
-                if proc.returncode != 0:
-                    err = (proc.stderr or "").strip().splitlines()
-                    msg = err[-1] if err else f"exit {proc.returncode}"
-                    send_json(self, 400, {"error": msg})
-                    return
-                send_json(self, 200, {"ok": True})
+            if signal_done and args.done_marker:
+                with open(args.done_marker, "w") as f:
+                    f.write("ok\n")
+            self._send(200, '{"ok":true}', "application/json")
+
+        def _post_restore(self):
+            body = read_json_body(self, 64_000)
+            if body is None:
                 return
-
-            if path == "/api/vault/delete":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 2_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                key = body.get("key")
-                if not isinstance(key, str) or not VAULT_KEY_RE.match(key):
-                    send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
-                    return
-                try:
-                    proc = subprocess.run(
-                        [args.dbx_bin, "vault", "delete", key],
-                        capture_output=True, text=True, timeout=10, check=False,
-                    )
-                except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
-                    send_json(self, 500, {"error": f"dbx vault delete failed to spawn: {e}"})
-                    return
-                # cmd_vault delete returns 0 even when the key doesn't
-                # exist (it just logs "No credentials found"). We forward
-                # 200 regardless so the UI's "remove and refresh" flow
-                # stays idempotent.
-                if proc.returncode != 0:
-                    err = (proc.stderr or "").strip().splitlines()
-                    msg = err[-1] if err else f"exit {proc.returncode}"
-                    send_json(self, 400, {"error": msg})
-                    return
-                send_json(self, 200, {"ok": True})
+            argv_tail, err = validate_restore_body(body, list_containers())
+            if err is not None:
+                send_json(self, 400, {"error": err})
                 return
-
-            if path == "/api/vault/age-recipients/add":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 2_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                recipient = body.get("recipient")
-                if not isinstance(recipient, str) or not AGE_RECIPIENT_RE.match(recipient):
-                    send_json(self, 400, {"error": "recipient must match age1[a-z0-9]{50,80}"})
-                    return
-                ok, err = _add_age_recipient(_age_recipients_path(), recipient)
-                if not ok:
-                    send_json(self, 500, {"error": err})
-                    return
-                send_json(self, 200, {"ok": True})
+            assert argv_tail is not None
+            try:
+                job_id = spawn_dbx("restore", argv_tail)
+            except OSError as e:
+                self._send(500, f"spawn failed: {e}")
                 return
+            send_json(self, 200, {"job_id": job_id})
 
-            if path == "/api/vault/age-recipients/remove":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 2_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                recipient = body.get("recipient")
-                # Permissive for remove — accept any string so the user can
-                # clean up a malformed line that snuck in via a manual edit.
-                # Cap length so a non-string or huge value can't trash the file.
-                if not isinstance(recipient, str) or not recipient or len(recipient) > 256:
-                    send_json(self, 400, {"error": "recipient must be a non-empty string ≤256 chars"})
-                    return
-                ok, err = _remove_age_recipient(_age_recipients_path(), recipient)
-                if not ok:
-                    send_json(self, 500, {"error": err})
-                    return
-                send_json(self, 200, {"ok": True})
+        def _post_backup(self):
+            body = read_json_body(self, 8_000)
+            if body is None:
                 return
+            configured = list_configured_hosts()
+            if not configured:
+                send_json(self, 400, {"error": "no hosts configured in config.json"})
+                return
+            argv_tail, err = validate_backup_body(body, configured)
+            if err is not None:
+                send_json(self, 400, {"error": err})
+                return
+            assert argv_tail is not None
+            try:
+                job_id = spawn_dbx("backup", argv_tail)
+            except OSError as e:
+                self._send(500, f"spawn failed: {e}")
+                return
+            send_json(self, 200, {"job_id": job_id})
 
-            if path in ("/api/scrub/init", "/api/scrub/check"):
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                host = body.get("host")
-                database = body.get("database")
-                if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
-                    if host not in ("local", "localhost"):
-                        send_json(self, 400, {"error": "host must match the alias shape or be 'local'"})
-                        return
-                if not isinstance(database, str) or not IDENT_RE.match(database):
-                    send_json(self, 400, {"error": "database must match the db-name shape"})
-                    return
-                target = f"{host}/{database}"
+        def _post_host_test(self):
+            # PR-Y4: per-host connection test from the dashboard. Wraps
+            # `dbx test <host>` as a streaming job so the UI can show the
+            # 4-step staged check (ssh / container / creds / query) live.
+            # Host must match IDENT_RE AND appear in the configured-hosts
+            # allowlist — same shape as /api/backup, since we're spawning
+            # the same kind of dbx subprocess against an alias the user
+            # claimed they own.
+            body = read_json_body(self, 8_000)
+            if body is None:
+                return
+            host = body.get("host")
+            if not isinstance(host, str) or not host:
+                send_json(self, 400, {"error": "host is required"})
+                return
+            if not HOST_ALIAS_RE.match(host):
+                send_json(self, 400, {"error": "host has invalid characters"})
+                return
+            configured = list_configured_hosts()
+            if host not in configured:
+                send_json(self, 400, {"error": f"host '{host}' is not configured"})
+                return
+            try:
+                job_id = spawn_dbx("test", [host])
+            except OSError as e:
+                self._send(500, f"spawn failed: {e}")
+                return
+            send_json(self, 200, {"job_id": job_id})
 
-                if path == "/api/scrub/init":
-                    argv = ["init", target]
-                    if body.get("include_empty") is True:
-                        argv.append("--include-empty")
-                    elif body.get("include_empty") not in (None, False):
-                        send_json(self, 400, {"error": "include_empty must be a boolean"})
-                        return
-                    code, stdout, stderr = run_scrub_subcommand(args.dbx_bin, argv)
-                    if code != 0:
-                        send_json(self, 502, {
-                            "error": "scrub init failed",
-                            "exit_code": code,
-                            "stderr": stderr,
-                            "stdout": stdout,
-                        })
-                        return
-                    try:
-                        manifest = json.loads(stdout)
-                    except json.JSONDecodeError as e:
-                        send_json(self, 502, {
-                            "error": f"scrub init returned non-JSON: {e}",
-                            "stdout": stdout,
-                            "stderr": stderr,
-                        })
-                        return
-                    send_json(self, 200, {"ok": True, "manifest": manifest, "stderr": stderr})
+        def _post_storage_clean(self):
+            body = read_json_body(self, 8_000, json_errors=True)
+            if body is None:
+                return
+            keep_v = body.get("keep")
+            older_v = body.get("older_than")
+            # Same shape validation the GET preview uses — keep them in
+            # lockstep so a preview that succeeds also spawns cleanly.
+            if keep_v is None and older_v is None:
+                send_json(self, 400, {"error": "at least one of keep or older_than is required"})
+                return
+            argv = []
+            if keep_v is not None:
+                if not isinstance(keep_v, int) or isinstance(keep_v, bool):
+                    send_json(self, 400, {"error": "keep must be an integer"})
                     return
+                if keep_v < 1 or keep_v > 1000:
+                    send_json(self, 400, {"error": "keep must be between 1 and 1000"})
+                    return
+                argv += ["--keep", str(keep_v)]
+            if older_v is not None:
+                if not isinstance(older_v, int) or isinstance(older_v, bool):
+                    send_json(self, 400, {"error": "older_than must be an integer"})
+                    return
+                if older_v < 1 or older_v > 3650:
+                    send_json(self, 400, {"error": "older_than must be between 1 and 3650"})
+                    return
+                argv += ["--older-than", str(older_v)]
+            dry = body.get("dry_run")
+            if dry is True:
+                argv.append("--dry-run")
+            elif dry is not None and dry is not False:
+                send_json(self, 400, {"error": "dry_run must be a boolean"})
+                return
+            try:
+                job_id = spawn_dbx("clean", argv)
+            except OSError as e:
+                self._send(500, f"spawn failed: {e}")
+                return
+            send_json(self, 200, {"job_id": job_id})
 
-                argv = ["check", target, "--json"]
-                manifest_override = body.get("manifest_path")
-                if manifest_override is not None:
-                    if not isinstance(manifest_override, str) or not manifest_override:
-                        send_json(self, 400, {"error": "manifest_path must be a non-empty string"})
-                        return
-                    argv += ["--manifest", manifest_override]
-                code, stdout, stderr = run_scrub_subcommand(args.dbx_bin, argv)
-                if code in (0, 2):
-                    try:
-                        report = json.loads(stdout)
-                    except json.JSONDecodeError as e:
-                        send_json(self, 502, {
-                            "error": f"scrub check returned non-JSON: {e}",
-                            "stdout": stdout,
-                            "stderr": stderr,
-                        })
-                        return
-                    send_json(self, 200, {
-                        "ok": code == 0,
-                        "report": report,
-                        "stderr": stderr,
-                    })
-                    return
+        def _post_schedules(self):
+            body = read_json_body(self, 256_000, json_errors=True,
+                                  object_error="body must be {schedules: [...]}")
+            if body is None:
+                return
+            if "schedules" not in body:
+                send_json(self, 400, {"error": "body must be {schedules: [...]}"})
+                return
+            ok, err = write_schedules_block(args.config_path, body["schedules"])
+            if not ok:
+                send_json(self, 400, {"error": err})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_backups_delete(self):
+            body = read_json_body(self, 8_000, json_errors=True)
+            if body is None:
+                return
+            ok, err = delete_backup(args.data_dir, body.get("path"))
+            if not ok:
+                send_json(self, 400, {"error": err})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_vault_set(self):
+            # Body cap: 8KB is plenty for key + 4KB value + JSON braces.
+            body = read_json_body(self, 8_000, json_errors=True)
+            if body is None:
+                return
+            key = body.get("key")
+            value = body.get("value")
+            if not isinstance(key, str) or not VAULT_KEY_RE.match(key):
+                send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
+                return
+            if not isinstance(value, str):
+                send_json(self, 400, {"error": "value must be a string"})
+                return
+            # Length cap in BYTES (UTF-8) — the spec quotes 4096 bytes,
+            # which differs from Python len() for any non-ASCII content.
+            if len(value.encode("utf-8")) > VAULT_VALUE_MAX_BYTES:
+                send_json(self, 400, {"error": f"value exceeds {VAULT_VALUE_MAX_BYTES} bytes"})
+                return
+            if not value:
+                send_json(self, 400, {"error": "value must not be empty"})
+                return
+            # `dbx vault set <key>` does `read -rs password` from stdin.
+            # We pipe via stdin=PIPE so the value never enters argv (it
+            # would be visible to `ps`). capture_output=True keeps both
+            # streams in memory so nothing leaks to the wizard's log.
+            try:
+                proc = subprocess.run(
+                    [args.dbx_bin, "vault", "set", key],
+                    input=value + "\n", capture_output=True, text=True,
+                    timeout=15, check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+                send_json(self, 500, {"error": f"dbx vault set failed to spawn: {e}"})
+                return
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip().splitlines()
+                msg = err[-1] if err else f"exit {proc.returncode}"
+                send_json(self, 400, {"error": msg})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_vault_delete(self):
+            body = read_json_body(self, 2_000, json_errors=True)
+            if body is None:
+                return
+            key = body.get("key")
+            if not isinstance(key, str) or not VAULT_KEY_RE.match(key):
+                send_json(self, 400, {"error": "key must match [A-Za-z0-9._-]{1,64}"})
+                return
+            try:
+                proc = subprocess.run(
+                    [args.dbx_bin, "vault", "delete", key],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+                send_json(self, 500, {"error": f"dbx vault delete failed to spawn: {e}"})
+                return
+            # cmd_vault delete returns 0 even when the key doesn't
+            # exist (it just logs "No credentials found"). We forward
+            # 200 regardless so the UI's "remove and refresh" flow
+            # stays idempotent.
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip().splitlines()
+                msg = err[-1] if err else f"exit {proc.returncode}"
+                send_json(self, 400, {"error": msg})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_age_recipients_add(self):
+            body = read_json_body(self, 2_000, json_errors=True)
+            if body is None:
+                return
+            recipient = body.get("recipient")
+            if not isinstance(recipient, str) or not AGE_RECIPIENT_RE.match(recipient):
+                send_json(self, 400, {"error": "recipient must match age1[a-z0-9]{50,80}"})
+                return
+            ok, err = _add_age_recipient(_age_recipients_path(), recipient)
+            if not ok:
+                send_json(self, 500, {"error": err})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_age_recipients_remove(self):
+            body = read_json_body(self, 2_000, json_errors=True)
+            if body is None:
+                return
+            recipient = body.get("recipient")
+            # Permissive for remove — accept any string so the user can
+            # clean up a malformed line that snuck in via a manual edit.
+            # Cap length so a non-string or huge value can't trash the file.
+            if not isinstance(recipient, str) or not recipient or len(recipient) > 256:
+                send_json(self, 400, {"error": "recipient must be a non-empty string ≤256 chars"})
+                return
+            ok, err = _remove_age_recipient(_age_recipients_path(), recipient)
+            if not ok:
+                send_json(self, 500, {"error": err})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_scrub_init(self):
+            body = read_json_body(self, 8_000, json_errors=True)
+            if body is None:
+                return
+            target, err = validate_scrub_target(body)
+            if err is not None:
+                send_json(self, 400, {"error": err})
+                return
+            argv = ["init", target]
+            if body.get("include_empty") is True:
+                argv.append("--include-empty")
+            elif body.get("include_empty") not in (None, False):
+                send_json(self, 400, {"error": "include_empty must be a boolean"})
+                return
+            code, stdout, stderr = run_scrub_subcommand(args.dbx_bin, argv)
+            if code != 0:
                 send_json(self, 502, {
-                    "error": "scrub check failed",
+                    "error": "scrub init failed",
                     "exit_code": code,
                     "stderr": stderr,
                     "stdout": stdout,
                 })
                 return
-
-            if path == "/api/scrub/save":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 1_000_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                ok, err = write_scrub_manifest(
-                    body.get("manifest_path"),
-                    args.config_path,
-                    body.get("manifest"),
-                    body.get("host"),
-                )
-                if not ok:
-                    send_json(self, 400, {"error": err})
-                    return
-                send_json(self, 200, {"ok": True})
+            try:
+                manifest = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                send_json(self, 502, {
+                    "error": f"scrub init returned non-JSON: {e}",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                })
                 return
+            send_json(self, 200, {"ok": True, "manifest": manifest, "stderr": stderr})
 
-            if path == "/api/analyze":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 8_000:
-                    self._send(400, "bad length")
+        def _post_scrub_check(self):
+            body = read_json_body(self, 8_000, json_errors=True)
+            if body is None:
+                return
+            target, err = validate_scrub_target(body)
+            if err is not None:
+                send_json(self, 400, {"error": err})
+                return
+            argv = ["check", target, "--json"]
+            manifest_override = body.get("manifest_path")
+            if manifest_override is not None:
+                if not isinstance(manifest_override, str) or not manifest_override:
+                    send_json(self, 400, {"error": "manifest_path must be a non-empty string"})
                     return
-                raw = self.rfile.read(length)
+                argv += ["--manifest", manifest_override]
+            code, stdout, stderr = run_scrub_subcommand(args.dbx_bin, argv)
+            if code in (0, 2):
                 try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                host = body.get("host")
-                database = body.get("database")
-                if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
-                    send_json(self, 400, {"error": "host must match the alias shape"})
-                    return
-                if not isinstance(database, str) or not IDENT_RE.match(database):
-                    send_json(self, 400, {"error": "database must match the db-name shape"})
-                    return
-                no_pii = body.get("no_pii_scan")
-                if no_pii is not None and not isinstance(no_pii, bool):
-                    send_json(self, 400, {"error": "no_pii_scan must be a boolean"})
-                    return
-                code, stdout, stderr = run_analyze_json(
-                    args.dbx_bin, host, database, no_pii_scan=bool(no_pii)
-                )
-                if code != 0:
-                    send_json(self, 502, {
-                        "error": "dbx analyze failed",
-                        "exit_code": code,
-                        "stderr": stderr,
-                        "stdout": stdout,
-                    })
-                    return
-                try:
-                    payload = json.loads(stdout)
+                    report = json.loads(stdout)
                 except json.JSONDecodeError as e:
                     send_json(self, 502, {
-                        "error": f"dbx analyze returned non-JSON: {e}",
+                        "error": f"scrub check returned non-JSON: {e}",
                         "stdout": stdout,
                         "stderr": stderr,
                     })
                     return
-                # Pass stderr through on success too — `dbx analyze` emits
-                # log_step "Scanning for PII..." / log_warn messages on
-                # stderr that the wizard's diagnostics panel surfaces.
-                # Empty string elided so the UI doesn't render an empty box.
-                if stderr:
-                    payload["stderr"] = stderr
-                send_json(self, 200, payload)
+                send_json(self, 200, {
+                    "ok": code == 0,
+                    "report": report,
+                    "stderr": stderr,
+                })
                 return
+            send_json(self, 502, {
+                "error": "scrub check failed",
+                "exit_code": code,
+                "stderr": stderr,
+                "stdout": stdout,
+            })
 
-            if path == "/api/analyze/exclude":
-                length = int(self.headers.get("Content-Length", 0))
-                if length <= 0 or length > 1_000_000:
-                    self._send(400, "bad length")
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    body = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                    self._send(400, f"invalid json: {e}")
-                    return
-                if not isinstance(body, dict):
-                    send_json(self, 400, {"error": "body must be a JSON object"})
-                    return
-                ok, err = write_exclude_data(
-                    args.config_path,
-                    body.get("host"),
-                    body.get("database"),
-                    body.get("exclude_data"),
-                )
-                if not ok:
-                    send_json(self, 400, {"error": err})
-                    return
-                send_json(self, 200, {"ok": True})
+        def _post_scrub_save(self):
+            body = read_json_body(self, 1_000_000, json_errors=True)
+            if body is None:
                 return
-
-            m = re.match(r"^/api/jobs/([0-9a-f]{32})/cancel$", path)
-            if m:
-                with JOBS_LOCK:
-                    job = JOBS.get(m.group(1))
-                if job is None:
-                    self._send(404, "no such job")
-                    return
-                cancelled = job.cancel()
-                send_json(self, 200, {"ok": True, "cancelled": cancelled})
+            ok, err = write_scrub_manifest(
+                body.get("manifest_path"),
+                args.config_path,
+                body.get("manifest"),
+                body.get("host"),
+            )
+            if not ok:
+                send_json(self, 400, {"error": err})
                 return
+            send_json(self, 200, {"ok": True})
 
-            self._send(404, "not found")
+        def _post_analyze(self):
+            body = read_json_body(self, 8_000, json_errors=True)
+            if body is None:
+                return
+            host = body.get("host")
+            database = body.get("database")
+            if not isinstance(host, str) or not HOST_ALIAS_RE.match(host):
+                send_json(self, 400, {"error": "host must match the alias shape"})
+                return
+            if not isinstance(database, str) or not IDENT_RE.match(database):
+                send_json(self, 400, {"error": "database must match the db-name shape"})
+                return
+            no_pii = body.get("no_pii_scan")
+            if no_pii is not None and not isinstance(no_pii, bool):
+                send_json(self, 400, {"error": "no_pii_scan must be a boolean"})
+                return
+            code, stdout, stderr = run_analyze_json(
+                args.dbx_bin, host, database, no_pii_scan=bool(no_pii)
+            )
+            if code != 0:
+                send_json(self, 502, {
+                    "error": "dbx analyze failed",
+                    "exit_code": code,
+                    "stderr": stderr,
+                    "stdout": stdout,
+                })
+                return
+            try:
+                payload = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                send_json(self, 502, {
+                    "error": f"dbx analyze returned non-JSON: {e}",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                })
+                return
+            # Pass stderr through on success too — `dbx analyze` emits
+            # log_step "Scanning for PII..." / log_warn messages on
+            # stderr that the wizard's diagnostics panel surfaces.
+            # Empty string elided so the UI doesn't render an empty box.
+            if stderr:
+                payload["stderr"] = stderr
+            send_json(self, 200, payload)
+
+        def _post_analyze_exclude(self):
+            body = read_json_body(self, 1_000_000, json_errors=True)
+            if body is None:
+                return
+            ok, err = write_exclude_data(
+                args.config_path,
+                body.get("host"),
+                body.get("database"),
+                body.get("exclude_data"),
+            )
+            if not ok:
+                send_json(self, 400, {"error": err})
+                return
+            send_json(self, 200, {"ok": True})
+
+        def _post_job_cancel(self, job_id):
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+            if job is None:
+                self._send(404, "no such job")
+                return
+            cancelled = job.cancel()
+            send_json(self, 200, {"ok": True, "cancelled": cancelled})
 
         def log_message(self, format, *args):  # noqa: A002 - match base class signature
             _ = (format, args)  # silence per-request stderr logging
+
+        # ---- Route tables ----------------------------------------------
+        #
+        # path -> handler, one table per verb. Dict lookup for the exact
+        # paths; the tuple below carries the only parameterised routes there
+        # are (a job id in the middle of the path), matched in order after
+        # every exact path has missed. The id pattern is the same anchored
+        # 32-hex-char regex the if/elif chains used, so a malformed job id
+        # still falls through to the shared 404 rather than reaching a
+        # handler. Entries are plain functions here (the class body is still
+        # executing), and a dict lookup skips the descriptor protocol, so
+        # dispatch calls them as `handler(self)`.
+
+        GET_ROUTES = {
+            "/":                          _get_index,
+            "/api/backups":               _get_backups,
+            "/api/backups/download":      _get_backups_download,
+            "/api/audit-log":             _get_audit_log,
+            "/api/containers":            _get_containers,
+            "/api/restore/diff":          _get_restore_diff,
+            "/api/schedules":             _get_schedules,
+            "/api/storage/usage":         _get_storage_usage,
+            "/api/storage/test":          _get_storage_test,
+            "/api/storage/clean-preview": _get_storage_clean_preview,
+            "/api/dashboard":             _get_dashboard,
+            "/api/config":                _get_config,
+            "/api/vault/list":            _get_vault_list,
+            "/api/vault/get":             _get_vault_get,
+            "/api/vault/age-recipients":  _get_vault_age_recipients,
+            "/api/scrub/status":          _get_scrub_status,
+            "/api/scrub/manifest":        _get_scrub_manifest,
+        }
+
+        GET_PATTERNS = (
+            (re.compile(r"^/api/jobs/([0-9a-f]{32})/events$"), _get_job_events),
+        )
+
+        POST_ROUTES = {
+            "/save":                             _post_save,
+            "/api/config-save":                  _post_config_save,
+            "/api/restore":                      _post_restore,
+            "/api/backup":                       _post_backup,
+            "/api/host-test":                    _post_host_test,
+            "/api/storage/clean":                _post_storage_clean,
+            "/api/schedules":                    _post_schedules,
+            "/api/backups/delete":               _post_backups_delete,
+            "/api/vault/set":                    _post_vault_set,
+            "/api/vault/delete":                 _post_vault_delete,
+            "/api/vault/age-recipients/add":     _post_age_recipients_add,
+            "/api/vault/age-recipients/remove":  _post_age_recipients_remove,
+            "/api/scrub/init":                   _post_scrub_init,
+            "/api/scrub/check":                  _post_scrub_check,
+            "/api/scrub/save":                   _post_scrub_save,
+            "/api/analyze":                      _post_analyze,
+            "/api/analyze/exclude":              _post_analyze_exclude,
+        }
+
+        POST_PATTERNS = (
+            (re.compile(r"^/api/jobs/([0-9a-f]{32})/cancel$"), _post_job_cancel),
+        )
 
     return H
 
