@@ -149,3 +149,39 @@ _mk_backup() {
   [[ "$output" == dbx-pg16:* ]]
   grep -q '^tuple=frobnicate:frob:$' "$BUILD_LOG"
 }
+
+# --- DBX_IGNORE_EXTENSIONS / defaults.ignore_extensions (#see PR) -----------
+
+@test "pg_ensure_image_for_backup: ignored buildable extension → stock image, no build" {
+  export DBX_IGNORE_EXTENSIONS="pg_repack"
+  f=$(_mk_backup "app_20260101.sql.zst" '{"source_major_version":"17","source_extensions":["pg_trgm","pg_repack"]}')
+  run pg_ensure_image_for_backup "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"postgres:17-alpine"* ]]
+  [ ! -s "$BUILD_LOG" ]
+}
+
+@test "pg_ensure_image_for_backup: ignore list honors comma+space separation" {
+  export DBX_IGNORE_EXTENSIONS="pg_repack, pg_squeeze"
+  f=$(_mk_backup "app_20260101.sql.zst" '{"source_major_version":"17","source_extensions":["pg_repack"]}')
+  run pg_ensure_image_for_backup "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"postgres:17-alpine"* ]]
+}
+
+@test "pg_ensure_image_for_backup: config defaults.ignore_extensions works without env" {
+  unset DBX_IGNORE_EXTENSIONS
+  write_config '{"hosts":{},"defaults":{"ignore_extensions":"pg_repack"}}'
+  f=$(_mk_backup "app_20260101.sql.zst" '{"source_major_version":"17","source_extensions":["pg_repack"]}')
+  run pg_ensure_image_for_backup "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"postgres:17-alpine"* ]]
+}
+
+@test "pg_ensure_image_for_backup: ignore drops only listed extensions" {
+  export DBX_IGNORE_EXTENSIONS="pg_repack"
+  f=$(_mk_backup "app_20260101.sql.zst" '{"source_major_version":"17","source_extensions":["pg_repack","vector"]}')
+  run pg_ensure_image_for_backup "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pgvector/pgvector:pg17"* ]]
+}

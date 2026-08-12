@@ -305,8 +305,16 @@ pg_backup() {
     fi
   fi
 
-  # Create metadata JSON
+  # Create metadata JSON. The extension list and (especially) the scrub
+  # schema scale with the database — a wide-enough schema pushed the
+  # --argjson blobs past the kernel's per-argument limit, and the E2BIG
+  # exec failure left a 0-byte meta file. Anything schema-sized goes to jq
+  # via --slurpfile (temp files), never argv.
   local meta_file="${output_file}.meta.json"
+  local _exts_tmp _schema_tmp
+  _exts_tmp=$(mktemp) && _schema_tmp=$(mktemp)
+  printf '%s' "$src_exts_json" > "$_exts_tmp"
+  printf '%s' "$scrub_schema_json" > "$_schema_tmp"
   jq -n \
     --arg host "$host" \
     --arg database "$database" \
@@ -318,8 +326,8 @@ pg_backup() {
     --arg src_flavor "postgres" \
     --arg src_major "$src_major" \
     --arg backup_mode "${backup_mode:-full}" \
-    --argjson src_exts "$src_exts_json" \
-    --argjson scrub_schema "$scrub_schema_json" \
+    --slurpfile src_exts "$_exts_tmp" \
+    --slurpfile scrub_schema "$_schema_tmp" \
     --argjson globals "$globals_captured" \
     '{
       host: $host,
@@ -332,10 +340,11 @@ pg_backup() {
       source_flavor: $src_flavor,
       source_major_version: $src_major,
       backup_mode: $backup_mode,
-      source_extensions: $src_exts,
-      scrub_schema: $scrub_schema,
+      source_extensions: ($src_exts[0] // []),
+      scrub_schema: ($scrub_schema[0] // {}),
       globals: $globals
     }' > "$meta_file"
+  rm -f "$_exts_tmp" "$_schema_tmp"
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
 
@@ -436,12 +445,44 @@ pg_ensure_custom_image() {
   pg_build_custom_image "$major" "$tag" "$resolved"
 }
 
+# Extensions the operator declared safe to ignore on restore: maintenance
+# tooling (pg_repack, pg_cron, …) the application never calls at runtime.
+# They are dropped from image resolution — so a backup whose only non-contrib
+# extension is ignored restores onto the stock image instead of demanding a
+# custom one — and their CREATE/COMMENT statements are filtered out of
+# streaming restores, which run single-transaction and would otherwise roll
+# back everything on the missing .so.
+# Sources: DBX_IGNORE_EXTENSIONS (space/comma-separated) or config
+#   { "defaults": { "ignore_extensions": "pg_repack" } }
+# Prints a single-space-separated list (empty tokens from "a, b" or
+# doubled separators are collapsed — downstream builds an awk alternation
+# from this, and an empty token would yield "||").
+pg_ignored_extensions() {
+  local raw="${DBX_IGNORE_EXTENSIONS:-$(get_config_value '.defaults.ignore_extensions' 2>/dev/null || echo '')}"
+  local -a toks=()
+  read -ra toks <<< "${raw//,/ }"
+  printf '%s' "${toks[*]+${toks[*]}}"
+}
+
+# Filter ignored-extension statements from a plain-format restore stream
+# (stdin → stdout). COPY data blocks pass through untouched: a data row
+# that happens to start with "CREATE EXTENSION ..." is table content, not
+# a statement, and must not be dropped. Args: $1=awk statement pattern
+pg_filter_ignored_statements() {
+  awk -v pat="$1" '
+    in_copy { print; if ($0 == "\\.") in_copy = 0; next }
+    /^COPY .* FROM stdin;$/ { in_copy = 1; print; next }
+    $0 ~ pat { next }
+    { print }'
+}
+
 # Ensure POSTGRES_CONTAINER is running an image compatible with $backup_file.
 # Reads source_major_version + source_extensions from the backup's
 # .meta.json (handles .zst / .age / .gpg suffix layering); falls back to
 # the default image when meta is missing (legacy backups). Honors
-# DBX_POSTGRES_IMAGE override and defaults.postgres_image config. For a
-# buildable third-party extension set, builds (and caches) a custom image.
+# DBX_POSTGRES_IMAGE override and defaults.postgres_image config, and drops
+# pg_ignored_extensions from the requirement set. For a buildable third-party
+# extension set, builds (and caches) a custom image.
 # Returns non-zero on image pick failure or container-state conflict.
 # Args: $1=backup file path
 pg_ensure_image_for_backup() {
@@ -456,6 +497,18 @@ pg_ensure_image_for_backup() {
   else
     src_major="unknown"
     src_exts=""
+  fi
+
+  local ignored kept=() dropped=() _e
+  ignored=" $(pg_ignored_extensions) "
+  if [[ "$ignored" != "  " && -n "$src_exts" ]]; then
+    for _e in $src_exts; do
+      if [[ "$ignored" == *" $_e "* ]]; then dropped+=("$_e"); else kept+=("$_e"); fi
+    done
+    if [[ ${#dropped[@]} -gt 0 ]]; then
+      log_info "Ignoring extension(s) for image resolution: ${dropped[*]} (DBX_IGNORE_EXTENSIONS / defaults.ignore_extensions)"
+      src_exts="${kept[*]+${kept[*]}}"
+    fi
   fi
 
   override="${DBX_POSTGRES_IMAGE:-$(get_config_value '.defaults.postgres_image' 2>/dev/null || echo '')}"
@@ -872,6 +925,17 @@ pg_restore_backup_streaming() {
   target_psql+=("$target_container" psql -U "$target_user" -d "$target_db"
                 -v ON_ERROR_STOP=1 -1 -q)
 
+  # Statements for ignored extensions are filtered from the stream: the
+  # target may not carry their .so, and under -1 ON_ERROR_STOP one failing
+  # CREATE EXTENSION would roll back the whole restore. awk (not grep -v)
+  # so an all-filtered stream can't turn into a pipefail exit.
+  local -a ignore_filter=(cat)
+  local _ignored
+  _ignored="$(pg_ignored_extensions)"
+  if [[ -n "$_ignored" ]]; then
+    ignore_filter=(pg_filter_ignored_statements "^(CREATE EXTENSION( IF NOT EXISTS)?|COMMENT ON EXTENSION) \"?(${_ignored// /|})\"?[ ;]")
+  fi
+
   local rc=0
   if [[ -n "$transform_script" ]]; then
     local -a transform_argv=()
@@ -880,12 +944,14 @@ pg_restore_backup_streaming() {
       < <(transform_exec_argv "$transform_inherit_env" "$transform_script")
     { docker exec "$POSTGRES_CONTAINER" \
         pg_restore --no-owner --no-privileges -f - "$in_container_dump" \
+        | "${ignore_filter[@]}" \
         | "${transform_argv[@]}" \
         | PGPASSWORD="$target_pass" "${target_psql[@]}"
     } || rc=$?
   else
     { docker exec "$POSTGRES_CONTAINER" \
         pg_restore --no-owner --no-privileges -f - "$in_container_dump" \
+        | "${ignore_filter[@]}" \
         | PGPASSWORD="$target_pass" "${target_psql[@]}"
     } || rc=$?
   fi
