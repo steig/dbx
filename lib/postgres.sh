@@ -313,8 +313,8 @@ pg_backup() {
   local meta_file="${output_file}.meta.json"
   local _exts_tmp _schema_tmp
   _exts_tmp=$(mktemp) && _schema_tmp=$(mktemp)
-  printf '%s' "${src_exts_json:-[]}" > "$_exts_tmp"
-  printf '%s' "${scrub_schema_json:-\{\}}" > "$_schema_tmp"
+  printf '%s' "$src_exts_json" > "$_exts_tmp"
+  printf '%s' "$scrub_schema_json" > "$_schema_tmp"
   jq -n \
     --arg host "$host" \
     --arg database "$database" \
@@ -454,10 +454,26 @@ pg_ensure_custom_image() {
 # back everything on the missing .so.
 # Sources: DBX_IGNORE_EXTENSIONS (space/comma-separated) or config
 #   { "defaults": { "ignore_extensions": "pg_repack" } }
-# Prints a space-separated list.
+# Prints a single-space-separated list (empty tokens from "a, b" or
+# doubled separators are collapsed — downstream builds an awk alternation
+# from this, and an empty token would yield "||").
 pg_ignored_extensions() {
   local raw="${DBX_IGNORE_EXTENSIONS:-$(get_config_value '.defaults.ignore_extensions' 2>/dev/null || echo '')}"
-  printf '%s' "${raw//,/ }"
+  local -a toks=()
+  read -ra toks <<< "${raw//,/ }"
+  printf '%s' "${toks[*]+${toks[*]}}"
+}
+
+# Filter ignored-extension statements from a plain-format restore stream
+# (stdin → stdout). COPY data blocks pass through untouched: a data row
+# that happens to start with "CREATE EXTENSION ..." is table content, not
+# a statement, and must not be dropped. Args: $1=awk statement pattern
+pg_filter_ignored_statements() {
+  awk -v pat="$1" '
+    in_copy { print; if ($0 == "\\.") in_copy = 0; next }
+    /^COPY .* FROM stdin;$/ { in_copy = 1; print; next }
+    $0 ~ pat { next }
+    { print }'
 }
 
 # Ensure POSTGRES_CONTAINER is running an image compatible with $backup_file.
@@ -914,11 +930,10 @@ pg_restore_backup_streaming() {
   # CREATE EXTENSION would roll back the whole restore. awk (not grep -v)
   # so an all-filtered stream can't turn into a pipefail exit.
   local -a ignore_filter=(cat)
-  local _ignored_pat
-  _ignored_pat="$(pg_ignored_extensions)"
-  if [[ -n "${_ignored_pat// /}" ]]; then
-    _ignored_pat="${_ignored_pat// /|}"
-    ignore_filter=(awk -v pat="^(CREATE EXTENSION( IF NOT EXISTS)?|COMMENT ON EXTENSION) \"?(${_ignored_pat})\"?[ ;]" '$0 !~ pat')
+  local _ignored
+  _ignored="$(pg_ignored_extensions)"
+  if [[ -n "$_ignored" ]]; then
+    ignore_filter=(pg_filter_ignored_statements "^(CREATE EXTENSION( IF NOT EXISTS)?|COMMENT ON EXTENSION) \"?(${_ignored// /|})\"?[ ;]")
   fi
 
   local rc=0

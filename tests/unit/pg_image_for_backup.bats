@@ -161,8 +161,8 @@ _mk_backup() {
   [ ! -s "$BUILD_LOG" ]
 }
 
-@test "pg_ensure_image_for_backup: ignore list honors comma separation" {
-  export DBX_IGNORE_EXTENSIONS="pg_repack,pg_squeeze"
+@test "pg_ensure_image_for_backup: ignore list honors comma+space separation" {
+  export DBX_IGNORE_EXTENSIONS="pg_repack, pg_squeeze"
   f=$(_mk_backup "app_20260101.sql.zst" '{"source_major_version":"17","source_extensions":["pg_repack"]}')
   run pg_ensure_image_for_backup "$f"
   [ "$status" -eq 0 ]
