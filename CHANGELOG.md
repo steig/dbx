@@ -4,6 +4,8 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-08-12
+
 ### Added
 
 - **Ignorable extensions on restore: `DBX_IGNORE_EXTENSIONS` (env, comma/space list) and `defaults.ignore_extensions` (config) (#242).** Extensions listed there are dropped from restore image resolution, and their `CREATE EXTENSION` / `COMMENT ON EXTENSION` statements are filtered out of streaming (`--transform`/`--into`) restores. The case that forced it: a prod database carrying `pg_repack` — maintenance tooling the application never calls — made every preview-baseline restore demand a custom `dbx-pg17` image. The shared target container is alpine-initialized on a volume; the custom image is Debian, and swapping glibc for musl over the same data dir risks collation-index corruption, so the demand could not be satisfied in place. Streaming restores compounded it: `psql -1 ON_ERROR_STOP=1` turns the one missing `.so` into a rollback of the whole restore. The stream filter (`pg_filter_ignored_statements`) is COPY-aware — a data row whose text begins with `CREATE EXTENSION` is table content and passes through untouched — and the list normalizer collapses `"pg_repack, pg_cron"` to single-space tokens, because downstream builds an awk alternation from it and an empty token yields `||`, which BSD awk rejects. Covered by `tests/unit/pg_ignore_filter.bats` and four new image-resolution cases.
