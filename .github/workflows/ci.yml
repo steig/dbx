@@ -104,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -132,7 +132,7 @@ jobs:
       # than trusting the runner image: macos-latest stopped shipping a usable
       # python3, which turned the whole file red and stretched the job to ~31
       # minutes of identical timeouts. Same version the ruff job pins.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
