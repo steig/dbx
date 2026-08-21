@@ -261,8 +261,11 @@ mysql_backup() {
   if [[ "$backup_mode" != "schema" ]]; then
   log_info "Dumping data..."
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "mysqldump (data pass) started"
+  # ${arr[@]+...} guards here and below: expanding an empty array errors
+  # under set -u on bash < 4.4 (macOS 3.2, Amazon Linux 2's 4.2). Both
+  # arrays are empty when the database has exclude_data: [].
   local ignore_opts=()
-  for table in "${exclude_tables[@]}"; do
+  for table in ${exclude_tables[@]+"${exclude_tables[@]}"}; do
     ignore_opts+=(--ignore-table="${database}.${table}")
   done
 
@@ -276,7 +279,7 @@ mysql_backup() {
         --no-create-info \
         --skip-triggers \
         $verbose_flag \
-        "${ignore_opts[@]}" \
+        ${ignore_opts[@]+"${ignore_opts[@]}"} \
         "$database" 2> >(tee -a "$err_file" >&2) > "$tmpdir/data.sql"; then
       cat "$err_file" >&2
       docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
@@ -293,7 +296,7 @@ mysql_backup() {
         --no-create-info \
         --skip-triggers \
         $verbose_flag \
-        "${ignore_opts[@]}" \
+        ${ignore_opts[@]+"${ignore_opts[@]}"} \
         "$database" 2>"$err_file" > "$tmpdir/data.sql"; then
       cat "$err_file" >&2
       docker exec "$MYSQL_CONTAINER" rm -f $container_cnf 2>/dev/null
