@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dbx backup` died with `exclude_opts[@]: unbound variable` for any postgres database configured with an empty `exclude_data: []` (#244).** Expanding an empty array errors under `set -u` on bash < 4.4 — macOS ships 3.2, Amazon Linux 2 ships 4.2 — so the first database configured with *no* excludes broke, while databases with non-empty exclude lists never hit it. Fixed with the `${arr[@]+"${arr[@]}"}` guard the codebase already uses elsewhere, at the pg_dump call site and at the other reachable-with-an-empty-array sites the audit turned up: the mysqldump ignore-table loop and argv (same empty-`exclude_data` trigger, mysql engine), `dbx clean --older-than` iterating a database dir with no backup files, and `pick_postgres_image`'s extension loop when the source database reports no extensions. Other `[@]` expansions in the tree are statically non-empty or behind `${#arr[@]}` count guards.
+
 ## [0.41.0] - 2026-08-12
 
 ### Added
