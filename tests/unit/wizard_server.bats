@@ -1357,7 +1357,7 @@ JSONL
   [[ "$output" == *"\"filtered\""* ]]
 }
 
-@test "GET /api/audit-log?q=prod-mysql regex-matches over entry text" {
+@test "GET /api/audit-log?q=prod-mysql substring-matches over entry text" {
   cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
 {"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod-mysql","database":"orders"}
 {"timestamp":"2026-05-02T11:00:00Z","action":"backup","outcome":"success","db_host":"stage-pg","database":"orders"}
@@ -1370,16 +1370,50 @@ JSONL
   [[ "$output" != *"stage-pg"* ]]
 }
 
-@test "GET /api/audit-log?q=[[[[ returns 400 with invalid-regex error" {
+@test "GET /api/audit-log?q= is case-insensitive" {
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod-mysql","database":"orders"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"backup","outcome":"success","db_host":"stage-pg","database":"orders"}
+JSONL
+  run curl -s "$(api /api/audit-log)&q=PROD-MYSQL"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"prod-mysql"* ]]
+  [[ "$output" != *"stage-pg"* ]]
+}
+
+@test "GET /api/audit-log?q= treats regex metacharacters as literal text" {
+  # `q` is a literal substring match, never compiled as a regex (#230).
+  # `.*` as a regex would match every row; as a literal it matches none.
+  cat > "$WIZ_AUDIT_DIR/audit.log" <<'JSONL'
+{"timestamp":"2026-05-01T10:00:00Z","action":"backup","outcome":"success","db_host":"prod-mysql","database":"orders"}
+{"timestamp":"2026-05-02T11:00:00Z","action":"backup","outcome":"success","db_host":"stage-pg","database":"orders"}
+JSONL
+  run curl -s "$(api /api/audit-log)&q=.%2A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"filtered\": 0"* ]]
+  # A formerly-invalid regex like `[[[[` is now just a valid literal: 200.
+  run curl -s -o /dev/null -w "%{http_code}" "$(api /api/audit-log)&q=%5B%5B%5B%5B"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+  # A classic ReDoS pattern is inert as a literal — the request returns
+  # immediately instead of pinning a server thread.
+  run curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+    "$(api /api/audit-log)&q=%28a%2B%29%2B%24"
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
+@test "GET /api/audit-log?q= longer than 200 chars returns 400" {
   : > "$WIZ_AUDIT_DIR/audit.log"
-  # URL-encode the brackets to keep curl from treating them specially.
-  run curl -s -o /tmp/wiz_invalid_regex_body -w "%{http_code}" \
-    "$(api /api/audit-log)&q=%5B%5B%5B%5B"
+  local long_q
+  long_q="$(printf 'a%.0s' {1..201})"
+  run curl -s -o /tmp/wiz_q_too_long_body -w "%{http_code}" \
+    "$(api /api/audit-log)&q=$long_q"
   [ "$status" -eq 0 ]
   [ "$output" = "400" ]
-  run cat /tmp/wiz_invalid_regex_body
-  [[ "$output" == *"invalid regex"* ]]
-  rm -f /tmp/wiz_invalid_regex_body
+  run cat /tmp/wiz_q_too_long_body
+  [[ "$output" == *"q too long"* ]]
+  rm -f /tmp/wiz_q_too_long_body
 }
 
 @test "GET /api/audit-log?outcome=failure filters to failures only" {

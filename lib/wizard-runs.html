@@ -5,9 +5,10 @@
   backups are CLI/cron only, so the user has no other window into past
   successes/failures from inside the wizard — this view closes that gap.
 
-  Filtering: action / outcome dropdowns + date range + a regex `q=` are
-  applied server-side via /api/audit-log. Free-text "host filter" still
-  runs client-side because that's the common interactive case.
+  Filtering: action / outcome dropdowns + date range + a plain-text `q=`
+  substring search are applied server-side via /api/audit-log. Free-text
+  "host filter" still runs client-side because that's the common
+  interactive case.
 
   Reads /api/audit-log, refreshes on tab switch.
 -->
@@ -36,7 +37,7 @@
   <div class="toolbar">
     <div class="search">
       <input type="search" x-model.debounce.300ms="filter" @input="load()"
-             placeholder="Search runs (regex over message text, or plain text)…">
+             placeholder="Search runs (plain text)…">
     </div>
     <!-- Action-type filter. Wired to the existing actionFilter state; the
          server allowlists backup|restore and we fold the rest into __other__. -->
@@ -66,11 +67,6 @@
             title="Quick filter: failed restores against a prod-mysql host">
       Failed restores against prod-mysql
     </button>
-    <template x-if="regexInvalid">
-      <span class="card__hint" style="color: var(--amber);">
-        (invalid regex — searching as text)
-      </span>
-    </template>
   </div>
 
   <template x-if="loading">
@@ -148,10 +144,6 @@
       // as 0/0, which is fine because the table is hidden behind loading.
       total: 0,
       filteredCount: 0,
-      // Server replies 400 with "invalid regex: ..." when the q= pattern
-      // won't compile. We catch that and tell the UI to fall back to plain
-      // substring matching on the client, plus show a small hint.
-      regexInvalid: false,
 
       init() {
         // Lazy-load: only hit /api/audit-log when the user actually opens
@@ -163,7 +155,6 @@
 
       async load() {
         this.loading = true;
-        this.regexInvalid = false;
         try {
           // When the dropdown is set to "__other__" we still fetch with
           // action='' (all), then filter client-side. That keeps the
@@ -178,23 +169,15 @@
           if (this.outcomeFilter) params.set('outcome', this.outcomeFilter);
           if (this.fromDate) params.set('from', this.fromDate);
           if (this.toDate) params.set('to', this.toDate);
-          // Server-side regex search. If the user's pattern is an invalid
-          // regex the server replies 400; we transparently retry without
-          // the q= param and remember the failure so the client-side
-          // filter() can do plain-substring matching on it instead.
+          // Server-side plain-text substring search (case-insensitive).
+          // Any text is a valid query — the server no longer compiles it
+          // as a regex (ReDoS, #230) — so no invalid-pattern fallback is
+          // needed.
           const q = this.filter.trim();
           if (q) params.set('q', q);
 
           const url = Alpine.store('dbx').api('/audit-log') + '&' + params.toString();
-          let r = await fetch(url);
-          if (r.status === 400 && q) {
-            // Likely an invalid regex. Retry without q= so the user still
-            // sees results, then client-side substring-filter on q below.
-            this.regexInvalid = true;
-            params.delete('q');
-            const retryUrl = Alpine.store('dbx').api('/audit-log') + '&' + params.toString();
-            r = await fetch(retryUrl);
-          }
+          const r = await fetch(url);
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const body = await r.json();
           // Envelope shape from format=v2. Defensive: also tolerate the
@@ -224,13 +207,6 @@
         if (this.actionFilter === '__other__') {
           rows = rows.filter(r => r.action !== 'backup' && r.action !== 'restore');
         }
-        // If the server rejected our regex, fall back to a plain substring
-        // match against the JSON-stringified row. Same haystack shape the
-        // server would have used, just client-side.
-        if (this.regexInvalid && this.filter) {
-          const f = this.filter.toLowerCase();
-          rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(f));
-        }
         return this.applySort(rows);
       },
 
@@ -247,8 +223,7 @@
 
       applyPresetFailedProdRestores() {
         // Spec-defined preset: action=restore, outcome=failure, q=prod-mysql.
-        // Setting q= here triggers the server-side regex match — `prod-mysql`
-        // is a valid plain pattern so no fallback fires.
+        // Setting q= here triggers the server-side substring match.
         this.actionFilter = 'restore';
         this.outcomeFilter = 'failure';
         this.filter = 'prod-mysql';
