@@ -205,7 +205,9 @@ pg_backup() {
     schema) pg_opts+=(--section=pre-data --section=post-data) ;;
     data)   pg_opts+=(--section=data) ;;
   esac
-  pg_opts+=("${exclude_opts[@]}")
+  # ${arr[@]+...} guard: expanding an empty array errors under set -u on
+  # bash < 4.4 (macOS 3.2, Amazon Linux 2's 4.2). Empty when exclude_data: [].
+  pg_opts+=(${exclude_opts[@]+"${exclude_opts[@]}"})
 
   # Get compression level from config
   local comp_level

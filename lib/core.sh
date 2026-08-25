@@ -1601,7 +1601,9 @@ pick_postgres_image() {
   local ext
   local _raw_exts=()
   IFS=' ' read -ra _raw_exts <<< "$extensions"
-  for ext in "${_raw_exts[@]}"; do
+  # Guarded like _names in resolve_extension_registry: empty array expansion
+  # errors under set -u on bash < 4.4.
+  for ext in ${_raw_exts[@]+"${_raw_exts[@]}"}; do
     [[ -z "$ext" ]] && continue
     [[ "$ext" == "plpgsql" ]] && continue
     ext_list+=("$ext")
