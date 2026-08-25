@@ -4,6 +4,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+### Security
+
+- **The wizard's Runs search no longer compiles caller-supplied regexes (#230).** `/api/audit-log?q=` handed the `q` string to `re.compile`, and stdlib `re` has no timeout — a seven-character pattern like `(a+)+$` backtracks catastrophically on a moderately long log line, pinning a server thread indefinitely; with `dbx serve --bind` exposed beyond loopback and one thread per request, repeated requests exhaust the pool. The 200-char length cap did not help, because backtracking is a function of pattern *structure*, not length (CodeQL: `py/regex-injection`). `q=` is now a case-insensitive literal substring match against the stringified entry — the feature is a log filter, not a regex playground — so every query string is valid (formerly-invalid patterns like `[[[[` return 200 and match literally) and regex metacharacters lose their meaning: `q=.*` matches rows containing the literal text `.*`. The length cap stays as a plain input bound, and the Runs view drops its now-dead invalid-regex retry fallback.
+
 ### Fixed
 
 - **`dbx backup` died with `exclude_opts[@]: unbound variable` for any postgres database configured with an empty `exclude_data: []` (#244).** Expanding an empty array errors under `set -u` on bash < 4.4 — macOS ships 3.2, Amazon Linux 2 ships 4.2 — so the first database configured with *no* excludes broke, while databases with non-empty exclude lists never hit it. Fixed with the `${arr[@]+"${arr[@]}"}` guard the codebase already uses elsewhere, at the pg_dump call site and at the other reachable-with-an-empty-array sites the audit turned up: the mysqldump ignore-table loop and argv (same empty-`exclude_data` trigger, mysql engine), `dbx clean --older-than` iterating a database dir with no backup files, and `pick_postgres_image`'s extension loop when the source database reports no extensions. Other `[@]` expansions in the tree are statically non-empty or behind `${#arr[@]}` count guards.
