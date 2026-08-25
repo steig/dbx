@@ -772,10 +772,10 @@ AUDIT_ACTION_ALLOWLIST = {
 # 400 instead of silently zero-matching.
 AUDIT_OUTCOME_ALLOWLIST = {"success", "failure"}
 
-# Cap regex pattern length. ReDoS protection: a 200-char pattern is plenty
-# for "prod.*mysql|error" style queries but bounded enough that Python's
-# `re` engine won't catastrophically backtrack on huge crafted patterns.
-AUDIT_REGEX_MAX_LEN = 200
+# Cap `q=` search-string length. The search is a literal substring match
+# (not a regex — user-supplied regexes are a ReDoS vector, see #230), so
+# this only bounds obviously-absurd URLs, not engine behavior.
+AUDIT_Q_MAX_LEN = 200
 
 
 def _parse_audit_date_bound(value: str, end_of_day: bool):
@@ -807,7 +807,7 @@ def _parse_audit_date_bound(value: str, end_of_day: bool):
 
 def list_audit_log(audit_dir: str, action: str, limit: int,
                    from_ts: str | None = None, to_ts: str | None = None,
-                   pattern: re.Pattern | None = None,
+                   q: str | None = None,
                    outcome: str | None = None):
     """Return ({"entries": [...], "total": N, "filtered": M}) where entries
     are JSON-parsed audit-log rows, newest first, after applying all filters.
@@ -816,7 +816,9 @@ def list_audit_log(audit_dir: str, action: str, limit: int,
       - action:   exact match on entry["action"] (legacy, allowlisted).
       - from_ts:  entry["timestamp"] >= from_ts (lexicographic ISO compare).
       - to_ts:    entry["timestamp"] <= to_ts.
-      - pattern:  pre-compiled regex tested against json.dumps(entry).
+      - q:        case-insensitive literal substring tested against
+                  json.dumps(entry). Deliberately NOT a regex: compiling
+                  caller-supplied patterns is a ReDoS vector (#230).
       - outcome:  exact match on entry["outcome"] (allowlisted).
 
     Result fields:
@@ -888,13 +890,13 @@ def list_audit_log(audit_dir: str, action: str, limit: int,
             continue
         if to_ts and (not isinstance(ts, str) or ts > to_ts):
             continue
-        if pattern is not None:
-            # Stringify the whole entry so the regex can match any field
+        if q:
+            # Stringify the whole entry so the search can match any field
             # (host, db, error message, etc.). Sort keys so the haystack is
-            # deterministic and the user's regex behaves the same way every
+            # deterministic and the user's query behaves the same way every
             # call regardless of how core.sh emitted the JSON.
             haystack = json.dumps(entry, sort_keys=True)
-            if not pattern.search(haystack):
+            if q.lower() not in haystack.lower():
                 continue
         filtered_entries.append(entry)
 
@@ -2677,22 +2679,15 @@ def make_handler(args):
             to_raw = (qs.get("to", [""]) or [""])[0]
             from_ts = _parse_audit_date_bound(from_raw, end_of_day=False)
             to_ts = _parse_audit_date_bound(to_raw, end_of_day=True)
-            # Optional regex over stringified entries. The UI sends the
-            # user's raw input; the server compiles it under Python re.
-            # On compile error: 400. On invalid-but-syntactically-OK
-            # patterns: the regex just won't match anything (caller's
-            # problem). Capped at AUDIT_REGEX_MAX_LEN to bound ReDoS.
+            # Optional literal substring search over stringified entries,
+            # case-insensitive. Deliberately NOT a regex: compiling a
+            # caller-supplied pattern lets a single request pin a server
+            # thread via catastrophic backtracking, and stdlib `re` has no
+            # timeout (#230). Length-capped only to bound absurd URLs.
             q_raw = (qs.get("q", [""]) or [""])[0]
-            pattern = None
-            if q_raw:
-                if len(q_raw) > AUDIT_REGEX_MAX_LEN:
-                    send_json(self, 400, {"error": f"q pattern too long (max {AUDIT_REGEX_MAX_LEN} chars)"})
-                    return
-                try:
-                    pattern = re.compile(q_raw)
-                except re.error as e:
-                    send_json(self, 400, {"error": f"invalid regex: {e}"})
-                    return
+            if len(q_raw) > AUDIT_Q_MAX_LEN:
+                send_json(self, 400, {"error": f"q too long (max {AUDIT_Q_MAX_LEN} chars)"})
+                return
             # Backwards-compat shape: only the legacy params (`action`,
             # `limit`) means "return bare array" — that's what the old
             # tests + any external consumers depend on. The moment any of
@@ -2706,7 +2701,7 @@ def make_handler(args):
             result = list_audit_log(
                 args.audit_dir, action, limit,
                 from_ts=from_ts, to_ts=to_ts,
-                pattern=pattern, outcome=outcome or None,
+                q=q_raw or None, outcome=outcome or None,
             )
             if use_envelope:
                 send_json(self, 200, result)
