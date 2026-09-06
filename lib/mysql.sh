@@ -359,9 +359,17 @@ mysql_backup() {
     scrub_schema_json=$(printf '%s\n' "$scrub_schema_tsv" | scrub_schema_tsv_to_json 2>/dev/null || echo "{}")
   fi
 
-  # Create metadata JSON
+  # Create metadata JSON. The scrub schema scales with the database — a
+  # wide-enough schema pushed the --argjson blob past the kernel's
+  # per-argument limit (E2BIG), which failed jq silently mid-pipe and left
+  # a 0-byte meta file while the backup itself still reported success.
+  # Anything schema-sized goes to jq via --slurpfile (a temp file), never
+  # argv. Mirrors the same fix in pg_backup.
   local meta_file="${output_file}.meta.json"
-  jq -n \
+  local _schema_tmp
+  _schema_tmp=$(mktemp)
+  printf '%s' "$scrub_schema_json" > "$_schema_tmp"
+  if ! jq -n \
     --arg host "$host" \
     --arg database "$database" \
     --arg db_type "mysql" \
@@ -374,7 +382,7 @@ mysql_backup() {
     --arg src_major "$src_major" \
     --arg src_minor "$src_minor" \
     --arg backup_mode "${backup_mode:-full}" \
-    --argjson scrub_schema "$scrub_schema_json" \
+    --slurpfile scrub_schema "$_schema_tmp" \
     '{
       host: $host,
       database: $database,
@@ -389,8 +397,20 @@ mysql_backup() {
       source_minor_version: $src_minor,
       backup_mode: $backup_mode,
       source_extensions: [],
-      scrub_schema: $scrub_schema
-    }' > "$meta_file"
+      scrub_schema: ($scrub_schema[0] // {})
+    }' > "$meta_file"; then
+    rm -f "$_schema_tmp" "$meta_file"
+    audit_backup "$host" "$database" "failure"
+    log_error "Failed to write backup metadata: $meta_file"
+    return 1
+  fi
+  rm -f "$_schema_tmp"
+  if ! meta_json_is_valid "$meta_file"; then
+    rm -f "$meta_file"
+    audit_backup "$host" "$database" "failure"
+    log_error "Backup metadata is missing or invalid: $meta_file"
+    return 1
+  fi
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
 
@@ -401,7 +421,8 @@ mysql_backup() {
     cat "$err_file" >&2
     rm -f "$meta_file"
     audit_backup "$host" "$database" "failure"
-    die "Failed to move backup into place: $output_file"
+    log_error "Failed to move backup into place: $output_file"
+    return 1
   fi
 
   # Audit log

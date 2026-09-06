@@ -155,6 +155,59 @@ seed_mysql_db() {
     mysql -u root "$db" >/dev/null
 }
 
+# Create a database whose combined column count produces a scrub_schema
+# JSON blob well past the sizes that broke #248: Linux caps a single
+# execve() argument at 128KB (MAX_ARG_STRLEN) and macOS caps total argv
+# around 1MB (ARG_MAX). $tables x $cols_per_table (default 18x900 -> ~1.3MB
+# of scrub_schema JSON) clears both with margin. MyISAM's per-table column
+# count is still bounded by MySQL's internal row-definition size (not just
+# the 4096-column hard cap) — with 44-byte zero-padded names, ~1000
+# columns/table is the practical ceiling before "Table definition is too
+# large" (error 1117), so width is spread across more tables instead of
+# fewer, wider ones.
+seed_mysql_wide_schema() {
+  local db="$1" tables="${2:-18}" cols_per_table="${3:-900}"
+  docker exec -e MYSQL_PWD=devpassword mysql-dbx \
+    mysql -u root -e "DROP DATABASE IF EXISTS \`$db\`; CREATE DATABASE \`$db\`;" >/dev/null
+
+  local sql="" t i cols colname
+  for ((t = 1; t <= tables; t++)); do
+    cols=""
+    for ((i = 1; i <= cols_per_table; i++)); do
+      printf -v colname 'col_%040d' "$i"
+      cols+="\`${colname}\` TINYINT NULL,"
+    done
+    cols="${cols%,}"
+    sql+="CREATE TABLE \`wide_${t}\` (${cols}) ENGINE=MyISAM;"
+  done
+  printf '%s' "$sql" | docker exec -i -e MYSQL_PWD=devpassword mysql-dbx \
+    mysql -u root "$db"
+}
+
+# Postgres counterpart of seed_mysql_wide_schema. Column names stay well
+# under NAMEDATALEN (63 bytes); table count/width tuned for ~1.6MB of
+# scrub_schema JSON with the same default 15x1500.
+seed_postgres_wide_schema() {
+  local db="$1" tables="${2:-15}" cols_per_table="${3:-1500}"
+  docker exec -e PGPASSWORD=devpassword postgres-dbx \
+    psql -U postgres -c "DROP DATABASE IF EXISTS \"$db\"" >/dev/null 2>&1
+  docker exec -e PGPASSWORD=devpassword postgres-dbx \
+    psql -U postgres -c "CREATE DATABASE \"$db\"" >/dev/null
+
+  local sql="" t i cols colname
+  for ((t = 1; t <= tables; t++)); do
+    cols=""
+    for ((i = 1; i <= cols_per_table; i++)); do
+      printf -v colname 'col_%030d' "$i"
+      cols+="\"${colname}\" smallint,"
+    done
+    cols="${cols%,}"
+    sql+="CREATE TABLE \"wide_${t}\" (${cols});"
+  done
+  printf '%s' "$sql" | docker exec -i -e PGPASSWORD=devpassword postgres-dbx \
+    psql -U postgres -d "$db" >/dev/null
+}
+
 # Count rows in a postgres table.
 pg_row_count() {
   local db="$1" table="$2"

@@ -317,7 +317,7 @@ pg_backup() {
   _exts_tmp=$(mktemp) && _schema_tmp=$(mktemp)
   printf '%s' "$src_exts_json" > "$_exts_tmp"
   printf '%s' "$scrub_schema_json" > "$_schema_tmp"
-  jq -n \
+  if ! jq -n \
     --arg host "$host" \
     --arg database "$database" \
     --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
@@ -345,8 +345,19 @@ pg_backup() {
       source_extensions: ($src_exts[0] // []),
       scrub_schema: ($scrub_schema[0] // {}),
       globals: $globals
-    }' > "$meta_file"
+    }' > "$meta_file"; then
+    rm -f "$_exts_tmp" "$_schema_tmp" "$meta_file"
+    audit_backup "$host" "$database" "failure"
+    log_error "Failed to write backup metadata: $meta_file"
+    return 1
+  fi
   rm -f "$_exts_tmp" "$_schema_tmp"
+  if ! meta_json_is_valid "$meta_file"; then
+    rm -f "$meta_file"
+    audit_backup "$host" "$database" "failure"
+    log_error "Backup metadata is missing or invalid: $meta_file"
+    return 1
+  fi
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
 

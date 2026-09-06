@@ -68,6 +68,18 @@ die() {
   exit 1
 }
 
+# A backup's .meta.json must never be finalized empty or malformed — see
+# #248 (mysql) / #242 (postgres): a wide-enough scrub_schema pushed jq's
+# --argjson blob past the kernel's per-argument limit, jq failed with
+# E2BIG, and the 0-byte sidecar was still reported as a successful backup.
+# Callers gate the mv-into-place on this rather than trusting jq's exit
+# status alone, since a partial write can leave a non-empty-but-truncated
+# file too.
+meta_json_is_valid() {
+  local file="$1"
+  [[ -s "$file" ]] && jq empty "$file" 2>/dev/null
+}
+
 # ============================================================================
 # Requirement Checks
 # ============================================================================
