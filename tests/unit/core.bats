@@ -256,3 +256,45 @@ setup() {
   [ "$status" -eq 0 ]
   [ "$output" = "pass" ]
 }
+
+# ----------------------------------------------------------------------------
+# meta_json_is_valid — the finalize-backup gate for #248 (mysql) / #242 (pg):
+# jq's E2BIG on a wide scrub_schema left a 0-byte .meta.json that a backup
+# still reported as successful. mysql_backup/pg_backup must refuse to
+# publish the backup unless this returns true.
+# ----------------------------------------------------------------------------
+
+@test "meta_json_is_valid: a well-formed JSON file is valid" {
+  local f="$BATS_TEST_TMPDIR/meta.json"
+  printf '{"host":"h","database":"d"}' > "$f"
+  run meta_json_is_valid "$f"
+  [ "$status" -eq 0 ]
+}
+
+@test "meta_json_is_valid: a 0-byte file (the #248/#242 E2BIG symptom) is invalid" {
+  local f="$BATS_TEST_TMPDIR/meta.json"
+  : > "$f"
+  run meta_json_is_valid "$f"
+  [ "$status" -ne 0 ]
+}
+
+@test "meta_json_is_valid: a missing file is invalid" {
+  run meta_json_is_valid "$BATS_TEST_TMPDIR/does-not-exist.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "meta_json_is_valid: truncated/malformed JSON is invalid" {
+  local f="$BATS_TEST_TMPDIR/meta.json"
+  printf '{"host":"h","datab' > "$f"
+  run meta_json_is_valid "$f"
+  [ "$status" -ne 0 ]
+}
+
+@test "meta_json_is_valid: a large-but-valid payload (past what --argjson could take on argv) is valid" {
+  local f="$BATS_TEST_TMPDIR/meta.json"
+  jq -n --argjson n 20000 \
+    '{scrub_schema: {tables: ([range($n) | {(tostring): {columns: {}}}] | add)}}' > "$f"
+  [ -s "$f" ]
+  run meta_json_is_valid "$f"
+  [ "$status" -eq 0 ]
+}

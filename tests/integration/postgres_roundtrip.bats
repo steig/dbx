@@ -43,6 +43,36 @@ teardown() {
   [ "$expected" = "$actual" ]
 }
 
+@test "postgres: backup on a wide schema writes valid, non-empty metadata (#242 regression)" {
+  # 15 tables x 1500 columns -> a scrub_schema JSON of roughly 1.6MB, well
+  # past the sizes that broke jq's --argjson on this host (verified: a
+  # bare `jq -n --argjson scrub_schema "$json" ...` on this exact payload
+  # fails with "argument list too long"). pg_backup already routes this
+  # through --slurpfile (fixed under #242); this locks the behavior in.
+  seed_postgres_wide_schema "$TEST_DB" 15 1500
+
+  dbx_run backup local-pg "$TEST_DB"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qi "backup complete"
+
+  local backup_file meta
+  backup_file=$(ls "$DBX_DATA_DIR/local-pg/$TEST_DB"/*.sql.zst | head -1)
+  meta="${backup_file}.meta.json"
+
+  # Not the 0-byte sidecar #242 reported.
+  [ -s "$meta" ]
+  jq empty "$meta"
+
+  # scrub_schema captured every wide table, not truncated.
+  [ "$(jq '.scrub_schema.tables | length' "$meta")" -eq 15 ]
+  [ "$(jq '.scrub_schema.tables.wide_1.columns | length' "$meta")" -eq 1500 ]
+
+  local expected actual
+  expected=$(jq -r '.checksums.sha256' "$meta")
+  actual=$(sha256sum "$backup_file" | cut -d' ' -f1)
+  [ "$expected" = "$actual" ]
+}
+
 @test "postgres: list shows the real on-disk filename (regression for #1)" {
   seed_postgres_db "$TEST_DB"
   dbx_run backup local-pg "$TEST_DB"

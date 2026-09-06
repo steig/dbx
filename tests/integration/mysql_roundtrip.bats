@@ -48,6 +48,36 @@ teardown() {
   [ "$(jq -r '.type' "$meta")" = "mysql" ]
 }
 
+@test "mysql: backup on a wide schema writes valid, non-empty metadata (#248)" {
+  # 18 tables x 900 columns -> a scrub_schema JSON of roughly 1.3MB, well
+  # past the sizes that broke jq's --argjson on this host (verified: a
+  # bare `jq -n --argjson scrub_schema "$json" ...` on this exact payload
+  # fails with "argument list too long"). mysql_backup must route it
+  # through --slurpfile instead and still finalize successfully.
+  seed_mysql_wide_schema "$TEST_DB" 18 900
+
+  dbx_run backup local-mysql "$TEST_DB"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qi "backup complete"
+
+  local backup_file meta
+  backup_file=$(ls "$DBX_DATA_DIR/local-mysql/$TEST_DB"/*.sql.zst | head -1)
+  meta="${backup_file}.meta.json"
+
+  # Not the 0-byte sidecar #248 reported.
+  [ -s "$meta" ]
+  jq empty "$meta"
+
+  # scrub_schema captured every wide table, not truncated.
+  [ "$(jq '.scrub_schema.tables | length' "$meta")" -eq 18 ]
+  [ "$(jq '.scrub_schema.tables.wide_1.columns | length' "$meta")" -eq 900 ]
+
+  local expected actual
+  expected=$(jq -r '.checksums.sha256' "$meta")
+  actual=$(sha256sum "$backup_file" | cut -d' ' -f1)
+  [ "$expected" = "$actual" ]
+}
+
 @test "mysql: restore round-trips data correctly" {
   seed_mysql_db "$TEST_DB" "CREATE TABLE widgets(id INT PRIMARY KEY, name VARCHAR(100));
   INSERT INTO widgets VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');"
