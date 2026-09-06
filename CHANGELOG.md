@@ -4,6 +4,8 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-09-05
+
 ### Security
 
 - **The wizard's Runs search no longer compiles caller-supplied regexes (#230).** `/api/audit-log?q=` handed the `q` string to `re.compile`, and stdlib `re` has no timeout — a seven-character pattern like `(a+)+$` backtracks catastrophically on a moderately long log line, pinning a server thread indefinitely; with `dbx serve --bind` exposed beyond loopback and one thread per request, repeated requests exhaust the pool. The 200-char length cap did not help, because backtracking is a function of pattern *structure*, not length (CodeQL: `py/regex-injection`). `q=` is now a case-insensitive literal substring match against the stringified entry — the feature is a log filter, not a regex playground — so every query string is valid (formerly-invalid patterns like `[[[[` return 200 and match literally) and regex metacharacters lose their meaning: `q=.*` matches rows containing the literal text `.*`. The length cap stays as a plain input bound, and the Runs view drops its now-dead invalid-regex retry fallback.
