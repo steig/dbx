@@ -401,13 +401,15 @@ mysql_backup() {
     }' > "$meta_file"; then
     rm -f "$_schema_tmp" "$meta_file"
     audit_backup "$host" "$database" "failure"
-    die "Failed to write backup metadata: $meta_file"
+    log_error "Failed to write backup metadata: $meta_file"
+    return 1
   fi
   rm -f "$_schema_tmp"
   if ! meta_json_is_valid "$meta_file"; then
     rm -f "$meta_file"
     audit_backup "$host" "$database" "failure"
-    die "Backup metadata is missing or invalid: $meta_file"
+    log_error "Backup metadata is missing or invalid: $meta_file"
+    return 1
   fi
   secure_file "$meta_file"
   [[ "$verbose" == "true" ]] && log_step_elapsed "$start_time" "wrote .meta.json"
@@ -419,7 +421,8 @@ mysql_backup() {
     cat "$err_file" >&2
     rm -f "$meta_file"
     audit_backup "$host" "$database" "failure"
-    die "Failed to move backup into place: $output_file"
+    log_error "Failed to move backup into place: $output_file"
+    return 1
   fi
 
   # Audit log
