@@ -8,6 +8,10 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 - **`dbx restores [list|prune]` finds and drops restored databases nobody uses.** Every `dbx restore` leaves a database in `postgres-dbx`/`mysql-dbx`, and nothing cleaned them up; one workstation had 65 of them holding 255 GB. `list` joins the live databases against the restore rows the audit log already kept and marks each one `keep` (newest restore of its source host/database, or younger than `--older-than D`, default 30), `prune` (older and superseded by a newer restore), or `untracked` (no restore record: tests, worktrees, hand-made). `prune` drops only the `prune` rows, asks first unless `-y` is given, and refuses without a terminal. Untracked databases are never dropped. Age counts from the restore, because neither engine records when a database was last queried. After each successful restore, dbx prints a one-line warning when superseded restores older than 30 days exist, and restore audit rows now carry `db_host`/`database` so the source no longer has to be guessed from the backup path. Covered by `tests/unit/restores.bats`.
 
+### Fixed
+
+- **The container image builds again: `mc` is now compiled from source (#259).** MinIO archived the open-source client and stopped serving every community download — each `dl.min.io` URL returns `410 Gone`, and the `minio/mc` images on Docker Hub and quay.io are gone — so the image build failed on every PR and the release workflow could not have published a GHCR image. A Go builder stage now fetches the archived `minio/mc` repo at the commit behind the same pinned release (`RELEASE.2025-08-13T08-35-41Z`, commit `7394ce0`), re-checks the SHA, and builds with `-mod=readonly` so every module is verified against `go.sum`. The stage cross-compiles on the build host, so the arm64 image doesn't compile Go under QEMU. The shipped `mc` is the same release as before.
+
 ## [0.41.1] - 2026-09-05
 
 ### Security
