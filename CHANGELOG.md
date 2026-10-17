@@ -4,6 +4,8 @@ All notable changes to dbx are documented here. Format follows [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-16
+
 ### Added
 
 - **`dbx restores [list|prune]` finds and drops restored databases nobody uses.** Every `dbx restore` leaves a database in `postgres-dbx`/`mysql-dbx`, and nothing cleaned them up; one workstation had 65 of them holding 255 GB. `list` joins the live databases against the restore rows the audit log already kept and marks each one `keep` (newest restore of its source host/database, or younger than `--older-than D`, default 30), `prune` (older and superseded by a newer restore), or `untracked` (no restore record: tests, worktrees, hand-made). `prune` drops only the `prune` rows, asks first unless `-y` is given, and refuses without a terminal. Untracked databases are never dropped. Age counts from the restore, because neither engine records when a database was last queried. After each successful restore, dbx prints a one-line warning when superseded restores older than 30 days exist, and restore audit rows now carry `db_host`/`database` so the source no longer has to be guessed from the backup path. Covered by `tests/unit/restores.bats`.
