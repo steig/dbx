@@ -16,6 +16,7 @@
 | `dbx scrub validate <host>` | Validate the host's scrub config. |
 | `dbx list [host] [database]` | List local backups. |
 | `dbx clean [host] [database] [--keep N] [--dry-run] [--older-than D]` | Retention sweep. |
+| `dbx restores [list\|prune] [--older-than D] [-y]` | List the databases restored into the local containers; `prune` drops restores older than `D` days (default 30) that a newer restore of the same source has superseded. Databases with no restore record are listed, never dropped. |
 | `dbx host add` | [Interactive wizard](wizards.md#dbx-host-add) for adding a host. |
 | `dbx storage add` | [Interactive wizard](wizards.md#dbx-storage-add) for cloud storage. |
 | `dbx vault set\|get\|delete\|list\|info` | Manage host [credentials](credentials.md). |

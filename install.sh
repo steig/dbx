@@ -44,6 +44,7 @@ MAN_PAGES=(
   dbx-storage.1
   dbx-scrub.1
   dbx-containers.1
+  dbx-restores.1
   dbx-completion.1
 )
 
@@ -235,7 +236,7 @@ main() {
 
   fetch_verified dbx
 
-  for lib in core.sh host.sh tunnel.sh encrypt.sh postgres.sh mysql.sh post_restore.sh scrub.sh scrub_strategies.sh notify.sh schedule.sh storage.sh update.sh wizard.sh completion.sh; do
+  for lib in core.sh host.sh tunnel.sh encrypt.sh postgres.sh mysql.sh post_restore.sh restores.sh scrub.sh scrub_strategies.sh notify.sh schedule.sh storage.sh update.sh wizard.sh completion.sh; do
     fetch_verified "lib/$lib"
   done
 
