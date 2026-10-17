@@ -13,8 +13,8 @@
 class Dbx < Formula
   desc "Database backup and restore CLI for PostgreSQL, MySQL, and MariaDB"
   homepage "https://github.com/steig/dbx"
-  url "https://github.com/steig/dbx/archive/refs/tags/v0.41.0.tar.gz"
-  sha256 "531e54649a226c63dade644a2da480fec6d8b69204fd7032068dbc7d7fc16b73"
+  url "https://github.com/steig/dbx/archive/refs/tags/v0.42.0.tar.gz"
+  sha256 "39492447487514e87de4292a1d018dd6a92e2a8454fa7ef743ca63038d58365c"
   license "MIT"
   head "https://github.com/steig/dbx.git", branch: "main"
 
