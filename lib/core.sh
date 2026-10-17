@@ -1021,11 +1021,15 @@ audit_restore() {
   local target_db="$2"
   local outcome="$3"
   local duration="${4:-}"
+  local host="${5:-}"
+  local database="${6:-}"
 
   audit_log "restore" "$outcome" \
     "file" "$file" \
     "target_db" "$target_db" \
-    "duration_sec" "$duration"
+    "duration_sec" "$duration" \
+    "db_host" "$host" \
+    "database" "$database"
 }
 
 # Audit helper for vault operations

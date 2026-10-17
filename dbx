@@ -15,6 +15,7 @@ VERSION="0.41.1"
 #   dbx test <host>
 #   dbx list [host] [database]
 #   dbx clean [--keep N] [--dry-run] [--older-than D]
+#   dbx restores [list|prune] [--older-than D] [-y]
 #   dbx verify [backup-file]
 #   dbx analyze <host> <database>
 #   dbx query <host> [database]
@@ -41,6 +42,7 @@ source "$LIB_DIR/encrypt.sh"
 source "$LIB_DIR/postgres.sh"
 source "$LIB_DIR/mysql.sh"
 source "$LIB_DIR/post_restore.sh"
+source "$LIB_DIR/restores.sh"
 source "$LIB_DIR/scrub.sh"
 source "$LIB_DIR/scrub_strategies.sh"
 source "$LIB_DIR/notify.sh"
@@ -323,8 +325,8 @@ cmd_restore() {
   log_info "Restoring: $(basename "$backup_file")"
   log_info "Target database: $target_name"
 
-  # Baseline: last successful restore's duration. The restore audit row
-  # doesn't carry db_host/database, so we don't filter on them — this is
+  # Baseline: last successful restore's duration. Older restore audit rows
+  # don't carry db_host/database, so we don't filter on them — this is
   # a global "your last restore took N" hint, not per-source-DB.
   local last_dur
   last_dur=$(audit_last_duration "restore" "" "")
@@ -344,7 +346,7 @@ cmd_restore() {
   _restore_scrub_gate
 
   local restore_dur=$(($(date +%s) - restore_start))
-  audit_restore "$backup_file" "$target_name" "success" "$restore_dur"
+  audit_restore "$backup_file" "$target_name" "success" "$restore_dur" "$host" "$database"
 
   echo ""
   # On-disk size of the source backup file (not the restored DB) — gives
@@ -353,6 +355,7 @@ cmd_restore() {
   src_size=$(file_size_bytes "$backup_file")
   log_success "Database restored as: $target_name in $(format_duration "$restore_dur") — $(human_size "$src_size") source"
   notify_restore_success "$backup_file" "$target_name"
+  restores_nudge
 
   _restore_cleanup_download
 }
@@ -2944,6 +2947,7 @@ ${BOLD}COMMANDS${NC}
   ${CYAN}verify${NC} [backup]               Verify backup checksum & integrity
   ${CYAN}list${NC} [host] [db]              List available backups
   ${CYAN}clean${NC} [--keep N|--older-than D]  Prune old backups
+  ${CYAN}restores${NC} [list|prune]         List / drop restored databases nobody uses
   ${CYAN}query${NC} <host> [db]             Interactive DB shell
   ${CYAN}analyze${NC} <host> <db>           Inspect tables & build exclusion list
   ${CYAN}build-image${NC} [--from-backup F] Pre-build a custom PG image for third-party extensions
@@ -3073,6 +3077,119 @@ EOF
 }
 
 # ============================================================================
+# Restores command — list / prune databases restored into the containers
+# ============================================================================
+
+cmd_restores() {
+  local action="list"
+  if [[ $# -gt 0 && "$1" != -* ]]; then
+    action="$1"
+    shift
+  fi
+  local days="$RESTORES_DEFAULT_DAYS" assume_yes=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --older-than) days="${2:-}"; shift 2 || die "--older-than needs a number of days" ;;
+      -y|--yes)     assume_yes=true; shift ;;
+      -h|--help)    action="help"; shift ;;
+      *)            die "Unknown option: $1 (see 'dbx restores --help')" ;;
+    esac
+  done
+  [[ "$days" =~ ^[0-9]+$ ]] || die "--older-than takes a whole number of days, got: $days"
+
+  case "$action" in
+    help)
+      cat <<EOF
+Usage: dbx restores [list|prune] [--older-than D] [-y]
+
+  list            Show databases in ${POSTGRES_CONTAINER} / ${MYSQL_CONTAINER} with
+                  size, age and the backup they were restored from (default)
+  prune [-y]      Drop superseded restores: older than D days AND a newer
+                  restore of the same host/database exists. Asks first
+                  unless -y is given.
+
+  --older-than D  Age threshold in days (default: ${RESTORES_DEFAULT_DAYS})
+
+Untracked databases (no 'dbx restore' record in the audit log) are listed
+but never pruned.
+EOF
+      return 0
+      ;;
+  esac
+  require_docker
+  case "$action" in
+    list|ls) _restores_list "$days" ;;
+    prune)   _restores_prune "$days" "$assume_yes" ;;
+    *) die "Unknown restores action: $action (use: list, prune)" ;;
+  esac
+}
+
+# Print one table row per classified database (restores_rows format on stdin).
+_restores_print_rows() {
+  local now engine name bytes epoch src status age
+  now=$(date +%s)
+  printf '%-10s %-9s %-36s %8s %6s  %s\n' "STATUS" "ENGINE" "DATABASE" "SIZE" "AGE" "SOURCE"
+  while IFS=$'\t' read -r engine name bytes epoch src status; do
+    if [[ "$epoch" == "0" ]]; then age="-"; else age="$(( (now - epoch) / 86400 ))d"; fi
+    printf '%-10s %-9s %-36s %8s %6s  %s\n' "$status" "$engine" "$name" "$(human_size "$bytes")" "$age" "$src"
+  done
+}
+
+_restores_list() {
+  local days="$1" rows
+  rows=$(restores_rows "$days")
+  if [[ -z "$rows" ]]; then
+    log_info "No databases in ${POSTGRES_CONTAINER} or ${MYSQL_CONTAINER} (or neither is running)."
+    return 0
+  fi
+  _restores_print_rows <<< "$rows"
+
+  local summary count bytes
+  summary=$(awk -F'\t' '$6 == "prune" {c++; b += $3} END {if (c) printf "%d\t%.0f\n", c, b}' <<< "$rows")
+  echo ""
+  if [[ -n "$summary" ]]; then
+    IFS=$'\t' read -r count bytes <<< "$summary"
+    log_info "$count prunable ($(human_size "$bytes")). Run 'dbx restores prune --older-than $days' to drop them."
+  else
+    log_info "Nothing to prune at --older-than $days."
+  fi
+}
+
+_restores_prune() {
+  local days="$1" assume_yes="$2" rows
+  rows=$(restores_rows "$days" | awk -F'\t' '$6 == "prune"')
+  if [[ -z "$rows" ]]; then
+    log_info "Nothing to prune: no superseded restores older than ${days}d."
+    return 0
+  fi
+  _restores_print_rows <<< "$rows"
+  echo ""
+
+  local count
+  count=$(wc -l <<< "$rows" | tr -d ' ')
+  if [[ "$assume_yes" != "true" ]]; then
+    [[ -t 0 ]] || die "Not a terminal — re-run with -y to drop these $count database(s)."
+    local reply
+    read -r -p "Drop these $count database(s)? This cannot be undone. [y/N] " reply
+    [[ "$reply" =~ ^[Yy] ]] || { log_info "Nothing dropped."; return 0; }
+  fi
+
+  local engine name bytes epoch src status dropped=0 failed=0
+  while IFS=$'\t' read -r engine name bytes epoch src status; do
+    if restores_drop "$engine" "$name"; then
+      log_success "Dropped $name ($(human_size "$bytes"))"
+      dropped=$((dropped + 1))
+    else
+      log_warn "Could not drop $name (still connected?)"
+      failed=$((failed + 1))
+    fi
+  done <<< "$rows"
+  log_info "Dropped $dropped, failed $failed."
+  [[ "$failed" -eq 0 ]]
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -3134,6 +3251,9 @@ main() {
       ;;
     containers|container)
       cmd_containers "$@"
+      ;;
+    restores)
+      cmd_restores "$@"
       ;;
     help|--help|-h)
       cmd_help

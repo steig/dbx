@@ -1,0 +1,67 @@
+.TH DBX-RESTORES 1 "2026-09-05" "dbx 0.41.1" "User Commands"
+.SH NAME
+dbx-restores \- list and prune databases restored into the local containers
+.SH SYNOPSIS
+.B dbx restores
+.RB [ list | prune ]
+.RB [ \-\-older\-than
+.IR D ]
+.RB [ \-y ]
+.SH DESCRIPTION
+Every
+.B dbx restore
+leaves a database behind in
+.B postgres-dbx
+or
+.BR mysql-dbx ,
+and they add up.
+.B dbx restores
+joins the databases in those containers against the restore records in the
+audit log
+.RB ( ~/.local/share/dbx/audit.log )
+and shows which ones a newer restore has superseded.
+.PP
+Each database gets a status:
+.TP
+.B keep
+The newest restore of its source host/database, or younger than
+.I D
+days.
+.TP
+.B prune
+Older than
+.I D
+days, and a newer restore of the same source exists.
+.TP
+.B untracked
+No restore record: created by tests, worktrees or by hand. Listed, never
+pruned.
+.SH ACTIONS
+.TP
+.B list
+(default) Show every database with its status, size, age and source.
+.TP
+.B prune " [" \-y ]
+Drop the databases marked
+.BR prune .
+Prompts for confirmation unless
+.B \-y
+(or
+.BR \-\-yes )
+is given; without a terminal it refuses to drop anything unless
+.B \-y
+is given.
+.SH OPTIONS
+.TP
+.BI \-\-older\-than " D"
+Age threshold in days (default 30).
+.SH NOTES
+Age counts from the restore, not from last use: Postgres and MySQL do not
+record when a database was last queried.
+.PP
+After each successful restore, dbx prints a one-line warning when superseded
+restores older than 30 days exist.
+.SH SEE ALSO
+.BR dbx (1),
+.BR dbx-restore (1),
+.BR dbx-containers (1)

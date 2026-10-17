@@ -37,6 +37,7 @@ host
 wizard
 list
 clean
+restores
 vault
 schedule
 storage
@@ -64,6 +65,7 @@ _dbx_subactions() {
     storage)    printf '%s\n' upload download sync info add list delete ;;
     scrub)      printf '%s\n' init check validate ;;
     containers) printf '%s\n' list restart start stop down ;;
+    restores)   printf '%s\n' list prune ;;
     host)       printf '%s\n' add ;;
     completion) printf '%s\n' bash zsh fish ;;
     *) ;;
@@ -85,6 +87,8 @@ _dbx_flags() {
         --from-remote --recreate-container --keep-download ;;
     clean)
       printf '%s\n' --keep --dry-run --older-than ;;
+    restores)
+      printf '%s\n' --older-than --yes ;;
     build-image)
       printf '%s\n' --from-backup --extensions ;;
     schedule)
@@ -336,6 +340,12 @@ dbx_complete() {
     containers|container)
       if [[ $count -eq 2 ]]; then
         _dbx_subactions containers
+      fi
+      ;;
+
+    restores)
+      if [[ $count -eq 2 ]]; then
+        _dbx_subactions restores
       fi
       ;;
 
